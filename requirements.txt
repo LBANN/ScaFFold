@@ -8,6 +8,7 @@ wandb>=0.19.6
 open3d>=0.18.0
 PyYAML>=6.0.2
 mpi4py==4.0.2 --no-binary mpi4py
+distconv @ git+https://github.com/LBANN/DistConv.git
 
 # cuda
 #     torch==2.7.1+cu126
