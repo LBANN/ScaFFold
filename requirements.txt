@@ -1,5 +1,5 @@
 --index-url https://pypi.org/simple
-hpc-launcher>=1.0.3
+hpc-launcher>=1.0.4
 matplotlib>=3.9.4
 numpy>=1.26.4
 numba>=0.60.0
