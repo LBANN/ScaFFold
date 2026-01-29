@@ -295,7 +295,11 @@ class PyTorchTrainer(BaseTrainer):
                         masks_pred_dc = self.model(images_dc)
 
                         # Convert predictions for loss
-                        if images.size(0) < ps.num_shards:
+                        if isinstance(ps.num_shards, tuple) and len(ps.num_shards) == 1:
+                            n_shards = ps.num_shards[0]
+                        else:
+                            n_shards = ps.num_shards
+                        if images.size(0) < n_shards:
                             # For small batches (e.g., N=1 with dc_num_shards=2), replicate outputs
                             masks_pred = masks_pred_dc.to_replicate()
                             labels_for_loss = true_masks
@@ -304,7 +308,9 @@ class PyTorchTrainer(BaseTrainer):
                             masks_pred = masks_pred_dc.to_ddp()
                             dt_labels = distribute_tensor(
                                 true_masks,
-                                device_mesh=ps.device_mesh["dc"],
+                                device_mesh=ps.device_mesh[
+                                    f"dc{self.config.shard_dim + 2}"
+                                ],
                                 placements=[Shard(0)],
                             )
                             labels_for_loss = dt_labels.to_local()
@@ -419,11 +425,15 @@ class PyTorchTrainer(BaseTrainer):
                             true_masks_ddp = (
                                 DTensor.from_local(
                                     true_masks_dp,
-                                    device_mesh=ps.device_mesh["dc"],
+                                    device_mesh=ps.device_mesh[
+                                        f"dc{self.config.shard_dim + 2}"
+                                    ],
                                     placements=[Replicate()],
                                 )
                                 .redistribute(
-                                    device_mesh=ps.device_mesh["dc"],
+                                    device_mesh=ps.device_mesh[
+                                        f"dc{self.config.shard_dim + 2}"
+                                    ],
                                     placements=[Shard(0)],
                                 )
                                 .to_local()

@@ -257,14 +257,22 @@ class CheckpointManager:
     def _write_to_disk(state_dict, last_path, best_path, is_best):
         """Worker function to perform actual disk I/O."""
         # Save 'last'
-        torch.save(state_dict, last_path)
+        try:
+            torch.save(state_dict, last_path)
+        except Exception as e:
+            print("Saving checkpoint failed. Continuing...")
+            print(e)
         # Save 'best' (copy logic)
         if is_best:
             # Copy is often faster than re-serializing
             if last_path.exists():
                 shutil.copyfile(last_path, best_path)
             else:
-                torch.save(state_dict, best_path)
+                try:
+                    torch.save(state_dict, best_path)
+                except Exception as e:
+                    print("Saving checkpoint failed. Continuing...")
+                    print(e)
 
     def _transfer_dict_to_cpu(self, obj):
         """Recursively move tensors to CPU."""

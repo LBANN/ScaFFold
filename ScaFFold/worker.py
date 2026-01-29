@@ -239,7 +239,8 @@ def main(kwargs_dict: dict = {}):
     outfile_path = trainer.outfile_path
     train_data = np.genfromtxt(outfile_path, dtype=float, delimiter=",", names=True)
     total_train_time = train_data["epoch_duration"].sum()
-    total_epochs = train_data["epoch"][-1]
+    epochs = np.atleast_1d(train_data["epoch"])
+    total_epochs = int(epochs[-1])
     log.info(
         f"Benchmark run at scale {config.problem_scale} complete. \n\
         Trained to >= 0.95 validation dice score in {total_train_time:.2f} seconds, {total_epochs} epochs."
