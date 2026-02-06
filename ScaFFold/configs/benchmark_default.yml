@@ -11,6 +11,7 @@ batch_size: 1                      # Batch sizes for each vol size.
 optimizer: "ADAM"                  # "ADAM" is preferred option, otherwise training defautls to RMSProp.
 num_shards: 2                      # DistConv param: number of shards to divide the tensor into
 shard_dim: 2                       # DistConv param: dimension on which to shard
+checkpoint_interval: 10            # Checkpoint every C epochs. More frequent checkpointing can be very expensive on slow filesystems.
 
 # Internal/dev use only
 variance_threshold: 0.15           # Variance threshold for valid fractals. Default is 0.15.
