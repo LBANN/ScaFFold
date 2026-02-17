@@ -39,7 +39,7 @@ def _rewrite_config_and_add_restart(cli_args: List[str]) -> List[str]:
     new_args = []
     skip_next = False
 
-    # Args to strip because they trigger new directory creation
+    # Args to strip because they trigger new directory creation or shouldn't change
     args_to_remove = {"--base-run-dir", "--job-name"}
 
     for i, tok in enumerate(cli_args):
@@ -90,61 +90,29 @@ def _bash_array(var_name: str, argv: List[str], var_subs: dict[str, str]) -> str
 
 
 def _get_env_setup() -> str:
-    """Return the bash block that sets up the environment (modules, LD_PRELOAD, etc)."""
-    # Dynamically determine the current virtualenv path
+    """Return the bash block that sets up the environment based on your stable configuration."""
+    # Dynamically determine the current virtualenv path to reuse the active one
     venv_path = sys.prefix
 
     return f"""
 # --- Begin Environment Setup ---
 # Load Modules
 if command -v module &> /dev/null; then
-    module load rocm/6.4.2 rccl/fast-env-slows-mpi libfabric
+    module load rocm/6.4.2 rccl/fast-env-slows-mpi
 fi
 
 # Activate Virtual Environment
+# (Using the one active when this script was generated)
 if [ -f "{venv_path}/bin/activate" ]; then
     source "{venv_path}/bin/activate"
 else
     echo "WARNING: Could not find venv activate script at {venv_path}/bin/activate"
 fi
 
-# 1. Define the path to the ROCm LLVM OpenMP library
-ROCM_OMP_LIB="/opt/rocm-6.4.2/llvm/lib/libomp.so"
+# Environment variables
+export SPINDLE_FLUXOPT=off
+export LD_PRELOAD=/opt/rocm-6.4.2/llvm/lib/libomp.so
 
-# 2. Check if it exists before proceeding
-if [ ! -f "$ROCM_OMP_LIB" ]; then
-    echo "ERROR: Could not find OpenMP at $ROCM_OMP_LIB"
-    # Fallback search if the standard path is wrong
-    ROCM_OMP_LIB=$(find /opt/rocm-6.4.2 -name libomp.so | head -n 1)
-    echo "Found alternative at: $ROCM_OMP_LIB"
-fi
-if [ -z "$ROCM_OMP_LIB" ]; then
-    echo "CRITICAL: Unable to find libomp.so in /opt/rocm-6.4.2. Aborting."
-    exit 1
-fi
-
-# 3. Force the dynamic linker to load this specific library first
-echo "Forcing Preload of: $ROCM_OMP_LIB"
-export LD_PRELOAD=$ROCM_OMP_LIB
-
-# Setup Torch Library Path
-SITE_PACKAGES=$(python3 -c "import sysconfig; print(sysconfig.get_path('purelib'))")
-TORCH_LIB_PATH="$SITE_PACKAGES/torch/lib"
-export LD_LIBRARY_PATH=$TORCH_LIB_PATH:$LD_LIBRARY_PATH
-
-# Setup System Libfabric
-SYSTEM_LIBFABRIC=$(ls /opt/cray/libfabric/2.1/lib64/libfabric.so.1 | head -n 1)
-
-if [ -z "$SYSTEM_LIBFABRIC" ]; then
-    echo "Error: Could not find system libfabric!"
-    exit 1
-fi
-
-echo "Forcing preload of system Libfabric: $SYSTEM_LIBFABRIC"
-export LD_PRELOAD=$SYSTEM_LIBFABRIC:$LD_PRELOAD
-
-export NCCL_NET=Socket
-export NCCL_SOCKET_IFNAME=hsi0
 export PROFILE_TORCH=ON
 # --- End Environment Setup ---
 """
@@ -180,20 +148,25 @@ GPUS_PER_PROC="1" # Defaulting to 1, adjust if needed
 # Additional torchrun-hpc arguments (e.g. --launcher-args for specific scheduler flags)
 LAUNCHER_ADDITIONAL_ARGS=''
 
-LAUNCHER_ARGS="-N $NODES -n $TASKS_PER_NODE --gpus-per-proc $GPUS_PER_PROC $LAUNCHER_ADDITIONAL_ARGS"
-
-IFS=' ' read -r -a LAUNCHER_ARR <<< "$LAUNCHER_ARGS"
+# Use a proper Bash array for arguments to handle paths with spaces safely
+LAUNCHER_ARGS=(
+    -l "$RUN_DIR"
+    -N "$NODES" 
+    -n "$TASKS_PER_NODE" 
+    --gpus-per-proc "$GPUS_PER_PROC"
+    $LAUNCHER_ADDITIONAL_ARGS
+)
 
 # Exact Python command to rerun the CLI
 {py_array_decl}
 
 echo "Restarting in $RUN_DIR via torchrun-hpc:"
-echo "  torchrun-hpc $LAUNCHER_ARGS ..."
+echo "  torchrun-hpc ${{LAUNCHER_ARGS[*]}} ..."
 printf '  python cmd: '; printf '%q ' "${{PY[@]}}"; echo
 
 cd "$RUN_DIR"
 # Invoking torchrun-hpc to handle scheduler interaction (Flux/Slurm)
-exec torchrun-hpc "${{LAUNCHER_ARR[@]}}" "${{PY[@]}}"
+exec torchrun-hpc "${{LAUNCHER_ARGS[@]}}" "${{PY[@]}}"
 """
 
 
