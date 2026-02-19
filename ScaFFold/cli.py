@@ -79,6 +79,11 @@ def main():
         help="Determines dataset resolution and number of UNet layers.",
     )
     generate_fractals_parser.add_argument(
+        "--n-categories",
+        type=int,
+        help="Number of fractal categories present in the dataset.",
+    )
+    generate_fractals_parser.add_argument(
         "--fract-base-dir",
         type=str,
         help="Base directory for fractal IFS and instances.",
@@ -114,7 +119,6 @@ def main():
     benchmark_parser.add_argument(
         "--n-categories",
         type=int,
-        nargs="+",
         help="Number of fractal categories present in the dataset.",
     )
     benchmark_parser.add_argument(

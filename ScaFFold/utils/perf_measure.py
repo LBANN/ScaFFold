@@ -27,8 +27,9 @@ if CALI_PERF_ENV_VAR in os.environ:
         from pycaliper.instrumentation import begin_region, end_region
 
         _CALI_PERF_ENABLED = True
-    except Exception:
+    except Exception as e:
         print("User requested Caliper annotations, but could not import Caliper")
+        print(f"Exception: {e}")
 elif (
     TORCH_PERF_ENV_VAR in os.environ
     and os.environ.get(TORCH_PERF_ENV_VAR).lower() != "off"

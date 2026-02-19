@@ -40,7 +40,7 @@ from ScaFFold.utils.distributed import get_local_rank, get_world_rank, get_world
 
 # Local
 from ScaFFold.utils.evaluate import evaluate
-from ScaFFold.utils.perf_measure import begin_code_region, end_code_region
+from ScaFFold.utils.perf_measure import adiak_value, begin_code_region, end_code_region
 from ScaFFold.utils.utils import gather_and_print_mem
 
 
@@ -404,9 +404,17 @@ class PyTorchTrainer(BaseTrainer):
             end_code_region("warmup")
             self.log.info(f"Done warmup. Took {int(time.time() - start_warmup)}s")
 
+        epoch = 1
+        dice_score_train = 0
         with open(self.outfile_path, "a", newline="") as outfile:
             start = time.time()
-            for epoch in range(self.start_epoch, self.config.epochs + 1):
+            while dice_score_train < self.config.target_dice:
+                if self.config.epochs != -1 and epoch > self.config.epochs:
+                    print(
+                        f"Maxmimum epochs reached '{self.config.epochs}'. Concluding training early (may have not converged)."
+                    )
+                    break
+
                 # DistConv ParallelStrategy
                 ps = getattr(self.config, "_parallel_strategy", None)
                 if ps is None:
@@ -427,10 +435,15 @@ class PyTorchTrainer(BaseTrainer):
                     self.val_loader.sampler.set_epoch(epoch)
                 self.model.train()
 
+                estr = (
+                    f"{epoch}"
+                    if self.config.epochs == -1
+                    else f"{epoch}/{self.config.epochs}"
+                )
                 with tqdm(
                     total=self.n_train // self.world_size,
                     desc=f"({os.path.basename(self.config.run_dir)}) \
-                            Epoch {epoch}/{self.config.epochs}",
+                            Epoch {estr}",
                     unit="img",
                     disable=True if self.world_rank != 0 else False,
                 ) as pbar:
@@ -644,14 +657,14 @@ class PyTorchTrainer(BaseTrainer):
                 #
                 begin_code_region("checkpoint")
 
+                # Checkpoint only if at a checkpoint_interval epoch
                 if epoch % self.config.checkpoint_interval == 0:
                     extras = {"train_mask_values": self.train_set.mask_values}
                     self.checkpoint_manager.save_checkpoint(epoch, val_loss_avg, extras)
 
                 end_code_region("checkpoint")
 
-                if val_score >= 0.95:
-                    self.log.info(
-                        f"val_score of {val_score} is > threshold of 0.95. Benchmark run complete. Wrapping up..."
-                    )
-                    return 0
+                dice_score_train = val_score
+                epoch += 1
+
+        adiak_value("final_epochs", epoch)

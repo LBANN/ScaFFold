@@ -17,7 +17,7 @@ checkpoint_interval: 10            # Checkpoint every C epochs. More frequent ch
 variance_threshold: 0.15           # Variance threshold for valid fractals. Default is 0.15.
 n_fracts_per_vol: 3                # Number of fractals overlaid in each volume. Default is 3.
 val_split: 25                      # In percent.
-epochs: -1                         # Number of training epochs.
+epochs: 10                         # Number of training epochs.
 learning_rate: .0001               # Learning rate for training.
 disable_scheduler: 1               # If 1, disable scheduler during training to use constant LR.
 more_determinism: 0                # If 1, improve model training determinism.

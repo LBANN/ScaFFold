@@ -72,6 +72,7 @@ class Config:
         self.dataset_reuse_enforce_commit_id = config_dict[
             "dataset_reuse_enforce_commit_id"
         ]
+        self.target_dice = config_dict["target_dice"]
         self.checkpoint_interval = config_dict["checkpoint_interval"]
 
 
