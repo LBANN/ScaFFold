@@ -13,7 +13,6 @@ ml cce/21.0.0 cray-mpich/9.1.0 rocm/7.1.0 rccl/fast-env-slows-mpi
 
 # Use ccl plugin that we manually built with install-rccl.sh
 export NCCL_NET_PLUGIN=../aws-ofi-nccl.git/install/lib/librccl-net.so
-export NCCL_NET="AWS Libfabric"
 
 torchrun-hpc -N 1 -n 1 $(which scaffold) generate_fractals -c $(pwd)/ScaFFold/configs/benchmark_default.yml
 

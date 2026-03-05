@@ -23,3 +23,4 @@ for f in *.so*; do
     echo "STILL NEEDS $OLD -> $f"
   fi
 done
+cd -

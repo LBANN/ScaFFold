@@ -15,9 +15,6 @@ ml cce/21.0.0 cray-mpich/9.1.0 rocm/7.1.0 rccl/fast-env-slows-mpi
 # (2) Removing libmpi may cause segfault on mpi4py import
 export LD_PRELOAD="/opt/rocm-7.1.0/llvm/lib/libomp.so /opt/cray/pe/mpich/9.1.0/ofi/gnu/11.2/lib/libmpi_gnu.so.12"
 
-# Ensure using libfabric. NCCL_NET_PLUGIN should be unecessary to set for WCI wheel.
-export NCCL_NET="AWS Libfabric"
-
 torchrun-hpc -N 1 -n 1 $(which scaffold) generate_fractals -c $(pwd)/ScaFFold/configs/benchmark_default.yml
 
 # Uncomment if you want torch profiling
