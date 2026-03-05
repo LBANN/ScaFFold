@@ -51,7 +51,7 @@ dependencies = [
   "wandb>=0.19.6",
   "open3d>=0.18.0",
   "PyYAML>=6.0.2",
-  "distconv @ git+https://github.com/LBANN/DistConv.git",
+  "distconv @ git+https://github.com/LBANN/DistConv.git@232cba6",
 ]
 requires-python = ">=3.9"
 
@@ -60,16 +60,16 @@ profiling = [
   "pybind11>=3.0.0"
 ]
 cuda = [
-    "torch==2.8.0+cu126",
-    "mpi4py==4.0.2",
+    "torch==2.10.0+cu129",
+    "mpi4py==4.1.1",
 ]
 rocm = [
-    "torch==2.8.0+rocm6.4",
-    "mpi4py==4.0.2",
+    "torch==2.10.0+rocm7.1",
+    "mpi4py==4.1.1",
 ]
 rocmwci = [
-    "torch==2.8.0+rocm642",
-    "mpi4py==4.1.1.dev0+mpich.8.1.32",
+    "torch==2.10.0+rocm710",
+    "mpi4py==4.1.1+mpich.9.1.0",
 ]
 
 [project.entry-points.console_scripts]

@@ -8,8 +8,6 @@
 #SBATCH -A fractale
 #SBATCH -perl
 
-ml cuda/12.6.0 gcc/12.1.1 mvapich2/2.3.7
-
 . .venvs/scaffoldvenv-matrix/bin/activate
 
 export LD_LIBRARY_PATH=/usr/lib64:$LD_LIBRARY_PATH

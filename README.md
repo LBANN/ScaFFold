@@ -29,25 +29,24 @@ The model is trained from a random initialization until convergence, which is de
 1. Clone the repository:  
     `git clone https://github.com/LBANN/ScaFFold.git && cd ScaFFold`
 
+1. Build the ccl plugin (if not using WCI wheel)
+    `. scripts/install-rccl.sh`
+
 1. Create and activate a python venv for running the benchmark:  
     `ml load python/3.11.5 && python3 -m venv .venvs/scaffoldvenv && source .venvs/scaffoldvenv/bin/activate && pip install --upgrade pip`
 
 1. Necessary LLNL settings:
     - CUDA (matrix):
-        1. `ml cuda/12.6.0 gcc/12.1.1 mvapich2/2.3.7`
+        1. `ml cuda/12.9.1 gcc/13.3.1 mvapich2/2.3.7`
         1. `export LD_LIBRARY_PATH=/usr/lib64:$LD_LIBRARY_PATH`
     - ROCm (elcap):
-        1. `ml load rocm/6.4.2 rccl/fast-env-slows-mpi`
-            - If using generic wheel:
-                1. `export LD_LIBRARY_PATH=/opt/cray/pe/cce/20.0.0/cce/x86_64/lib:$LD_LIBRARY_PATH`
-                1. `export LD_LIBRARY_PATH=/collab/usr/global/tools/rccl/toss_4_x86_64_ib_cray/rocm-6.4.1/install/lib/:$LD_LIBRARY_PATH` # Necessary to use libfabric plugin (Only necessary if using generic install, wci already links correctly)
+        1. `ml cce/21.0.0 cray-mpich/9.1.0 rocm/7.1.0 rccl/fast-env-slows-mpi`
             - If using WCI wheel:
-                1. `export LD_LIBRARY_PATH=/opt/cray/pe/cce/20.0.0/cce-clang/x86_64/lib/:$LD_LIBRARY_PATH` # for libomp.so
-                1. `export SPINDLE_FLUXOPT=off` # Avoid spindle error
+                1. `export LD_PRELOAD=/opt/rocm-7.1.0/llvm/lib/libomp.so` # for libomp.so
 
 1. Install the benchmark in the python venv:
-    - CUDA: `pip install --no-binary=mpi4py .[cuda] --prefix=.venvs/scaffoldvenv --extra-index-url https://download.pytorch.org/whl/cu126 2>&1 | tee install.log`
-    - ROCm (generic): `pip install --no-binary=mpi4py .[rocm] --prefix=.venvs/scaffoldvenv --extra-index-url https://download.pytorch.org/whl/rocm6.4 2>&1 | tee install.log`
+    - CUDA: `pip install --no-binary=mpi4py .[cuda] --prefix=.venvs/scaffoldvenv --extra-index-url https://download.pytorch.org/whl/cu129 2>&1 | tee install.log`
+    - ROCm (generic): `pip install --no-binary=mpi4py .[rocm] --prefix=.venvs/scaffoldvenv --extra-index-url https://download.pytorch.org/whl/rocm7.1 2>&1 | tee install.log`
     - ROCm (LLNL): `pip install .[rocmwci] --prefix=.venvs/scaffoldvenv 2>&1 | tee install.log`
 
 
@@ -227,8 +226,8 @@ make && make install
 git clone https://github.com/LLNL/Caliper.git
 cd Caliper
 mkdir pybuild && cd pybuild
-ml rocm/6.4.0
-ml cuda/12.6.0
+ml rocm/7.1.0
+ml cuda/12.9.1
 cmake -DWITH_PYTHON_BINDINGS=ON \
    -DWITH_ROCPROFILER=ON \
    -DWITH_CUPTI=ON \
