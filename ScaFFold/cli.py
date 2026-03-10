@@ -156,6 +156,16 @@ def main():
         type=str,
         help="Resume execution in this specific directory. Overrides --base-run-dir.",
     )
+    benchmark_parser.add_argument(
+        "--num-shards",
+        type=int,
+        help="DistConv param: number of shards to divide the tensor into. It's best to choose the fewest ranks needed to fit one sample in GPU memory, since that keeps communication at a minimum",
+    )
+    benchmark_parser.add_argument(
+        "--epochs",
+        type=int,
+        help="Number of training epochs.",
+    )
 
     comm = MPI.COMM_WORLD
     rank = comm.Get_rank()
