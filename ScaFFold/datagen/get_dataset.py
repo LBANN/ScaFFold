@@ -33,7 +33,6 @@ INCLUDE_KEYS = [
     "n_categories",
     "n_instances_used_per_fractal",
     "problem_scale",
-    "unet_bottleneck_dim",
     "seed",
     "variance_threshold",
     "n_fracts_per_vol",
