@@ -25,7 +25,6 @@ from math import ceil
 from pathlib import Path
 
 import numpy as np
-import open3d
 from mpi4py import MPI
 
 from ScaFFold.datagen.generate_fractal_points import generate_fractal_points
@@ -170,33 +169,18 @@ def main(config: Config):
         # Generate points
         points = generate_single_instance(config.point_num, params)
 
-        # Force point_data to be contiguous -- prevents possible segfaults in later Vector3dVector call from non-contiguous arrays
+        # Force point_data to be contiguous
         points_contiguous = np.ascontiguousarray(points, dtype=DEFAULT_NP_DTYPE)
 
-        # Create o3d PointCloud object
-        pointcloud = open3d.geometry.PointCloud()
-
-        # Populate PointCloud points attribute with point_data
-        pointcloud.points = open3d.utility.Vector3dVector(points_contiguous)
-
-        # Construct the long path and short filename
+        # Construct the output path
         out_dir = Path(instance_write_dir) / f"{category:06d}"
-        filename = f"{category:06d}_{instance:04d}.ply"
+        filename = f"{category:06d}_{instance:04d}.npy"
 
         # Ensure parent directory exists
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        # Save current working directory so we can restore it later
-        cwd = os.getcwd()
-        try:
-            # Change to the output directory
-            os.chdir(out_dir)
-
-            # Write with short relative path
-            open3d.io.write_point_cloud(filename, pointcloud)
-        finally:
-            # Always restore the working directory
-            os.chdir(cwd)
+        # Save array to out_dir
+        np.save(out_dir / filename, points_contiguous)
 
     end_time = time.time()
     total_time = end_time - start_time

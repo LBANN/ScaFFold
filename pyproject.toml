@@ -49,7 +49,6 @@ dependencies = [
   "numba>=0.60.0",
   "tqdm>=4.67.1",
   "wandb>=0.19.6",
-  "open3d>=0.18.0",
   "PyYAML>=6.0.2",
   "distconv @ git+https://github.com/LBANN/DistConv.git@232cba6",
 ]

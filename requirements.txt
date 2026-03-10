@@ -5,7 +5,6 @@ numpy>=1.26.4
 numba>=0.60.0
 tqdm>=4.67.1
 wandb>=0.19.6
-open3d>=0.18.0
 PyYAML>=6.0.2
 mpi4py==4.1.1 --no-binary mpi4py
 distconv @ git+https://github.com/LBANN/DistConv.git@232cba6

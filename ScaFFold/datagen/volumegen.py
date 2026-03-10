@@ -23,7 +23,6 @@ from math import ceil
 from typing import Dict
 
 import numpy as np
-import open3d as o3d
 from mpi4py import MPI
 
 from ScaFFold.utils.config_utils import Config
@@ -31,12 +30,11 @@ from ScaFFold.utils.config_utils import Config
 DEFAULT_NP_DTYPE = np.float64
 
 
-def load_ply_with_open3d(path: str) -> np.ndarray:
+def load_np_ptcloud(path: str) -> np.ndarray:
     """
-    Read a .ply via Open3D and return an (N,3) array of dtype float64.
+    Read a .npy file and return an (N,3) array of dtype float64.
     """
-    pcd = o3d.io.read_point_cloud(path)
-    pts = np.asarray(pcd.points)
+    pts = np.load(path)
     return pts.astype(DEFAULT_NP_DTYPE, copy=False)
 
 
@@ -204,7 +202,7 @@ def main(config: Dict):
                     "fractals",
                     instances_dir,
                     f"{curr_category:06d}",
-                    f"{curr_category:06d}_{curr_instance:04d}.ply",
+                    f"{curr_category:06d}_{curr_instance:04d}.npy",
                 )
 
                 if not os.path.exists(point_cloud_path):
@@ -213,7 +211,7 @@ def main(config: Dict):
                     )
                     sys.exit(1)
 
-                points = load_ply_with_open3d(point_cloud_path)
+                points = load_np_ptcloud(point_cloud_path)
                 mask3d = points_to_voxelgrid(points, grid_size)
 
                 assert mask3d.shape == volume.shape[:3], (
