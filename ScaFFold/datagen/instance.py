@@ -112,7 +112,7 @@ def main(config: Config):
         existing_instances = [
             int(path_str.split("_")[-1].split(".")[0])
             for path_str in glob.glob(
-                f"{instance_write_dir}/{category:06d}/[0-9][0-9][0-9][0-9][0-9][0-9]_[0-9][0-9][0-9][0-9].ply"
+                f"{instance_write_dir}/{category:06d}/[0-9][0-9][0-9][0-9][0-9][0-9]_[0-9][0-9][0-9][0-9].npy"
             )
         ]
         category_instance_pairs = [
