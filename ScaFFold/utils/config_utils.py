@@ -67,13 +67,21 @@ class Config:
         self.checkpoint_dir = config_dict["checkpoint_dir"]
         self.normalize = config_dict["normalize"]
         self.warmup_epochs = config_dict["warmup_epochs"]
-        self.num_shards = config_dict["num_shards"]
-        self.shard_dim = config_dict["shard_dim"]
         self.dataset_reuse_enforce_commit_id = config_dict[
             "dataset_reuse_enforce_commit_id"
         ]
         self.target_dice = config_dict["target_dice"]
         self.checkpoint_interval = config_dict["checkpoint_interval"]
+
+        self.dc_num_shards = config_dict["dc_num_shards"]
+        self.dc_shard_dims = config_dict["dc_shard_dims"]
+        self.dc_total_shards = math.prod(self.dc_num_shards)
+        # Safety Check: Length mismatch
+        if len(self.dc_num_shards) != len(self.dc_shard_dims):
+            raise ValueError(
+                f"Configuration Mismatch: num_shards {self.dc_num_shards} "
+                f"must have same length as shard_dim {self.dc_shard_dims}"
+            )
 
 
 class RunConfig(Config):

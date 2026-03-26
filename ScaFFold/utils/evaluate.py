@@ -12,13 +12,22 @@
 #
 # SPDX-License-Identifier: (Apache-2.0)
 
+import math
+
+import numpy as np
 import torch
 import torch.nn.functional as F
 from distconv import DCTensor
 from torch.distributed.tensor import DTensor, Replicate, Shard, distribute_tensor
 from tqdm import tqdm
 
-from ScaFFold.utils.dice_score import dice_coeff, dice_loss, multiclass_dice_coeff
+from ScaFFold.utils.dice_score import (
+    SpatialAllReduce,
+    compute_sharded_dice,
+    dice_coeff,
+    dice_loss,
+    multiclass_dice_coeff,
+)
 from ScaFFold.utils.perf_measure import annotate
 
 
@@ -29,10 +38,11 @@ def evaluate(
 ):
     net.eval()
     num_val_batches = len(dataloader)
-    dice_score = 0.0
+    total_dice_score = 0.0
     processed_batches = 0
 
-    # For reference, dc sharding happens on this spatial dim: 2=D, 3=H, 4=W
+    spatial_mesh = parallel_strategy.device_mesh[parallel_strategy.distconv_dim_names]
+
     if primary:
         print(
             f"[eval] ps.shard_dim={parallel_strategy.shard_dim} num_shards={parallel_strategy.num_shards}"
@@ -50,92 +60,80 @@ def evaluate(
         ):
             image, mask_true = batch["image"], batch["mask"]
 
-            # move images and labels to correct device and type
             image = image.to(
                 device=device,
                 dtype=torch.float32,
-                memory_format=torch.channels_last_3d,  # NDHWC (channels last) vs NCDHW (channels first)
+                memory_format=torch.channels_last_3d,
             )
-            mask_true = mask_true.to(
-                device=device, dtype=torch.long
-            ).contiguous()  # masks no channels NDHW, but ensure cotinuity.
+            mask_true = mask_true.to(device=device, dtype=torch.long).contiguous()
 
-            # Shard batch across ddp mesh, replicate across dc mesh
-            image_dp = distribute_tensor(
-                image, parallel_strategy.device_mesh, placements=[Shard(0), Replicate()]
+            # Dummy channel dimension [B, 1, D, H, W]
+            mask_true = mask_true.unsqueeze(1)
+
+            # DDP Sharding
+            ddp_placements = [Shard(0)] + [Replicate()] * len(
+                parallel_strategy.shard_dim
+            )
+            image_dp = DTensor.from_local(
+                image, parallel_strategy.device_mesh, placements=ddp_placements
             ).to_local()
-            mask_true_dp = distribute_tensor(
-                mask_true,
-                parallel_strategy.device_mesh,
-                placements=[Shard(0), Replicate()],
+            mask_true_dp = DTensor.from_local(
+                mask_true, parallel_strategy.device_mesh, placements=ddp_placements
             ).to_local()
 
-            # Spatially shard images along the dc mesh and run the model
+            # DistConv Spatial Sharding
             dcx = DCTensor.distribute(image_dp, parallel_strategy)
+            mask_true_dc = DCTensor.distribute(mask_true_dp, parallel_strategy)
+
+            # Forward pass on sharded data
             dcy = net(dcx)
 
-            # Replicate predictions across dc to get full spatial result on each dc rank
-            mask_pred = dcy.to_replicate()
+            # Extract underlying local tensors (STAY SHARDED)
+            local_preds = dcy
+            local_labels_5d = mask_true_dc
+            local_labels = local_labels_5d.squeeze(1)
 
-            # Use labels that are replicated across dc and sharded across ddp, like predictions
-            mask_true_ddp = mask_true_dp
-
-            # Skip if this ddp rank has an empty local batch
-            if mask_pred.size(0) == 0 or mask_true_ddp.size(0) == 0:
+            # Skip empty batches
+            if local_preds.size(0) == 0 or local_labels.size(0) == 0:
                 continue
 
-            # Loss
-            CE_loss = criterion(mask_pred, mask_true_ddp)
+            # --- 1. Sharded CE Loss ---
+            local_ce_sum = F.cross_entropy(local_preds, local_labels, reduction="sum")
+            global_ce_sum = SpatialAllReduce.apply(local_ce_sum, spatial_mesh)
 
-            # Dice loss
-            mask_pred_softmax = F.softmax(mask_pred, dim=1).float()
+            # Divide by total global voxels to get the mean CE Loss
+            global_total_voxels = local_labels.numel() * math.prod(
+                parallel_strategy.num_shards
+            )
+            CE_loss = global_ce_sum / global_total_voxels
+
+            # --- 2. Format Predictions & Labels (Strictly Multiclass) ---
+            mask_pred_probs = F.softmax(local_preds, dim=1).float()
             mask_true_onehot = (
-                F.one_hot(mask_true_ddp, n_categories + 1)
-                .permute(0, 4, 1, 2, 3)
-                .float()
-            )
-            dice_loss_curr = dice_loss(
-                mask_pred_softmax,
-                mask_true_onehot,
-                multiclass=True,
+                F.one_hot(local_labels, n_categories + 1).permute(0, 4, 1, 2, 3).float()
             )
 
-            # Combined validation loss
+            # Dice loss uses probabilities
+            dice_score_probs = compute_sharded_dice(
+                mask_pred_probs, mask_true_onehot, spatial_mesh
+            )
+            dice_loss_curr = 1.0 - dice_score_probs.mean()
+
+            # Eval metric (excluding background class 0)
+            # dice_score_probs shape is [Batch, Channels]. We slice [:, 1:] to drop background
+            batch_dice_score = dice_score_probs[:, 1:].mean()
+
+            # --- Combine and Accumulate ---
             loss = CE_loss + dice_loss_curr
             val_loss_epoch += loss.item()
+            total_dice_score += batch_dice_score.item()
             processed_batches += 1
-
-            # Dice score
-            if net.module.n_classes == 1:
-                assert mask_true_ddp.min() >= 0 and mask_true_ddp.max() <= 1, (
-                    "True mask indices should be in [0, 1]"
-                )
-                mask_pred_bin = (F.sigmoid(mask_pred) > 0.5).float()
-                dice_score += dice_coeff(
-                    mask_pred_bin, mask_true_ddp, reduce_batch_first=False
-                )
-            else:
-                assert (
-                    mask_true_ddp.min() >= 0
-                    and mask_true_ddp.max() < net.module.n_classes
-                ), "True mask indices should be in [0, n_classes]"
-                mask_pred_processed = F.softmax(mask_pred, dim=1).float()
-                mask_true_onehot_mc = (
-                    F.one_hot(mask_true_ddp, net.module.n_classes)
-                    .permute(0, 4, 1, 2, 3)
-                    .float()
-                )
-                dice_score += multiclass_dice_coeff(
-                    mask_pred_processed[:, 1:],
-                    mask_true_onehot_mc[:, 1:],
-                    reduce_batch_first=True,
-                )
 
     net.train()
 
     val_loss_avg = val_loss_epoch / max(processed_batches, 1)
     if primary:
         print(
-            f"evaluate.py: dice_score={dice_score}, val_loss_epoch={val_loss_epoch}, val_loss_avg={val_loss_avg}, num_val_batches={processed_batches}"
+            f"evaluate.py: dice_score={total_dice_score}, val_loss_epoch={val_loss_epoch}, val_loss_avg={val_loss_avg}, num_val_batches={processed_batches}"
         )
-    return dice_score, val_loss_epoch, val_loss_avg, processed_batches
+    return total_dice_score, val_loss_epoch, val_loss_avg, processed_batches

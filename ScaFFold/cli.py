@@ -157,8 +157,9 @@ def main():
         help="Resume execution in this specific directory. Overrides --base-run-dir.",
     )
     benchmark_parser.add_argument(
-        "--num-shards",
+        "--dc-num-shards",
         type=int,
+        nargs=3,
         help="DistConv param: number of shards to divide the tensor into. It's best to choose the fewest ranks needed to fit one sample in GPU memory, since that keeps communication at a minimum",
     )
     benchmark_parser.add_argument(

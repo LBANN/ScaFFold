@@ -4,14 +4,14 @@ dataset_dir: "datasets"            # Directory in which to store and query for d
 fract_base_dir: "fractals"         # Base directory for fractal IFS and instances.
 n_categories: 5                    # Number of fractal categories present in the dataset.
 n_instances_used_per_fractal: 145  # Number of unique instances to pull from each fractal class. There are 145 unique; exceeding this number will reuse some instances.
-problem_scale: 6                   # Determines dataset resolution and number of unet layers. Default is 6.
+problem_scale: 8                   # Determines dataset resolution and number of unet layers. Default is 6.
 unet_bottleneck_dim: 3             # Power of 2 of the unet bottleneck layer dimension. Default of 3 -> bottleneck layer of size 8.
 seed: 42                           # Random seed.
 batch_size: 1                      # Batch sizes for each vol size.
 optimizer: "ADAM"                  # "ADAM" is preferred option, otherwise training defautls to RMSProp.
-num_shards: 2                      # DistConv param: number of shards to divide the tensor into. It's best to choose the fewest ranks needed to fit one sample in GPU memory, since that keeps communication at a minimum
-shard_dim: 2                       # DistConv param: dimension on which to shard
-checkpoint_interval: 10            # Checkpoint every C epochs. More frequent checkpointing can be very expensive on slow filesystems.
+dc_num_shards: [1, 1, 2]           # DistConv param: number of shards to divide the tensor into. It's best to choose the fewest ranks needed to fit one sample in GPU memory, since that keeps communication at a minimum
+dc_shard_dims: [2, 3, 4]           # DistConv param: dimension on which to shard
+checkpoint_interval: 100           # Checkpoint every C epochs. More frequent checkpointing can be very expensive on slow filesystems.
 
 # Internal/dev use only
 variance_threshold: 0.15           # Variance threshold for valid fractals. Default is 0.15.

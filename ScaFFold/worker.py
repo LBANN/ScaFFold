@@ -12,6 +12,7 @@
 #
 # SPDX-License-Identifier: (Apache-2.0)
 
+import math
 import os
 import socket
 import sys
@@ -161,10 +162,10 @@ def main(kwargs_dict: dict = {}):
 
     # Initialize model
     begin_code_region("init_model")
-    config.dc_num_shards = getattr(config, "dc_num_shards", config.num_shards)
-    config.dc_shard_dim = getattr(config, "dc_shard_dim", config.shard_dim)
+    config.dc_num_shards = getattr(config, "dc_num_shards", config.dc_num_shards)
+    config.dc_shard_dims = getattr(config, "dc_shard_dims", config.dc_shard_dims)
     log.info(
-        f"DistConv num_shards={config.dc_num_shards}, shard_dim={config.dc_shard_dim}"
+        f"DistConv num_shards={config.dc_num_shards}, shard_dim={config.dc_shard_dims}"
     )
     device = get_device()
     log.info(f"Using device: {device}")
@@ -176,17 +177,17 @@ def main(kwargs_dict: dict = {}):
     )
     if config.dist:
         # DDP + DistConv setup
-        # Ensure world_size is divisible by dc_num_shards
-        assert dist.get_world_size() % config.dc_num_shards == 0, (
-            f"world_size={dist.get_world_size()} must be divisible by dc_num_shards={config.dc_num_shards}"
+        # Ensure world_size is divisible by total distconv shards
+        assert dist.get_world_size() % math.prod(config.dc_num_shards) == 0, (
+            f"world_size={dist.get_world_size()} must be divisible by total number of distconv shards = {math.prod(config.dc_num_shards)}"
         )
-        # Select which full-tensor dim to shard: 2 + dc_shard_dim
-        shard_dim = 2 + int(config.dc_shard_dim)
+
         ps = ParallelStrategy(
-            num_shards=int(config.dc_num_shards),
-            shard_dim=shard_dim,
+            num_shards=config.dc_num_shards,
+            shard_dim=config.dc_shard_dims,
             device_type=device.type,
         )
+
         model = model.to(device, memory_format=torch.channels_last_3d)
         # Wrap with DistConvDDP that corrects gradient scaling for dc submesh
         model = DistConvDDP(

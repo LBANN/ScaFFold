@@ -9,9 +9,9 @@ unet_bottleneck_dim: 3             # Power of 2 of the unet bottleneck layer dim
 seed: 42                           # Random seed.
 batch_size: 1                      # Batch sizes for each vol size.
 optimizer: "ADAM"                  # "ADAM" is preferred option, otherwise training defautls to RMSProp.
-num_shards: 2                      # DistConv param: number of shards to divide the tensor into. It's best to choose the fewest ranks needed to fit one sample in GPU memory, since that keeps communication at a minimum
-shard_dim: 2                       # DistConv param: dimension on which to shard
-checkpoint_interval: 10            # Checkpoint every C epochs. More frequent checkpointing can be very expensive on slow filesystems.
+num_shards: [1, 1, 1]              # DistConv param: number of shards to divide the tensor into. It's best to choose the fewest ranks needed to fit one sample in GPU memory, since that keeps communication at a minimum
+shard_dim: [2, 3, 4]               # DistConv param: dimension on which to shard
+checkpoint_interval: 100           # Checkpoint every C epochs. More frequent checkpointing can be very expensive on slow filesystems.
 
 # Internal/dev use only
 variance_threshold: 0.15           # Variance threshold for valid fractals. Default is 0.15.
