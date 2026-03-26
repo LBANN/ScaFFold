@@ -98,7 +98,7 @@ def _get_env_setup() -> str:
 # --- Begin Environment Setup ---
 # Load Modules
 if command -v module &> /dev/null; then
-    ml cce/21.0.0 cray-mpich/9.1.0 rocm/7.1.0 rccl/fast-env-slows-mpi
+    ml cce/21.0.0 cray-mpich/9.1.0 rocm/7.1.1 rccl/fast-env-slows-mpi
 fi
 
 # Activate Virtual Environment
@@ -111,7 +111,7 @@ fi
 
 # Environment variables
 export SPINDLE_FLUXOPT=off
-export LD_PRELOAD=/opt/rocm-7.1.0/llvm/lib/libomp.so
+export LD_PRELOAD=/opt/rocm-7.1.1/llvm/lib/libomp.so
 
 export PROFILE_TORCH=ON
 # --- End Environment Setup ---

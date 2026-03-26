@@ -6,7 +6,7 @@ if [ -d "aws-ofi-nccl.git" ]; then
   return 1 2>/dev/null || exit 1
 fi
 
-rocm_version=7.1.0
+rocm_version=7.1.1
 
 module swap PrgEnv-cray PrgEnv-gnu
 module load rocm/$rocm_version

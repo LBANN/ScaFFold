@@ -7,7 +7,7 @@
 # flux: -qpdebug
 # flux: -B fractale
 
-ml cce/21.0.0 cray-mpich/9.1.0 rocm/7.1.0 rccl/fast-env-slows-mpi
+ml cce/21.0.0 cray-mpich/9.1.0 rocm/7.1.1 rccl/fast-env-slows-mpi
 
 . .venvs/scaffoldvenv-tuo-pypi/bin/activate
 

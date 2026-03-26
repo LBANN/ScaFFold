@@ -40,9 +40,9 @@ The model is trained from a random initialization until convergence, which is de
         1. `ml cuda/12.9.1 gcc/13.3.1 mvapich2/2.3.7`
         1. `export LD_LIBRARY_PATH=/usr/lib64:$LD_LIBRARY_PATH`
     - ROCm (elcap):
-        1. `ml cce/21.0.0 cray-mpich/9.1.0 rocm/7.1.0 rccl/fast-env-slows-mpi`
+        1. `ml cce/21.0.0 cray-mpich/9.1.0 rocm/7.1.1 rccl/fast-env-slows-mpi`
             - If using WCI wheel:
-                1. `export LD_PRELOAD=/opt/rocm-7.1.0/llvm/lib/libomp.so` # for libomp.so
+                1. `export LD_PRELOAD=/opt/rocm-7.1.1/llvm/lib/libomp.so` # for libomp.so
 
 1. Install the benchmark in the python venv:
     - CUDA: `pip install --no-binary=mpi4py .[cuda] --prefix=.venvs/scaffoldvenv --extra-index-url https://download.pytorch.org/whl/cu129 2>&1 | tee install.log`
@@ -226,7 +226,7 @@ make && make install
 git clone https://github.com/LLNL/Caliper.git
 cd Caliper
 mkdir pybuild && cd pybuild
-ml rocm/7.1.0
+ml rocm/7.1.1
 ml cuda/12.9.1
 cmake -DWITH_PYTHON_BINDINGS=ON \
    -DWITH_ROCPROFILER=ON \
