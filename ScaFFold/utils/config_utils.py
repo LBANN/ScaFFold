@@ -45,7 +45,7 @@ class Config:
             )
             self.problem_scale = math.floor(self.problem_scale)
         self.unet_bottleneck_dim = config_dict["unet_bottleneck_dim"]
-        self.unet_layers = self.problem_scale - self.unet_bottleneck_dim + 1
+        self.unet_layers = self.problem_scale - self.unet_bottleneck_dim
         self.n_fracts_per_vol = config_dict["n_fracts_per_vol"]
         self.n_instances_used_per_fractal = config_dict["n_instances_used_per_fractal"]
         self.scale = 1
