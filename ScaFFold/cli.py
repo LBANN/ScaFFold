@@ -141,6 +141,11 @@ def main():
         "--batch-size", type=int, nargs="+", help="Batch sizes for each volume size."
     )
     benchmark_parser.add_argument(
+        "--warmup-batches",
+        type=int,
+        help="Number of warmup batches to run per rank before training.",
+    )
+    benchmark_parser.add_argument(
         "--optimizer",
         type=str,
         choices=["ADAM", "RMSProp"],

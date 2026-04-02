@@ -29,6 +29,6 @@ framework: "torch"                 # The DL framework to train with. Only valid 
 checkpoint_dir: "checkpoints"      # Subfolder in which to save training checkpoints.
 loss_freq: 1                       # Number of epochs between logging the overall loss.
 normalize: 1                       # Cateogry search normalization parameter
-warmup_epochs: 1                   # How many warmup epochs before training
+warmup_batches: 5                  # How many warmup batches per rank to run before training.
 dataset_reuse_enforce_commit_id: 0 # Enforce matching commit IDs for dataset reuse.
 target_dice: 0.95

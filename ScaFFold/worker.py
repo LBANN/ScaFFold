@@ -24,8 +24,8 @@ import psutil
 import torch
 import torch.distributed as dist
 import yaml
-from distconv import DCTensor, DistConvDDP, ParallelStrategy
-from torch.nn.parallel import DistributedDataParallel as DDP
+from distconv import DistConvDDP, ParallelStrategy
+from torch.distributed.tensor import Replicate, Shard
 
 from ScaFFold.datagen.get_dataset import get_dataset
 from ScaFFold.unet import UNet
@@ -214,6 +214,11 @@ def main(kwargs_dict: dict = {}):
             torch.backends.cudnn.benchmark = False
             torch.use_deterministic_algorithms(True, warn_only=True)
         trainer = PyTorchTrainer(model, config, device, log)
+        trainer.ps = ps
+        trainer.spatial_mesh = ps.device_mesh[ps.distconv_dim_names]
+        num_spatial_dims = len(ps.shard_dim)
+        trainer.ddp_placements = [Shard(0)] + [Replicate()] * num_spatial_dims
+
     else:
         raise RuntimeError(
             "Invalid framework specified. Currently [torch] is the supported framework."
@@ -225,6 +230,12 @@ def main(kwargs_dict: dict = {}):
     ranks_per_node = get_local_size()
     prof_ctx, TORCH_PERF_LOCAL = get_torch_context(ranks_per_node, rank)
     with prof_ctx as prof:
+        begin_code_region("cleanup_or_resume")
+        trainer.cleanup_or_resume()
+        end_code_region("cleanup_or_resume")
+        begin_code_region("warmup")
+        trainer.warmup()
+        end_code_region("warmup")
         begin_code_region("train")
         trainer.train()
         end_code_region("train")
