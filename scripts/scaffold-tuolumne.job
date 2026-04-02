@@ -15,6 +15,15 @@ ml cce/21.0.0 cray-mpich/9.1.0 rocm/7.1.1 rccl/fast-env-slows-mpi
 # (2) Removing libmpi may cause segfault on mpi4py import
 export LD_PRELOAD="/opt/rocm-7.1.1/llvm/lib/libomp.so /opt/cray/pe/mpich/9.1.0/ofi/gnu/11.2/lib/libmpi_gnu.so.12"
 
+# Disable direct convolution benchmarking (should speedup warmup by a significant amount, does the below three options together)
+# export MIOPEN_DEBUG_CONV_DIRECT=0
+# Disable direct naive convolution benchmarking (naive_conv_ab_nonpacked_fwd_ndhwc_half_double_half.kd)
+export MIOPEN_DEBUG_CONV_DIRECT_NAIVE_CONV_FWD=0
+# Disable naive_conv_ab_nonpacked_bwd_ndhwc_half_double_half.kd
+# export MIOPEN_DEBUG_CONV_DIRECT_NAIVE_CONV_BWD=0
+# Disable naive_conv_ab_nonpacked_wrw_ndhwc_half_double_half.kd
+export MIOPEN_DEBUG_CONV_DIRECT_NAIVE_CONV_WRW=0
+
 torchrun-hpc -N 1 -n 1 $(which scaffold) generate_fractals -c $(pwd)/ScaFFold/configs/benchmark_default.yml
 
 # Uncomment if you want torch profiling
