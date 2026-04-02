@@ -522,6 +522,7 @@ class PyTorchTrainer(BaseTrainer):
                     self.train_loader.sampler.set_epoch(epoch)
                     self.val_loader.sampler.set_epoch(epoch)
                 self.model.train()
+                self.optimizer.zero_grad(set_to_none=False)
 
                 estr = (
                     f"{epoch}"
@@ -535,8 +536,6 @@ class PyTorchTrainer(BaseTrainer):
                     unit="img",
                     disable=True if self.world_rank != 0 else False,
                 ) as pbar:
-                    batch_step = 0
-
                     begin_code_region("batch_loop")
                     for batch in self.train_loader:
                         # Load initial samples and labels
@@ -657,23 +656,20 @@ class PyTorchTrainer(BaseTrainer):
                         gather_and_print_mem(self.log, "post_backward")
 
                         begin_code_region("step_and_update")
-                        if batch_step + 1 == len(self.train_loader):
-                            self.grad_scaler.unscale_(self.optimizer)
-                            torch.nn.utils.clip_grad_norm_(
-                                self.model.parameters(), max_norm=1.0
-                            )
-                            self.grad_scaler.step(self.optimizer)
-                            gather_and_print_mem(self.log, "after_optim_step")
-
-                            self.grad_scaler.update()
-                            self.optimizer.zero_grad(set_to_none=False)
+                        self.grad_scaler.unscale_(self.optimizer)
+                        torch.nn.utils.clip_grad_norm_(
+                            self.model.parameters(), max_norm=1.0
+                        )
+                        self.grad_scaler.step(self.optimizer)
+                        gather_and_print_mem(self.log, "after_optim_step")
+                        self.grad_scaler.update()
+                        self.optimizer.zero_grad(set_to_none=False)
                         end_code_region("step_and_update")
 
                         # Update the loss
                         begin_code_region("update_loss")
                         pbar.update(images_dc.shape[0])
                         self.global_step += 1
-                        batch_step += 1
                         # Stay on GPU
                         epoch_loss += loss.detach()
                         end_code_region("update_loss")
