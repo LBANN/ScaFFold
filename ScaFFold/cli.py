@@ -146,6 +146,11 @@ def main():
         help="Number of warmup batches to run per rank before training.",
     )
     benchmark_parser.add_argument(
+        "--dataloader-num-workers",
+        type=int,
+        help="Number of DataLoader worker processes per rank.",
+    )
+    benchmark_parser.add_argument(
         "--optimizer",
         type=str,
         choices=["ADAM", "RMSProp"],

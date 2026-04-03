@@ -29,7 +29,9 @@ from mpi4py import MPI
 from ScaFFold.datagen import volumegen
 
 META_FILENAME = "meta.yaml"
+DATASET_FORMAT_VERSION = 2
 INCLUDE_KEYS = [
+    "dataset_format_version",
     "n_categories",
     "n_instances_used_per_fractal",
     "problem_scale",
@@ -116,8 +118,10 @@ def get_dataset(
     root.mkdir(exist_ok=True)
 
     # Get dict of required keys and compute config_id
+    config_dict = vars(config).copy()
+    config_dict["dataset_format_version"] = DATASET_FORMAT_VERSION
     volume_config = _get_required_keys_dict(
-        config=vars(config), include_keys=INCLUDE_KEYS
+        config=config_dict, include_keys=INCLUDE_KEYS
     )
     config_id = _hash_volume_config(volume_config)
     commit = _git_commit_short()
@@ -135,6 +139,8 @@ def get_dataset(
             continue
         meta = yaml.safe_load(meta_path.read_text())
         if meta.get("config_id") != config_id:
+            continue
+        if meta.get("dataset_format_version", 1) != DATASET_FORMAT_VERSION:
             continue
         if require_commit and meta.get("code_commit") != commit:
             continue
@@ -186,6 +192,7 @@ def get_dataset(
         # Write to tmp, then move, so readers never see half-written dataset
         meta = {
             "config_id": config_id,
+            "dataset_format_version": DATASET_FORMAT_VERSION,
             "config_subset": volume_config,
             "include_keys": INCLUDE_KEYS,
             "code_commit": commit,
