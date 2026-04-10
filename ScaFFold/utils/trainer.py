@@ -13,18 +13,14 @@
 # SPDX-License-Identifier: (Apache-2.0)
 
 # Standard library
-import json
 import math
 import os
-import random
 import shutil
 import time
 from pathlib import Path
 
 # Third party
-import numpy as np
 import torch
-import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 from distconv import DCTensor
@@ -35,7 +31,7 @@ from tqdm import tqdm
 
 from ScaFFold.utils.checkpointing import CheckpointManager
 from ScaFFold.utils.data_loading import FractalDataset
-from ScaFFold.utils.dice_score import SpatialAllReduce, compute_sharded_dice, dice_loss
+from ScaFFold.utils.dice_score import SpatialAllReduce, compute_sharded_dice
 from ScaFFold.utils.distributed import get_local_rank, get_world_rank, get_world_size
 
 # Local
@@ -389,9 +385,9 @@ class PyTorchTrainer(BaseTrainer):
                 enabled=self.config.torch_amp,
             ):
                 # Forward on DCTensor
-                self.log.debug(f"  warmup: running forward pass")
+                self.log.debug("  warmup: running forward pass")
                 masks_pred_dc = self.model(images_dc)
-                self.log.debug(f"  warmup: forward pass complete")
+                self.log.debug("  warmup: forward pass complete")
 
                 # Extract the underlying PyTorch local tensors
                 local_preds = masks_pred_dc
@@ -442,14 +438,14 @@ class PyTorchTrainer(BaseTrainer):
                 loss = loss_ce + loss_dice
 
             self.log.debug(
-                f"  warmup: loss calculation complete. Proceeding to backward pass"
+                "  warmup: loss calculation complete. Proceeding to backward pass"
             )
 
             # Backward pass
             self.grad_scaler.scale(loss).backward()
             self.grad_scaler.unscale_(self.optimizer)
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-            self.log.debug(f"  warmup: backward pass complete. Stepping optimizer")
+            self.log.debug("  warmup: backward pass complete. Stepping optimizer")
 
             self.grad_scaler.step(self.optimizer)
             self.grad_scaler.update()

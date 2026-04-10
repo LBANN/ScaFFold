@@ -14,19 +14,15 @@
 
 import math
 
-import numpy as np
 import torch
 import torch.nn.functional as F
 from distconv import DCTensor
-from torch.distributed.tensor import DTensor, Replicate, Shard, distribute_tensor
+from torch.distributed.tensor import DTensor, Replicate, Shard
 from tqdm import tqdm
 
 from ScaFFold.utils.dice_score import (
     SpatialAllReduce,
     compute_sharded_dice,
-    dice_coeff,
-    dice_loss,
-    multiclass_dice_coeff,
 )
 from ScaFFold.utils.perf_measure import annotate
 

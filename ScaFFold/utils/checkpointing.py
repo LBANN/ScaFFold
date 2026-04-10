@@ -12,11 +12,9 @@
 #
 # SPDX-License-Identifier: (Apache-2.0)
 
-import copy
 import math
 import random
 import shutil
-import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -238,7 +236,7 @@ class CheckpointManager:
                     self.best_ckpt_path,
                     is_best,
                 )
-                self._log(f"Async checkpoint offloaded to background thread.")
+                self._log("Async checkpoint offloaded to background thread.")
             else:
                 # Synchronous Save
                 self._write_to_disk(
@@ -314,7 +312,7 @@ class CheckpointManager:
             pass
         try:
             snap["rng_state_python"] = random.getstate()
-        except:
+        except Exception:
             pass
         return snap
 

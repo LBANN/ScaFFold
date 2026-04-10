@@ -31,7 +31,6 @@ from ScaFFold.datagen.get_dataset import get_dataset
 from ScaFFold.unet import UNet
 from ScaFFold.utils.distributed import (
     get_device,
-    get_job_id,
     get_local_rank,
     get_local_size,
     get_world_rank,
@@ -266,7 +265,7 @@ def main(kwargs_dict: dict = {}):
     # Generate plots
     #
     if rank == 0:
-        log.info(f"Generating figures on rank 0...")
+        log.info("Generating figures on rank 0...")
         begin_code_region("generate_figures")
         standard_viz.main(config)
         end_code_region("generate_figures")

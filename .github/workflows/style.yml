@@ -20,4 +20,4 @@ jobs:
           # Check format. To fix, run "ruff format ."
           ruff format --diff .
           # Check PEP8 violations, logic/correctness errors, and sort imports. To fix, run "ruff check --fix ."
-          ruff check --diff .
+          ruff check .

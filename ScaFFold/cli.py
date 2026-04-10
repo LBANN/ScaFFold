@@ -223,7 +223,7 @@ def main():
         combined_config["point_num"] = int(combined_config["vol_size"] ** 3 / 256)
 
         # Handle Restart / Resume logic
-        if hasattr(args, "restart") and args.restart == True:
+        if hasattr(args, "restart") and args.restart:
             print("Restart flag detected: Forcing train_from_scratch = False")
             combined_config["train_from_scratch"] = False
             combined_config["restart"] = True

@@ -87,12 +87,12 @@ def _git_commit_short() -> str:
         )
     except subprocess.CalledProcessError:
         print(
-            f"Tried to get git commit id in non-git repo. No commit id will be enforced for dataset reuse."
+            "Tried to get git commit id in non-git repo. No commit id will be enforced for dataset reuse."
         )
         return "no-commit-id"
     except Exception:
         print(
-            f"Exception when trying to get git commit for dataset. No commit id will be enforced for dataset reuse."
+            "Exception when trying to get git commit for dataset. No commit id will be enforced for dataset reuse."
         )
         return "no-commit-id"
 

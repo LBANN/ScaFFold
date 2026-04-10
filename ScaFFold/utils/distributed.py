@@ -98,7 +98,7 @@ def force_cuda_visible_devices(force: bool = False) -> None:
     other GPUs.
 
     """
-    print(f"force_cuda_visible_devices is deprecated. Skipping...")
+    print("force_cuda_visible_devices is deprecated. Skipping...")
 
 
 def get_device() -> torch.device:

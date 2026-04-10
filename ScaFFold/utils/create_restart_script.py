@@ -20,7 +20,7 @@ import shlex
 import stat
 import sys
 from pathlib import Path
-from typing import List, Literal, Optional, Union
+from typing import List, Literal, Union
 
 import torch
 
