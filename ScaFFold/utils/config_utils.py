@@ -73,7 +73,6 @@ class Config:
         ]
         self.target_dice = config_dict["target_dice"]
         self.checkpoint_interval = config_dict["checkpoint_interval"]
-
         self.dc_num_shards = config_dict["dc_num_shards"]
         self.dc_shard_dims = config_dict["dc_shard_dims"]
         self.dc_total_shards = math.prod(self.dc_num_shards)

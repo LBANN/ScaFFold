@@ -12,7 +12,7 @@ dataloader_num_workers: 4          # Number of DataLoader worker processes per r
 optimizer: "ADAM"                  # "ADAM" is preferred option, otherwise training defautls to RMSProp.
 num_shards: [1, 1, 1]              # DistConv param: number of shards to divide the tensor into. It's best to choose the fewest ranks needed to fit one sample in GPU memory, since that keeps communication at a minimum
 shard_dim: [2, 3, 4]               # DistConv param: dimension on which to shard
-checkpoint_interval: 100           # Checkpoint every C epochs. More frequent checkpointing can be very expensive on slow filesystems.
+checkpoint_interval: -1            # Checkpoint every C epochs; set to -1 to disable checkpointing entirely.
 
 # Internal/dev use only
 variance_threshold: 0.15           # Variance threshold for valid fractals. Default is 0.15.

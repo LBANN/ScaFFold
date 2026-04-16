@@ -765,8 +765,11 @@ class PyTorchTrainer(BaseTrainer):
                 #
                 begin_code_region("checkpoint")
 
-                # Checkpoint only if at a checkpoint_interval epoch
-                if epoch % self.config.checkpoint_interval == 0:
+                # A checkpoint interval of -1 disables checkpointing entirely.
+                if (
+                    self.config.checkpoint_interval > 0
+                    and epoch % self.config.checkpoint_interval == 0
+                ):
                     extras = {"train_mask_values": self.train_set.mask_values}
                     self.checkpoint_manager.save_checkpoint(epoch, val_loss_avg, extras)
 
