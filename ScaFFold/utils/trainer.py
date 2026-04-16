@@ -410,9 +410,13 @@ class PyTorchTrainer(BaseTrainer):
                 )
 
                 # 1. Sharded Cross Entropy
-                local_ce_sum = F.cross_entropy(
-                    local_preds, local_labels, reduction="sum"
-                )
+                with torch.autocast(
+                    self.device.type if self.device.type != "mps" else "cpu",
+                    enabled=False,
+                ):
+                    local_ce_sum = F.cross_entropy(
+                        local_preds.float(), local_labels, reduction="sum"
+                    )
 
                 # Pass the spatial_mesh directly
                 global_ce_sum = SpatialAllReduce.apply(local_ce_sum, self.spatial_mesh)
@@ -598,9 +602,17 @@ class PyTorchTrainer(BaseTrainer):
                             )
 
                             # 1. Sharded Cross Entropy
-                            local_ce_sum = F.cross_entropy(
-                                local_preds, local_labels, reduction="sum"
-                            )
+                            with torch.autocast(
+                                self.device.type
+                                if self.device.type != "mps"
+                                else "cpu",
+                                enabled=False,
+                            ):
+                                local_ce_sum = F.cross_entropy(
+                                    local_preds.float(),
+                                    local_labels,
+                                    reduction="sum",
+                                )
 
                             # Pass the spatial_mesh directly
                             global_ce_sum = SpatialAllReduce.apply(

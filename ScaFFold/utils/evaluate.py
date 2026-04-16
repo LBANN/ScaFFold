@@ -94,7 +94,12 @@ def evaluate(
                 continue
 
             # --- 1. Sharded CE Loss ---
-            local_ce_sum = F.cross_entropy(local_preds, local_labels, reduction="sum")
+            with torch.autocast(
+                device.type if device.type != "mps" else "cpu", enabled=False
+            ):
+                local_ce_sum = F.cross_entropy(
+                    local_preds.float(), local_labels, reduction="sum"
+                )
             global_ce_sum = SpatialAllReduce.apply(local_ce_sum, spatial_mesh)
 
             # Divide by total global voxels to get the mean CE Loss
