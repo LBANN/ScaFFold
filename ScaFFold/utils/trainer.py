@@ -12,8 +12,6 @@
 #
 # SPDX-License-Identifier: (Apache-2.0)
 
-# Standard library
-import math
 import os
 import shutil
 import time
@@ -25,12 +23,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 from distconv import DCTensor
 from torch import optim
-from torch.distributed.tensor import DTensor
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from ScaFFold.utils.checkpointing import CheckpointManager
-from ScaFFold.utils.data_loading import FractalDataset
+from ScaFFold.utils.data_loading import FractalDataset, SpatialShardSpec
 from ScaFFold.utils.dice_score import SpatialAllReduce, compute_sharded_dice
 from ScaFFold.utils.distributed import get_local_rank, get_world_rank, get_world_size
 
@@ -69,9 +66,14 @@ class BaseTrainer:
         self.criterion = None
         self.global_step = 0
         self.start_epoch = -1
-        self.ps = None  # DistConv ParallelStrategy
+        self.ps = getattr(self.config, "_parallel_strategy", None)
         self.spatial_mesh = None  # Spatial mesh for use w/ DistConv
-        self.ddp_placements = None  # DDP placements for use w/ DistConv
+        self.data_num_replicas = self.world_size
+        self.data_replica_rank = self.world_rank
+        if self.ps is not None:
+            self.spatial_mesh = self.ps.device_mesh[self.ps.distconv_dim_names]
+            self.data_num_replicas = self.ps.ddp_ranks
+            self.data_replica_rank = self.ps.ddp_ind
 
         self.checkpoint_path_absolute = str(
             self.config.run_dir + "/" + self.config.checkpoint_dir
@@ -98,12 +100,25 @@ class BaseTrainer:
         val_mask_dir = dataset_dir / "masks/validation"
         train_unique_masks_path = dataset_dir / "train_unique_mask_vals"
         val_unique_masks_path = dataset_dir / "val_unique_mask_vals"
+        spatial_shard_spec = None
+        if self.ps is not None:
+            spatial_shard_spec = SpatialShardSpec(
+                shard_dims=tuple(self.ps.shard_dim),
+                num_shards=tuple(self.ps.num_shards),
+                shard_indices=tuple(self.ps.shard_ind),
+            )
 
         self.train_set = FractalDataset(
-            train_vol_dir, train_mask_dir, data_dir=train_unique_masks_path
+            train_vol_dir,
+            train_mask_dir,
+            data_dir=train_unique_masks_path,
+            spatial_shard_spec=spatial_shard_spec,
         )
         self.val_set = FractalDataset(
-            val_vol_dir, val_mask_dir, data_dir=val_unique_masks_path
+            val_vol_dir,
+            val_mask_dir,
+            data_dir=val_unique_masks_path,
+            spatial_shard_spec=spatial_shard_spec,
         )
         self.n_train = len(self.train_set)
         self.n_val = len(self.val_set)
@@ -115,10 +130,15 @@ class BaseTrainer:
         """Create DistributedSamplers for train and validation datasets."""
         if self.config.dist:
             self.train_sampler = torch.utils.data.distributed.DistributedSampler(
-                self.train_set
+                self.train_set,
+                num_replicas=self.data_num_replicas,
+                rank=self.data_replica_rank,
             )
             self.val_sampler = torch.utils.data.distributed.DistributedSampler(
-                self.val_set, shuffle=False
+                self.val_set,
+                num_replicas=self.data_num_replicas,
+                rank=self.data_replica_rank,
+                shuffle=False,
             )
         else:
             self.train_sampler = torch.utils.data.RandomSampler(self.train_set)
@@ -366,18 +386,9 @@ class PyTorchTrainer(BaseTrainer):
             # Add a dummy channel dimension to get 5D [B, 1, D, H, W]
             true_masks = true_masks.unsqueeze(1)
 
-            # Data parallel sharding
-            images_dp = DTensor.from_local(
-                images, self.ps.device_mesh, placements=self.ddp_placements
-            ).to_local()
-
-            true_masks_dp = DTensor.from_local(
-                true_masks, self.ps.device_mesh, placements=self.ddp_placements
-            ).to_local()
-
-            # Spatial sharding via DistConv
-            images_dc = DCTensor.distribute(images_dp, self.ps)
-            true_masks_dc = DCTensor.distribute(true_masks_dp, self.ps)
+            # Inputs are already loaded as local shards by the dataset.
+            images_dc = DCTensor.from_shard(images, self.ps)
+            true_masks_dc = DCTensor.from_shard(true_masks, self.ps)
             self._get_memsize(images_dc, "Sharded image", self.config.verbose)
 
             with torch.autocast(
@@ -421,8 +432,13 @@ class PyTorchTrainer(BaseTrainer):
                 # Pass the spatial_mesh directly
                 global_ce_sum = SpatialAllReduce.apply(local_ce_sum, self.spatial_mesh)
 
-                global_total_voxels = local_labels.numel() * math.prod(
-                    self.config.dc_num_shards
+                local_voxel_count = torch.tensor(
+                    float(local_labels.numel()),
+                    device=local_labels.device,
+                    dtype=torch.float32,
+                )
+                global_total_voxels = SpatialAllReduce.apply(
+                    local_voxel_count, self.spatial_mesh
                 )
                 loss_ce = global_ce_sum / global_total_voxels
 
@@ -462,7 +478,7 @@ class PyTorchTrainer(BaseTrainer):
                 local_preds_softmax,
                 local_labels_one_hot,
             )
-            del loss_ce, loss_dice, loss, images_dp, true_masks_dp
+            del loss_ce, loss_dice, loss
 
             if self.world_rank == 0:
                 peak_alloc = torch.cuda.max_memory_allocated() / (1024**3)
@@ -533,7 +549,7 @@ class PyTorchTrainer(BaseTrainer):
                     else f"{epoch}/{self.config.epochs}"
                 )
                 with tqdm(
-                    total=self.n_train // self.world_size,
+                    total=len(self.train_sampler),
                     desc=f"({os.path.basename(self.config.run_dir)}) \
                             Epoch {estr}",
                     unit="img",
@@ -560,23 +576,10 @@ class PyTorchTrainer(BaseTrainer):
                         # Add a dummy channel dimension to get 5D [B, 1, D, H, W]
                         true_masks = true_masks.unsqueeze(1)
 
-                        # Data parallel sharding
-                        images_dp = DTensor.from_local(
-                            images, self.ps.device_mesh, placements=self.ddp_placements
-                        ).to_local()
-
-                        true_masks_dp = DTensor.from_local(
-                            true_masks,
-                            self.ps.device_mesh,
-                            placements=self.ddp_placements,
-                        ).to_local()
-
-                        # Delete source tensors immediately after use to keep memory down
+                        # Inputs are already loaded as local shards by the dataset.
+                        images_dc = DCTensor.from_shard(images, self.ps)
+                        true_masks_dc = DCTensor.from_shard(true_masks, self.ps)
                         del images, true_masks
-
-                        # Spatial sharding via DistConv
-                        images_dc = DCTensor.distribute(images_dp, self.ps)
-                        true_masks_dc = DCTensor.distribute(true_masks_dp, self.ps)
                         self._get_memsize(
                             images_dc, "Sharded image", self.config.verbose
                         )
@@ -634,8 +637,13 @@ class PyTorchTrainer(BaseTrainer):
                                 local_ce_sum, self.spatial_mesh
                             )
 
-                            global_total_voxels = local_labels.numel() * math.prod(
-                                self.config.dc_num_shards
+                            local_voxel_count = torch.tensor(
+                                float(local_labels.numel()),
+                                device=local_labels.device,
+                                dtype=torch.float32,
+                            )
+                            global_total_voxels = SpatialAllReduce.apply(
+                                local_voxel_count, self.spatial_mesh
                             )
                             loss_ce = global_ce_sum / global_total_voxels
 

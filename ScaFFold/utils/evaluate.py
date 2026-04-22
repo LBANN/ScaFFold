@@ -12,12 +12,9 @@
 #
 # SPDX-License-Identifier: (Apache-2.0)
 
-import math
-
 import torch
 import torch.nn.functional as F
 from distconv import DCTensor
-from torch.distributed.tensor import DTensor, Replicate, Shard
 from tqdm import tqdm
 
 from ScaFFold.utils.dice_score import (
@@ -66,20 +63,9 @@ def evaluate(
             # Dummy channel dimension [B, 1, D, H, W]
             mask_true = mask_true.unsqueeze(1)
 
-            # DDP Sharding
-            ddp_placements = [Shard(0)] + [Replicate()] * len(
-                parallel_strategy.shard_dim
-            )
-            image_dp = DTensor.from_local(
-                image, parallel_strategy.device_mesh, placements=ddp_placements
-            ).to_local()
-            mask_true_dp = DTensor.from_local(
-                mask_true, parallel_strategy.device_mesh, placements=ddp_placements
-            ).to_local()
-
-            # DistConv Spatial Sharding
-            dcx = DCTensor.distribute(image_dp, parallel_strategy)
-            mask_true_dc = DCTensor.distribute(mask_true_dp, parallel_strategy)
+            # Inputs are already loaded as local shards by the dataset.
+            dcx = DCTensor.from_shard(image, parallel_strategy)
+            mask_true_dc = DCTensor.from_shard(mask_true, parallel_strategy)
 
             # Forward pass on sharded data
             dcy = net(dcx)
@@ -102,9 +88,14 @@ def evaluate(
                 )
             global_ce_sum = SpatialAllReduce.apply(local_ce_sum, spatial_mesh)
 
-            # Divide by total global voxels to get the mean CE Loss
-            global_total_voxels = local_labels.numel() * math.prod(
-                parallel_strategy.num_shards
+            # Divide by the actual global voxel count to handle uneven shards.
+            local_voxel_count = torch.tensor(
+                float(local_labels.numel()),
+                device=local_labels.device,
+                dtype=torch.float32,
+            )
+            global_total_voxels = SpatialAllReduce.apply(
+                local_voxel_count, spatial_mesh
             )
             CE_loss = global_ce_sum / global_total_voxels
 

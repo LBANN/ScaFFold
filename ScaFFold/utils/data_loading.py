@@ -13,9 +13,11 @@
 # SPDX-License-Identifier: (Apache-2.0)
 
 import pickle
+from dataclasses import dataclass
 from os import listdir
 from os.path import isfile, join, splitext
 from pathlib import Path
+from typing import Dict, Optional, Tuple
 
 import numpy as np
 import torch
@@ -30,13 +32,89 @@ LEGACY_DATASET_FORMAT_VERSION = 1
 META_FILENAME = "meta.yaml"
 
 
+@dataclass(frozen=True)
+class SpatialShardSpec:
+    """Describe the local spatial shard owned by the current rank."""
+
+    shard_dims: Tuple[int, ...]
+    num_shards: Tuple[int, ...]
+    shard_indices: Tuple[int, ...]
+
+    def __post_init__(self):
+        if not (
+            len(self.shard_dims) == len(self.num_shards) == len(self.shard_indices)
+        ):
+            raise ValueError(
+                "shard_dims, num_shards, and shard_indices must have matching lengths"
+            )
+        if len(set(self.shard_dims)) != len(self.shard_dims):
+            raise ValueError(f"Shard dimensions must be unique: {self.shard_dims}")
+        for shard_dim, num_shards, shard_index in zip(
+            self.shard_dims, self.num_shards, self.shard_indices
+        ):
+            if shard_dim < 2:
+                raise ValueError(
+                    f"Invalid shard_dim {shard_dim}: only spatial dimensions are supported"
+                )
+            if num_shards < 1:
+                raise ValueError(
+                    f"Invalid num_shards {num_shards} for shard_dim {shard_dim}"
+                )
+            if shard_index < 0 or shard_index >= num_shards:
+                raise ValueError(
+                    f"Invalid shard_index {shard_index} for shard_dim {shard_dim} with {num_shards} shards"
+                )
+
+    @staticmethod
+    def _chunk_slice(size: int, num_shards: int, shard_index: int) -> slice:
+        """Match torch.chunk-style uneven shard boundaries."""
+
+        chunk_size = (size + num_shards - 1) // num_shards
+        start = shard_index * chunk_size
+        if start >= size:
+            raise ValueError(
+                f"Empty local shard: dim size {size}, num_shards {num_shards}, shard_index {shard_index}"
+            )
+        stop = min(size, start + chunk_size)
+        return slice(start, stop)
+
+    def slice_array(
+        self, array: np.ndarray, axis_map: Dict[int, int], array_label: str
+    ) -> np.ndarray:
+        if not self.shard_dims:
+            return array
+
+        slices = [slice(None)] * array.ndim
+        for shard_dim, num_shards, shard_index in zip(
+            self.shard_dims, self.num_shards, self.shard_indices
+        ):
+            if shard_dim not in axis_map:
+                raise ValueError(
+                    f"No axis mapping defined for {array_label} shard_dim {shard_dim}"
+                )
+            axis = axis_map[shard_dim]
+            if axis >= array.ndim:
+                raise ValueError(
+                    f"Axis {axis} out of range for {array_label} with shape {array.shape}"
+                )
+            slices[axis] = self._chunk_slice(array.shape[axis], num_shards, shard_index)
+
+        return array[tuple(slices)]
+
+
 class BasicDataset(Dataset):
     def __init__(
-        self, images_dir: str, mask_dir: str, mask_suffix: str = "", data_dir: str = ""
+        self,
+        images_dir: str,
+        mask_dir: str,
+        mask_suffix: str = "",
+        data_dir: str = "",
+        spatial_shard_spec: Optional[SpatialShardSpec] = None,
     ):
         self.images_dir = Path(images_dir)
         self.mask_dir = Path(mask_dir)
         self.mask_suffix = mask_suffix
+        self.spatial_shard_spec = spatial_shard_spec
         self.dataset_root = self.images_dir.parents[1]
         self.dataset_format_version = self._load_dataset_format_version()
 
@@ -63,9 +141,8 @@ class BasicDataset(Dataset):
         return len(self.ids)
 
     @staticmethod
-    def _load_numpy_array(path):
-        with open(path, "rb") as handle:
-            return np.load(handle)
+    def _load_numpy_array(path, mmap_mode=None):
+        return np.load(path, allow_pickle=False, mmap_mode=mmap_mode)
 
     def _load_dataset_format_version(self):
         meta_path = self.dataset_root / META_FILENAME
@@ -102,11 +179,28 @@ class BasicDataset(Dataset):
 
     @staticmethod
     def _prepare_optimized_image(img):
-        return np.ascontiguousarray(img, dtype=VOLUME_DTYPE)
+        return np.array(img, dtype=VOLUME_DTYPE, copy=True, order="C")
 
     @staticmethod
     def _prepare_optimized_mask(mask):
-        return np.ascontiguousarray(mask, dtype=MASK_DTYPE)
+        return np.array(mask, dtype=MASK_DTYPE, copy=True, order="C")
+
+    def _slice_image_array(self, img):
+        if self.spatial_shard_spec is None:
+            return img
+
+        if self.dataset_format_version >= DATASET_FORMAT_VERSION:
+            axis_map = {2: 1, 3: 2, 4: 3}
+        else:
+            axis_map = {2: 0, 3: 1, 4: 2}
+        return self.spatial_shard_spec.slice_array(img, axis_map, "image")
+
+    def _slice_mask_array(self, mask):
+        if self.spatial_shard_spec is None:
+            return mask
+
+        axis_map = {2: 0, 3: 1, 4: 2}
+        return self.spatial_shard_spec.slice_array(mask, axis_map, "mask")
 
     def __getitem__(self, idx):
         name = self.ids[idx]
@@ -119,8 +213,13 @@ class BasicDataset(Dataset):
         assert len(mask_file) == 1, (
             f"Either no mask or multiple masks found for the ID {name}: {mask_file}"
         )
-        mask = self._load_numpy_array(mask_file[0])
-        img = self._load_numpy_array(img_file[0])
+        mmap_mode = "r" if self.spatial_shard_spec is not None else None
+        # Memmap lets each rank slice out just its local shard without eagerly
+        # reading the full sample into process memory first.
+        mask = self._load_numpy_array(mask_file[0], mmap_mode=mmap_mode)
+        img = self._load_numpy_array(img_file[0], mmap_mode=mmap_mode)
+        mask = self._slice_mask_array(mask)
+        img = self._slice_image_array(img)
 
         if self.dataset_format_version >= DATASET_FORMAT_VERSION:
             img = self._prepare_optimized_image(img)
@@ -136,5 +235,17 @@ class BasicDataset(Dataset):
 
 
 class FractalDataset(BasicDataset):
-    def __init__(self, images_dir, mask_dir, data_dir):
-        super().__init__(images_dir, mask_dir, mask_suffix="_mask", data_dir=data_dir)
+    def __init__(
+        self,
+        images_dir,
+        mask_dir,
+        data_dir,
+        spatial_shard_spec: Optional[SpatialShardSpec] = None,
+    ):
+        super().__init__(
+            images_dir,
+            mask_dir,
+            mask_suffix="_mask",
+            data_dir=data_dir,
+            spatial_shard_spec=spatial_shard_spec,
+        )
