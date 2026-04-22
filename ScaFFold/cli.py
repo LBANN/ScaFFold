@@ -138,7 +138,7 @@ def main():
     )
     benchmark_parser.add_argument("--seed", type=int, help="Random seed.")
     benchmark_parser.add_argument(
-        "--batch-size", type=int, nargs="+", help="Batch sizes for each volume size."
+        "--batch-size", type=int, help="Batch sizes for each volume size."
     )
     benchmark_parser.add_argument(
         "--warmup-batches",
