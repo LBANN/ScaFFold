@@ -13,9 +13,13 @@
 # SPDX-License-Identifier: (Apache-2.0)
 
 import numpy as np
+import torch
 
 DEFAULT_NP_DTYPE = np.float64
 # Masks are values 0 <= x <= n_categories
 MASK_DTYPE = np.uint16
 # Volumes/img are 0 <= x <= 1
 VOLUME_DTYPE = np.float32
+
+# Shared AMP dtype selection for torch.autocast.
+AMP_DTYPE = torch.bfloat16
