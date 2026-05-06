@@ -117,6 +117,11 @@ def main():
         "--base-run-dir", type=str, help="Subfolder of $(pwd) in which to run jobs."
     )
     benchmark_parser.add_argument(
+        "--fract-base-dir",
+        type=str,
+        help="Base directory for fractal IFS and instances.",
+    )
+    benchmark_parser.add_argument(
         "--n-categories",
         type=int,
         help="Number of fractal categories present in the dataset.",
@@ -238,6 +243,11 @@ def main():
         if "dataset_dir" in combined_config and combined_config["dataset_dir"]:
             combined_config["dataset_dir"] = str(
                 Path(combined_config["dataset_dir"]).resolve()
+            )
+
+        if "fract_base_dir" in combined_config and combined_config["fract_base_dir"]:
+            combined_config["fract_base_dir"] = str(
+                Path(combined_config["fract_base_dir"]).resolve()
             )
 
         # Calculate these variables after override

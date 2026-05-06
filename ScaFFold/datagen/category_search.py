@@ -195,9 +195,10 @@ def main(config: Config) -> None:
         print(f"MPI size = {size}")
 
     # Setup directories
-    repo_src_path = config.library_root
-    fracts_sub_dir = f"/var{config.variance_threshold}"
-    fracts_write_dir = f"{repo_src_path}/fractals{fracts_sub_dir}/3DIFS_param"
+    fracts_sub_dir = f"var{config.variance_threshold}"
+    fracts_write_dir = os.path.join(
+        config.fract_base_dir, fracts_sub_dir, "3DIFS_param"
+    )
     if rank == 0:
         print(f"Writing fractals to {fracts_write_dir}")
         if os.path.exists(fracts_write_dir) and config.datagen_from_scratch:

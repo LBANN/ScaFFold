@@ -165,7 +165,7 @@ def main(config: Dict):
         fractal_colors = np.random.rand(max(config.n_categories, n_fracts_per_vol), 3)
 
         grid_size = math.floor(config.vol_size * config.scale)
-        library_root = str(config.library_root)
+        fract_base_dir = str(config.fract_base_dir)
 
         # Generation loop
         start_time = time.time()
@@ -197,8 +197,7 @@ def main(config: Dict):
                 )
 
                 point_cloud_path = os.path.join(
-                    library_root,
-                    "fractals",
+                    fract_base_dir,
                     instances_dir,
                     f"{curr_category:06d}",
                     f"{curr_category:06d}_{curr_instance:04d}.npy",

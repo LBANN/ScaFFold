@@ -80,11 +80,10 @@ def main(config: Config):
         print(f"MPI size = {size}")
 
     # Setup directories
-    repo_src_path = config.library_root
     fracts_sub_dir = f"var{config.variance_threshold}"
-    fracts_read_dir = f"{repo_src_path}/fractals/{fracts_sub_dir}/3DIFS_param"
-    instance_write_dir = (
-        f"{repo_src_path}fractals/{fracts_sub_dir}/instances/np{config.point_num}"
+    fracts_read_dir = os.path.join(config.fract_base_dir, fracts_sub_dir, "3DIFS_param")
+    instance_write_dir = os.path.join(
+        config.fract_base_dir, fracts_sub_dir, "instances", f"np{config.point_num}"
     )
     if rank == 0:
         print(

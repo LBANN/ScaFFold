@@ -17,11 +17,11 @@ checkpoint_interval: -1            # Checkpoint every C epochs; set to -1 to dis
 # Internal/dev use only
 variance_threshold: 0.15           # Variance threshold for valid fractals. Default is 0.15.
 n_fracts_per_vol: 3                # Number of fractals overlaid in each volume. Default is 3.
-val_split: 25                      # In percent.
+val_split: 30                      # In percent.
 epochs: -1                         # Number of training epochs.
-starting_learning_rate: 0.1        # Initial learning rate for training.
+starting_learning_rate: 0.01       # Initial learning rate for training.
 min_learning_rate: 0.001           # Minimum learning rate for CosineAnnealingWarmRestarts.
-T_0: 100                            # Epochs in the first cosine restart cycle.
+T_0: 100                           # Epochs in the first cosine restart cycle.
 T_mult: 2                          # Restart cycle growth factor.
 disable_scheduler: 0               # If 1, disable scheduler during training to use constant LR.
 more_determinism: 0                # If 1, improve model training determinism.

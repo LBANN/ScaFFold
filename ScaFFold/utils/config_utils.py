@@ -32,6 +32,9 @@ class Config:
         self.dataset_dir = str(
             Path(config_dict.get("dataset_dir", "datasets/")).resolve()
         )
+        self.fract_base_dir = str(
+            Path(config_dict.get("fract_base_dir", "fractals/")).resolve()
+        )
         self.job_name = config_dict.get("job_name", "benchmark")
         self.n_categories = config_dict["n_categories"]
         self.problem_scale = config_dict["problem_scale"]

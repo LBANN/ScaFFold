@@ -230,10 +230,16 @@ def main(kwargs_dict: dict = {}):
                 f"DDP ranks = {ddp_ranks} "
                 f"world_size={world_size} // prod(dc_num_shards)={total_shards}"
             )
+        too_small_splits = []
         if global_batch_size > trainer.n_train:
+            too_small_splits.append(f"training n_train={trainer.n_train}")
+        if global_batch_size > trainer.n_val:
+            too_small_splits.append(f"validation n_val={trainer.n_val}")
+        if too_small_splits:
             raise ValueError(
-                "Effective global batch size exceeds available training samples: "
-                f"global_batch_size={global_batch_size}, n_train={trainer.n_train}, "
+                "Effective global batch size exceeds available samples: "
+                f"global_batch_size={global_batch_size}, "
+                f"{', '.join(too_small_splits)}, "
                 f"batch_size={config.batch_size}, world_size={world_size}, "
                 f"dc_num_shards={config.dc_num_shards}"
             )

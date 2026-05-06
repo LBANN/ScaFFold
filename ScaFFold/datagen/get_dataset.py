@@ -38,6 +38,7 @@ INCLUDE_KEYS = [
     "seed",
     "variance_threshold",
     "n_fracts_per_vol",
+    "val_split",
 ]
 
 
