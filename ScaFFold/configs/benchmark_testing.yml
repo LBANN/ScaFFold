@@ -34,5 +34,6 @@ checkpoint_dir: "checkpoints"      # Subfolder in which to save training checkpo
 loss_freq: 1                       # Number of epochs between logging the overall loss.
 normalize: 1                       # Cateogry search normalization parameter
 warmup_batches: 5                  # How many warmup batches per rank to run before training.
+ce_weight_sample_fraction: 0.1     # Fraction of training masks to sample when estimating background vs foreground CE weights.
 dataset_reuse_enforce_commit_id: 0 # Enforce matching commit IDs for dataset reuse.
 target_dice: 0.95

@@ -74,6 +74,9 @@ class Config:
         self.checkpoint_dir = config_dict["checkpoint_dir"]
         self.normalize = config_dict["normalize"]
         self.warmup_batches = config_dict.get("warmup_batches")
+        self.ce_weight_sample_fraction = config_dict.get(
+            "ce_weight_sample_fraction", 0.1
+        )
         self.dataset_reuse_enforce_commit_id = config_dict[
             "dataset_reuse_enforce_commit_id"
         ]

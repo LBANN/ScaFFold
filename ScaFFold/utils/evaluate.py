@@ -17,11 +17,9 @@ import torch.nn.functional as F
 from distconv import DCTensor
 from tqdm import tqdm
 
-from ScaFFold.utils.data_types import AMP_DTYPE, VOLUME_DTYPE
-from ScaFFold.utils.dice_score import (
-    SpatialAllReduce,
-    compute_sharded_dice,
-)
+from ScaFFold.utils.data_types import AMP_DTYPE
+from ScaFFold.utils.dice_score import compute_sharded_dice
+from ScaFFold.utils.losses import compute_sharded_cross_entropy_loss
 from ScaFFold.utils.perf_measure import annotate
 
 
@@ -56,6 +54,7 @@ def evaluate(
 
     with torch.autocast(**autocast_kwargs):
         val_loss_epoch = 0.0
+        class_weights = getattr(criterion, "weight", None)
         for batch in tqdm(
             dataloader,
             total=num_val_batches,
@@ -94,22 +93,15 @@ def evaluate(
 
             # Calculate CE and Dice loss in single precision for numerical stability.
             with torch.autocast(device_type=autocast_device_type, enabled=False):
-                # Compute global CE loss from sharded CE loss
-                local_ce_sum = F.cross_entropy(
-                    local_preds.float(), local_labels, reduction="sum"
+                CE_loss = compute_sharded_cross_entropy_loss(
+                    local_preds,
+                    local_labels,
+                    spatial_mesh,
+                    parallel_strategy.num_shards,
+                    autocast_device_type,
+                    class_weights,
                 )
-                global_ce_sum = SpatialAllReduce.apply(local_ce_sum, spatial_mesh)
-                local_voxel_count = torch.tensor(
-                    float(local_labels.numel()),
-                    device=local_labels.device,
-                    dtype=VOLUME_DTYPE,
-                )
-                global_total_voxels = SpatialAllReduce.apply(
-                    local_voxel_count, spatial_mesh
-                )
-                CE_loss = global_ce_sum / global_total_voxels
 
-                # Compute global dice loss from sharded dice loss
                 mask_pred_probs = F.softmax(local_preds.float(), dim=1)
                 mask_true_onehot = (
                     F.one_hot(local_labels, n_categories + 1)

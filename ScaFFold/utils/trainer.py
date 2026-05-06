@@ -12,6 +12,7 @@
 #
 # SPDX-License-Identifier: (Apache-2.0)
 
+# Standard library
 import math
 import os
 import shutil
@@ -30,14 +31,15 @@ from tqdm import tqdm
 from ScaFFold.utils.checkpointing import CheckpointManager
 from ScaFFold.utils.data_loading import FractalDataset, SpatialShardSpec
 from ScaFFold.utils.data_types import AMP_DTYPE, VOLUME_DTYPE
-from ScaFFold.utils.dice_score import (
-    SpatialAllReduce,
-    compute_sharded_dice,
-)
+from ScaFFold.utils.dice_score import compute_sharded_dice
 from ScaFFold.utils.distributed import get_local_rank, get_world_rank, get_world_size
 
 # Local
 from ScaFFold.utils.evaluate import evaluate
+from ScaFFold.utils.losses import (
+    _compute_ce_class_weights,
+    compute_sharded_cross_entropy_loss,
+)
 from ScaFFold.utils.perf_measure import adiak_value, begin_code_region, end_code_region
 from ScaFFold.utils.utils import gather_and_print_mem
 
@@ -72,6 +74,7 @@ class BaseTrainer:
         self.scheduler = None
         self.grad_scaler = None
         self.criterion = None
+        self.ce_class_weights = None
         self.global_step = 0
         self.start_epoch = -1
         self.ps = getattr(self.config, "_parallel_strategy", None)
@@ -220,11 +223,24 @@ class BaseTrainer:
         self.grad_scaler = torch.amp.GradScaler("cuda", enabled=self.use_grad_scaler)
 
         # Set up loss function
-        self.criterion = (
-            nn.CrossEntropyLoss()
-            if self.config.n_categories + 1 > 1
-            else nn.BCEWithLogitsLoss()
-        )
+        if self.config.n_categories + 1 > 1:
+            ce_class_weights = _compute_ce_class_weights(
+                train_set=self.train_set,
+                n_train=self.n_train,
+                n_categories=self.config.n_categories,
+                device=self.device,
+                sample_fraction=self.config.ce_weight_sample_fraction,
+                dist_enabled=self.config.dist,
+                world_rank=self.world_rank,
+                log=self.log,
+            )
+            self.criterion = nn.CrossEntropyLoss(weight=ce_class_weights).to(
+                self.device
+            )
+        else:
+            self.criterion = nn.BCEWithLogitsLoss().to(self.device)
+        if isinstance(self.criterion, nn.CrossEntropyLoss):
+            self.ce_class_weights = self.criterion.weight
 
         self.log.info(
             f"Optimizer: {self.optimizer}, Scheduler: {self.scheduler}, AMP dtype: {self.amp_dtype}, Gradient Scaler Enabled: {self.use_grad_scaler}"
@@ -464,24 +480,15 @@ class PyTorchTrainer(BaseTrainer):
 
                 # Calculate CE and Dice loss in single precision for numerical stability.
                 with torch.autocast(**self._autocast_kwargs(enabled=False)):
-                    # Compute global CE loss from sharded CE loss
-                    local_ce_sum = F.cross_entropy(
-                        local_preds.float(), local_labels, reduction="sum"
+                    loss_ce = compute_sharded_cross_entropy_loss(
+                        local_preds,
+                        local_labels,
+                        self.spatial_mesh,
+                        self.config.dc_num_shards,
+                        self.amp_device_type,
+                        self.ce_class_weights,
                     )
-                    global_ce_sum = SpatialAllReduce.apply(
-                        local_ce_sum, self.spatial_mesh
-                    )
-                    local_voxel_count = torch.tensor(
-                        float(local_labels.numel()),
-                        device=local_labels.device,
-                        dtype=VOLUME_DTYPE,
-                    )
-                    global_total_voxels = SpatialAllReduce.apply(
-                        local_voxel_count, self.spatial_mesh
-                    )
-                    loss_ce = global_ce_sum / global_total_voxels
 
-                    # Compute global dice loss from sharded dice loss
                     local_preds_softmax = F.softmax(local_preds.float(), dim=1)
                     local_labels_one_hot = (
                         F.one_hot(
@@ -659,26 +666,15 @@ class PyTorchTrainer(BaseTrainer):
 
                             # Calculate CE and Dice loss in single precision for numerical stability.
                             with torch.autocast(**self._autocast_kwargs(enabled=False)):
-                                # Compute global CE loss from sharded CE loss
-                                local_ce_sum = F.cross_entropy(
-                                    local_preds.float(),
+                                loss_ce = compute_sharded_cross_entropy_loss(
+                                    local_preds,
                                     local_labels,
-                                    reduction="sum",
+                                    self.spatial_mesh,
+                                    self.config.dc_num_shards,
+                                    self.amp_device_type,
+                                    self.ce_class_weights,
                                 )
-                                global_ce_sum = SpatialAllReduce.apply(
-                                    local_ce_sum, self.spatial_mesh
-                                )
-                                local_voxel_count = torch.tensor(
-                                    float(local_labels.numel()),
-                                    device=local_labels.device,
-                                    dtype=VOLUME_DTYPE,
-                                )
-                                global_total_voxels = SpatialAllReduce.apply(
-                                    local_voxel_count, self.spatial_mesh
-                                )
-                                loss_ce = global_ce_sum / global_total_voxels
 
-                                # Compute global dice loss from sharded dice loss
                                 local_preds_softmax = F.softmax(
                                     local_preds.float(), dim=1
                                 )
