@@ -61,7 +61,10 @@ class Config:
         self.seed = config_dict["seed"]
         self.dist = bool(config_dict["dist"])
         self.framework = config_dict["framework"]
-        self.learning_rate = config_dict["learning_rate"]
+        self.starting_learning_rate = config_dict["starting_learning_rate"]
+        self.min_learning_rate = config_dict["min_learning_rate"]
+        self.T_0 = config_dict["T_0"]
+        self.T_mult = config_dict["T_mult"]
         self.variance_threshold = config_dict["variance_threshold"]
         self.torch_amp = bool(config_dict["torch_amp"])
         self.loss_freq = config_dict["loss_freq"]

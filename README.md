@@ -83,7 +83,10 @@ variance_threshold: 0.15           # Variance threshold for valid fractals. Defa
 n_fracts_per_vol: 3                # Number of fractals overlaid in each volume. Default is 3.
 val_split: 25                      # In percent.
 epochs: 100                        # Number of training epochs.
-learning_rate: .0001               # Learning rate for training.
+starting_learning_rate: .01        # Initial learning rate for training.
+min_learning_rate: .001            # Minimum learning rate for CosineAnnealingWarmRestarts.
+T_0: 100                           # Epochs in the first cosine restart cycle.
+T_mult: 2                          # Restart cycle growth factor.
 disable_scheduler: 1               # If 1, disable scheduler during training to use constant LR.
 more_determinism: 0                # If 1, improve model training determinism.
 datagen_from_scratch: 0            # If 1, delete existing fractals and instances, then regenerate from scratch.

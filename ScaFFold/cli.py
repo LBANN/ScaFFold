@@ -177,6 +177,28 @@ def main():
         type=int,
         help="Number of training epochs.",
     )
+    benchmark_parser.add_argument(
+        "--starting-learning-rate",
+        type=float,
+        help="Initial learning rate for training.",
+    )
+    benchmark_parser.add_argument(
+        "--min-learning-rate",
+        type=float,
+        help="Minimum learning rate for CosineAnnealingWarmRestarts.",
+    )
+    benchmark_parser.add_argument(
+        "--T-0",
+        dest="T_0",
+        type=int,
+        help="Epochs in the first cosine restart cycle.",
+    )
+    benchmark_parser.add_argument(
+        "--T-mult",
+        dest="T_mult",
+        type=int,
+        help="Restart cycle growth factor.",
+    )
 
     comm = MPI.COMM_WORLD
     rank = comm.Get_rank()

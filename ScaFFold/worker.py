@@ -217,14 +217,18 @@ def main(kwargs_dict: dict = {}):
         trainer.spatial_mesh = ps.device_mesh[ps.distconv_dim_names]
         num_spatial_dims = len(ps.shard_dim)
         trainer.ddp_placements = [Shard(0)] + [Replicate()] * num_spatial_dims
-        global_batch_size = config.batch_size * (
-            world_size // math.prod(config.dc_num_shards)
-        )
+        total_shards = math.prod(config.dc_num_shards)
+        global_batch_size = config.batch_size * (world_size // total_shards)
+        ddp_ranks = world_size // total_shards
         if rank == 0:
             log.info(
                 f"Effective global batch size = {global_batch_size} "
                 f"(batch_size={config.batch_size} * "
-                f"(world_size={world_size} / prod(dc_num_shards)={math.prod(config.dc_num_shards)}))"
+                f"(world_size={world_size} / prod(dc_num_shards)={total_shards}))"
+            )
+            log.info(
+                f"DDP ranks = {ddp_ranks} "
+                f"world_size={world_size} // prod(dc_num_shards)={total_shards}"
             )
         if global_batch_size > trainer.n_train:
             raise ValueError(
