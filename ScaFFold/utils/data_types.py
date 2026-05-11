@@ -19,7 +19,10 @@ DEFAULT_NP_DTYPE = np.float64
 # Masks are values 0 <= x <= n_categories
 MASK_DTYPE = np.uint16
 # Volumes/img are 0 <= x <= 1
-VOLUME_DTYPE = np.float32
+VOLUME_DTYPE_NAME = "float32"
+VOLUME_NP_DTYPE = getattr(np, VOLUME_DTYPE_NAME)
+VOLUME_TORCH_DTYPE = getattr(torch, VOLUME_DTYPE_NAME)
+VOLUME_DTYPE = VOLUME_NP_DTYPE
 
 # Shared AMP dtype selection for torch.autocast.
 AMP_DTYPE = torch.bfloat16

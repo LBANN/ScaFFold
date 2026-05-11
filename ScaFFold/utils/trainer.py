@@ -30,7 +30,7 @@ from tqdm import tqdm
 
 from ScaFFold.utils.checkpointing import CheckpointManager
 from ScaFFold.utils.data_loading import FractalDataset, SpatialShardSpec
-from ScaFFold.utils.data_types import AMP_DTYPE, VOLUME_DTYPE
+from ScaFFold.utils.data_types import AMP_DTYPE, VOLUME_TORCH_DTYPE
 from ScaFFold.utils.dice_score import compute_sharded_dice
 from ScaFFold.utils.distributed import get_local_rank, get_world_rank, get_world_size
 
@@ -436,7 +436,7 @@ class PyTorchTrainer(BaseTrainer):
 
             images = images.to(
                 device=self.device,
-                dtype=VOLUME_DTYPE,
+                dtype=VOLUME_TORCH_DTYPE,
                 memory_format=torch.channels_last_3d,
                 non_blocking=True,
             )
@@ -611,7 +611,7 @@ class PyTorchTrainer(BaseTrainer):
                         begin_code_region("image_to_device")
                         images = images.to(
                             device=self.device,
-                            dtype=VOLUME_DTYPE,
+                            dtype=VOLUME_TORCH_DTYPE,
                             memory_format=torch.channels_last_3d,  # NDHWC (channels last) vs NCDHW (channels first)
                             non_blocking=True,
                         )
@@ -749,7 +749,9 @@ class PyTorchTrainer(BaseTrainer):
                     self.config.n_categories,
                     self.config._parallel_strategy,
                 )
-                dice_info = torch.tensor([dice_sum, numsamples], dtype=VOLUME_DTYPE)
+                dice_info = torch.tensor(
+                    [dice_sum, numsamples], dtype=VOLUME_TORCH_DTYPE
+                )
                 if self.config.dist:
                     dice_info = dice_info.to(device=self.device)
                     torch.distributed.all_reduce(
