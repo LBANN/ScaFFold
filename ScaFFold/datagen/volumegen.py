@@ -258,7 +258,6 @@ def _voxelized_fractals_for_volume(
 
 def _render_volume_shard(config, voxelized_fractals, shard_id: int):
     """Render one physical shard from precomputed global voxel indices."""
-
     num_shards, shard_dims = _physical_sharding(config)
     shard_indices = shard_id_to_indices(shard_id, num_shards)
     slices = spatial_slices(

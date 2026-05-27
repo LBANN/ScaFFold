@@ -279,17 +279,6 @@ class Config:
         self.dc_num_shards = config_dict["dc_num_shards"]
         self.dc_shard_dims = config_dict["dc_shard_dims"]
         self.dc_total_shards = math.prod(self.dc_num_shards)
-        unsupported_dataset_keys = [
-            key
-            for key in ("dataset_num_shards", "dataset_shard_dims")
-            if key in config_dict
-        ]
-        if unsupported_dataset_keys:
-            raise ValueError(
-                "Configuration Mismatch: dataset_num_shards/dataset_shard_dims "
-                "are not supported. Use dc_num_shards/dc_shard_dims for the "
-                "v3 physical dataset layout."
-            )
         # Safety Check: Length mismatch
         if len(self.dc_num_shards) != len(self.dc_shard_dims):
             raise ValueError(
