@@ -568,7 +568,7 @@ class PyTorchTrainer(BaseTrainer):
         Execute model training
         """
 
-        epoch = 1
+        epoch = self.start_epoch
         dice_score_train = 0
         with open(self.outfile_path, "a", newline="") as outfile:
             start = time.time()
