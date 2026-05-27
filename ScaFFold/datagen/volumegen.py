@@ -17,7 +17,7 @@ import pickle
 import random
 import time
 from math import ceil
-from typing import Dict
+from typing import Callable, Dict
 
 import numpy as np
 from mpi4py import MPI
@@ -25,7 +25,17 @@ from mpi4py import MPI
 from ScaFFold.datagen import layout
 from ScaFFold.utils.config_utils import Config
 from ScaFFold.utils.data_types import MASK_DTYPE, VOLUME_DTYPE
+from ScaFFold.utils.spatial_sharding import (
+    normalize_sharding,
+    shard_file_suffix,
+    shard_id_to_indices,
+    spatial_slices,
+    total_shards,
+)
 from ScaFFold.utils.utils import setup_mpi_logger
+
+DEFAULT_DC_NUM_SHARDS = (1, 1, 1)
+DEFAULT_DC_SHARD_DIMS = (2, 3, 4)
 
 # Liveness marker for the directory being generated into. Volume writing is the
 # long phase of a generation and it happens deep inside the tree
@@ -185,6 +195,106 @@ def resolve_grid_size(config) -> int:
     return int(config.vol_size)
 
 
+def _sharding_values(config):
+    num_shards = getattr(config, "dc_num_shards", DEFAULT_DC_NUM_SHARDS)
+    shard_dims = getattr(config, "dc_shard_dims", DEFAULT_DC_SHARD_DIMS)
+    return num_shards, shard_dims
+
+
+def _physical_sharding(config):
+    """Return normalized physical sharding from the generation config."""
+
+    num_shards, shard_dims = _sharding_values(config)
+    return normalize_sharding(num_shards, shard_dims)
+
+
+def _validate_generation_config(config):
+    """Validate sharded generation settings and return normalized layout data."""
+
+    num_shards, shard_dims = _physical_sharding(config)
+    n_total_shards = total_shards(num_shards)
+    grid_size = resolve_grid_size(config)
+
+    return num_shards, shard_dims, n_total_shards, grid_size
+
+
+def _voxelized_fractals_for_volume(
+    config,
+    curr_vol: np.ndarray,
+    fractal_colors: np.ndarray,
+    instances_dir: str,
+    grid_size: int,
+    point_cloud_loader: Callable[[str], np.ndarray] = load_np_ptcloud,
+):
+    """Load and voxelize all fractals needed for one logical volume."""
+
+    n_fracts_per_vol = config.n_fracts_per_vol
+    voxelized_fractals = []
+
+    for curr_fract in range(n_fracts_per_vol):
+        curr_category = int(curr_vol[1 + 2 * curr_fract])
+        curr_instance = int(curr_vol[1 + 2 * curr_fract + 1])
+        fractal_color = fractal_colors[curr_category]
+
+        point_cloud_path = os.path.join(
+            instances_dir,
+            f"{curr_category:06d}",
+            f"{curr_category:06d}_{curr_instance:04d}.npy",
+        )
+        if point_cloud_loader is load_np_ptcloud and not os.path.exists(
+            point_cloud_path
+        ):
+            raise FileNotFoundError(
+                f"File {point_cloud_path} does not exist. "
+                "Ensure you have run 'scaffold generate_fractals ...'"
+            )
+
+        points = point_cloud_loader(point_cloud_path)
+        idx = points_to_voxel_indices(points, grid_size)
+        voxelized_fractals.append((curr_category, fractal_color, idx))
+
+    return voxelized_fractals
+
+
+def _render_volume_shard(config, voxelized_fractals, shard_id: int):
+    """Render one physical shard from precomputed global voxel indices."""
+
+    num_shards, shard_dims = _physical_sharding(config)
+    shard_indices = shard_id_to_indices(shard_id, num_shards)
+    slices = spatial_slices(
+        (config.vol_size, config.vol_size, config.vol_size),
+        shard_dims,
+        num_shards,
+        shard_indices,
+    )
+    local_shape = tuple(s.stop - s.start for s in slices)
+
+    volume = np.full((3, *local_shape), 0, dtype=VOLUME_DTYPE)
+    mask = np.full(local_shape, 0, dtype=MASK_DTYPE)
+
+    for curr_category, fractal_color, idx in voxelized_fractals:
+        keep = np.ones(idx.shape[0], dtype=bool)
+        for axis, axis_slice in enumerate(slices):
+            keep &= idx[:, axis] >= axis_slice.start
+            keep &= idx[:, axis] < axis_slice.stop
+
+        if not np.any(keep):
+            continue
+
+        local_idx = idx[keep]
+        local_idx[:, 0] -= slices[0].start
+        local_idx[:, 1] -= slices[1].start
+        local_idx[:, 2] -= slices[2].start
+        d = local_idx[:, 0]
+        h = local_idx[:, 1]
+        w = local_idx[:, 2]
+
+        volume[:, d, h, w] = fractal_color[:, None]
+        mask[d, h, w] = curr_category + 1
+
+    return volume, mask
+
+
 def main(config: Dict):
     # Initialize MPI
     comm = MPI.COMM_WORLD
@@ -199,6 +309,7 @@ def main(config: Dict):
     volumes_contents_path = os.path.join(dataset_dir, "volumes_contents.csv")
 
     n_fracts_per_vol = config.n_fracts_per_vol
+    _, _, n_total_shards, grid_size = _validate_generation_config(config)
 
     random.seed(config.seed)  # Python
     np.random.seed(config.seed)  # NumPy
@@ -260,6 +371,11 @@ def main(config: Dict):
     # Broadcast to all ranks
     volumes_contents = comm.bcast(volumes_contents, root=0)
 
+    # Each writer defensively creates the output dirs after root's broadcast.
+    for subdir in ["training", "validation"]:
+        os.makedirs(os.path.join(vol_path, subdir), exist_ok=True)
+        os.makedirs(os.path.join(mask_path, subdir), exist_ok=True)
+
     # Determine train/val split globally so all ranks know where to save
     num_volumes = len(volumes_contents)
     random.seed(config.seed)  # Reset seed to ensure all ranks get same split
@@ -267,11 +383,11 @@ def main(config: Dict):
         random.sample(range(num_volumes), int(num_volumes * config.val_split / 100))
     )
 
-    # Work distribution
-    num_volumes = len(volumes_contents)
-    stride = ceil(num_volumes / size)
+    # Work distribution: each task renders one physical shard of one logical volume.
+    total_tasks = num_volumes * n_total_shards
+    stride = ceil(total_tasks / size)
     start_idx = rank * stride
-    end_idx = min(((rank + 1) * stride), num_volumes)
+    end_idx = min(((rank + 1) * stride), total_tasks)
 
     # Per-rank generation status. A rank that fails records the message here and
     # keeps executing the collective sequence below so every rank stays in step;
@@ -282,21 +398,19 @@ def main(config: Dict):
 
     try:
         if start_idx >= end_idx:
-            log.debug("Rank %s given no volumes to generate", rank)
+            log.debug("Rank %s given no physical shard tasks to generate", rank)
 
         else:
-            volumes_contents_subset = volumes_contents[start_idx:end_idx]
             log.debug(
-                "Rank %s responsible for volumes %s through %s",
+                "Rank %s responsible for physical shard tasks %s through %s",
                 rank,
-                volumes_contents_subset[0][0],
-                volumes_contents_subset[-1][0],
+                start_idx,
+                end_idx - 1,
             )
 
             np.random.seed(config.seed)
             fractal_colors = np.random.rand(config.n_categories, 3)
 
-            grid_size = resolve_grid_size(config)
             # The instance library is keyed by seed (see ScaFFold.datagen
             # .layout), so a volume can only ever be built from point clouds
             # this run's seed produced. Resolved once, outside the loop.
@@ -310,89 +424,76 @@ def main(config: Dict):
             heartbeat = StagingHeartbeat(dataset_dir)
             heartbeat.beat()
             start_time = time.time()
-            for i, curr_vol in enumerate(volumes_contents_subset):
+            n_generated_shards = 0
+            cached_volume_idx = None
+            cached_global_vol_idx = None
+            cached_voxelized_fractals = None
+
+            for i, task_idx in enumerate(range(start_idx, end_idx)):
                 heartbeat.beat()
                 if i % 10 == 0:
-                    log.debug("Rank %s processing local volume %s", rank, i)
+                    log.debug(
+                        "Rank %s processing local physical shard task %s", rank, i
+                    )
 
-                volume = np.full(
-                    (config.vol_size, config.vol_size, config.vol_size, 3),
-                    0,
-                    dtype=VOLUME_DTYPE,
-                )
-                mask = np.full(
-                    (config.vol_size, config.vol_size, config.vol_size),
-                    0,
-                    dtype=MASK_DTYPE,
-                )
+                volume_idx = task_idx // n_total_shards
+                shard_id = task_idx % n_total_shards
 
-                global_vol_idx = curr_vol[0]
-                vol_seed = config.seed + int(global_vol_idx)
-                random.seed(vol_seed)
-                np.random.seed(vol_seed)
+                if cached_volume_idx != volume_idx:
+                    curr_vol = volumes_contents[volume_idx]
+                    global_vol_idx = int(curr_vol[0])
+                    vol_seed = config.seed + global_vol_idx
+                    random.seed(vol_seed)
+                    np.random.seed(vol_seed)
 
-                for curr_fract in range(n_fracts_per_vol):
-                    curr_category = curr_vol[1 + 2 * curr_fract]
-                    curr_instance = curr_vol[1 + 2 * curr_fract + 1]
-                    fractal_color = fractal_colors[curr_category]
-
-                    point_cloud_path = os.path.join(
+                    cached_voxelized_fractals = _voxelized_fractals_for_volume(
+                        config,
+                        curr_vol,
+                        fractal_colors,
                         instances_dir,
-                        f"{curr_category:06d}",
-                        f"{curr_category:06d}_{curr_instance:04d}.npy",
+                        grid_size,
                     )
+                    cached_volume_idx = volume_idx
+                    cached_global_vol_idx = global_vol_idx
 
-                    if not os.path.exists(point_cloud_path):
-                        raise FileNotFoundError(
-                            f"File {point_cloud_path} does not exist. "
-                            "Ensure you have run 'scaffold generate_fractals ...'"
-                        )
-
-                    points = load_np_ptcloud(point_cloud_path)
-                    voxel_idx = points_to_voxel_indices(points, grid_size)
-
-                    assert voxel_idx.shape[1] == volume.ndim - 1, (
-                        f"voxel index width {voxel_idx.shape[1]} != volume spatial "
-                        f"dims {volume.ndim - 1}"
-                    )
-
-                    # Scatter only the occupied voxels: O(points) writes instead
-                    # of two full-volume boolean-mask traversals per fractal.
-                    rows, cols, depths = (
-                        voxel_idx[:, 0],
-                        voxel_idx[:, 1],
-                        voxel_idx[:, 2],
-                    )
-                    volume[rows, cols, depths] = fractal_color
-                    mask[rows, cols, depths] = curr_category + 1
+                volume_to_save, mask_to_save = _render_volume_shard(
+                    config,
+                    cached_voxelized_fractals,
+                    shard_id,
+                )
 
                 # Determine destination folder
-                subdir = "validation" if global_vol_idx in val_indices else "training"
-                # Tensors must logically be channels-first, later we will change striding/storage to channels-last on GPU (metadata will always stay channels-first).
-                volume_channels_first = volume.transpose((3, 0, 1, 2))
-                volume_to_save = np.ascontiguousarray(
-                    volume_channels_first, dtype=VOLUME_DTYPE
+                subdir = (
+                    "validation" if cached_global_vol_idx in val_indices else "training"
                 )
-                mask_to_save = np.ascontiguousarray(mask, dtype=MASK_DTYPE)
+                shard_suffix = shard_file_suffix(shard_id)
 
-                vol_file = os.path.join(vol_path, subdir, f"{global_vol_idx}.npy")
+                vol_file = os.path.join(
+                    vol_path, subdir, f"{cached_global_vol_idx}{shard_suffix}.npy"
+                )
                 with open(vol_file, "wb") as f:
                     np.save(f, volume_to_save)
 
                 mask_file = os.path.join(
-                    mask_path, subdir, f"{global_vol_idx}_mask.npy"
+                    mask_path,
+                    subdir,
+                    f"{cached_global_vol_idx}{shard_suffix}_mask.npy",
                 )
                 with open(mask_file, "wb") as f:
                     np.save(f, mask_to_save)
+                n_generated_shards += 1
 
             end_time = time.time()
             total_time = end_time - start_time
             if rank == 0:
+                shard_rate = n_generated_shards / total_time
                 log.info(
-                    "Rank 0 generated %s volumes in %.2f seconds | %.2f volumes per second",
-                    len(volumes_contents_subset),
+                    "Rank 0 generated %s volume shards from %s physical shard "
+                    "tasks in %.2f seconds | %.2f shards per second",
+                    n_generated_shards,
+                    end_idx - start_idx,
                     total_time,
-                    len(volumes_contents_subset) / total_time,
+                    shard_rate,
                 )
     except BaseException as e:
         # Capture the failure locally instead of letting it unwind past the

@@ -48,6 +48,8 @@ STALE_STAGING_AGE_SECONDS = 24 * 60 * 60
 # writer without stat-ing every volume file.
 _STALE_PROBE_MAX_DEPTH = 3
 _STALE_PROBE_MAX_DIRS = 10000
+DEFAULT_DC_NUM_SHARDS = [1, 1, 1]
+DEFAULT_DC_SHARD_DIMS = [2, 3, 4]
 # Bumped from 2 to 3 when instance point clouds moved from float64 to float32:
 # the storage layout is unchanged, but float32 voxel binning shifts a handful of
 # boundary voxels, so a float64-era dataset must not be reused as if it were
@@ -55,11 +57,10 @@ _STALE_PROBE_MAX_DIRS = 10000
 # (grid_size - 1 - span)/2 to (grid_size - span)/2: every volume and mask
 # generated before that was misregistered by half a voxel (with the first
 # half-voxel of each axis clipped onto plane 0), so those datasets must be
-# regenerated rather than reused. This version stamps new datasets, gates reuse
-# below, and feeds the config_id hash, so an older dataset is neither matched nor
-# scanned. The loader in data_loading.py keeps its own (lower) minimum-layout
-# version and still reads v4 through the modern dense path.
-DATASET_FORMAT_VERSION = 4
+# regenerated rather than reused. Bumped from 4 to 5 when generated volumes
+# became physical shard files named by DistConv shard id, so dense v4 datasets
+# are never mistaken for shard-suffixed datasets.
+DATASET_FORMAT_VERSION = 5
 INCLUDE_KEYS = [
     "dataset_format_version",
     "n_categories",
@@ -69,6 +70,8 @@ INCLUDE_KEYS = [
     "variance_threshold",
     "n_fracts_per_vol",
     "val_split",
+    "dc_num_shards",
+    "dc_shard_dims",
 ]
 
 
@@ -84,6 +87,16 @@ def canonicalize(input):
         return input
 
 
+def _with_dataset_defaults(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a config dict with dataset-version and default shard keys set."""
+
+    config = config.copy()
+    config["dataset_format_version"] = DATASET_FORMAT_VERSION
+    config.setdefault("dc_num_shards", list(DEFAULT_DC_NUM_SHARDS))
+    config.setdefault("dc_shard_dims", list(DEFAULT_DC_SHARD_DIMS))
+    return config
+
+
 def _get_required_keys_dict(
     config: Dict[str, Any], include_keys: list[str]
 ) -> Dict[str, Any]:
@@ -91,6 +104,7 @@ def _get_required_keys_dict(
     Build a dict containing only the required keys.
     Raises KeyError if any required key is missing.
     """
+    config = _with_dataset_defaults(config)
     missing = [key for key in include_keys if key not in config]
     if missing:
         raise KeyError(
@@ -99,6 +113,41 @@ def _get_required_keys_dict(
         )
     required = {key: config[key] for key in include_keys}
     return canonicalize(required)
+
+
+def _canonicalize_shard_layout(volume_config: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize shard layout ordering so equivalent layouts share cache IDs."""
+
+    canonical_config = volume_config.copy()
+    num_shards = canonical_config["dc_num_shards"]
+    shard_dims = canonical_config["dc_shard_dims"]
+    if len(num_shards) != len(shard_dims):
+        raise ValueError(
+            f"dc_num_shards {num_shards} must have same length as "
+            f"dc_shard_dims {shard_dims}"
+        )
+
+    shard_layout = sorted(
+        (int(shard_dim), int(num_shard))
+        for num_shard, shard_dim in zip(num_shards, shard_dims)
+    )
+    canonical_config["dc_shard_dims"] = [shard_dim for shard_dim, _ in shard_layout]
+    canonical_config["dc_num_shards"] = [num_shard for _, num_shard in shard_layout]
+    return canonical_config
+
+
+def _volume_config(
+    config_dict: Dict[str, Any], canonicalize_shard_layout: bool = True
+) -> Dict[str, Any]:
+    """Build the hashable dataset config subset."""
+
+    volume_config = _get_required_keys_dict(
+        config=config_dict,
+        include_keys=INCLUDE_KEYS,
+    )
+    if canonicalize_shard_layout:
+        volume_config = _canonicalize_shard_layout(volume_config)
+    return volume_config
 
 
 def _hash_volume_config(volume_config: Dict[str, Any]) -> str:
@@ -221,17 +270,6 @@ def _cleanup_stale_staging_dirs(
     anything outside ``base`` are never touched. Failures are logged and
     ignored: cleanup is opportunistic and must never break the decision it runs
     inside.
-
-    "No sign of life" is the delicate part, because the staging directory of a
-    *running* job is visible here (unique staging names mean two live jobs never
-    share a directory, but they do share the base). Age alone is not enough:
-    generation is not bounded by a day -- at the larger scales it is measured in
-    days -- and after the first minutes it writes only at depth >= 2, so the top
-    of the tree stops changing while the job is perfectly healthy. Judging by
-    the top-level mtimes alone therefore let a concurrent same-config start
-    rmtree a live generation out from under its peers. ``_staging_dir_is_live``
-    is the answer: an explicit heartbeat maintained by the writers, backed by a
-    bounded-depth mtime probe for directories that predate it.
     """
     now = time.time()
     cutoff = now - max_age
@@ -296,13 +334,6 @@ def _decide_reuse_or_generate(
     staging and final paths for a new generation. Making this decision in one
     place and broadcasting it prevents ranks from diverging when their views of
     the shared filesystem differ.
-
-    The scan is deliberately forgiving: a candidate whose metadata is missing,
-    unreadable, or malformed is warned about and skipped rather than allowed to
-    raise. This function runs inside a window where every peer is already
-    waiting in the decision broadcast, so a crash here is a job-wide hang; a
-    poison directory (exactly what a killed job leaves behind) must never be
-    able to cause one.
     """
     # Rank 0 is the only rank that touches this base, so this is also the one
     # safe place to reclaim staging dirs orphaned by earlier killed jobs.
@@ -375,6 +406,15 @@ def _reraisable(exc: BaseException) -> BaseException | None:
     return exc if isinstance(exc, KeyboardInterrupt) else None
 
 
+def _ensure_config_has_sharding(config: Namespace) -> None:
+    """Populate default sharding fields on minimal Namespace configs."""
+
+    if not hasattr(config, "dc_num_shards"):
+        config.dc_num_shards = list(DEFAULT_DC_NUM_SHARDS)
+    if not hasattr(config, "dc_shard_dims"):
+        config.dc_shard_dims = list(DEFAULT_DC_SHARD_DIMS)
+
+
 def get_dataset(
     config: Namespace,
     require_commit: bool = False,  # default: ignore commit mismatches for reuse
@@ -392,15 +432,20 @@ def get_dataset(
     comm = MPI.COMM_WORLD
     rank = comm.Get_rank()
     log = setup_mpi_logger(__file__, getattr(config, "verbose", 0))
+    _ensure_config_has_sharding(config)
 
     root = Path(config.dataset_dir)
-    root.mkdir(exist_ok=True)
+    root.mkdir(parents=True, exist_ok=True)
 
-    # Get dict of required keys and compute config_id
+    # The physical dataset layout is defined by dc_num_shards/dc_shard_dims,
+    # matching the DistConv layout. The hash canonicalizes shard ordering so
+    # equivalent dimension/order spellings reuse the same cache, while metadata
+    # preserves the requested order used for shard ids and filenames.
     config_dict = vars(config).copy()
-    config_dict["dataset_format_version"] = DATASET_FORMAT_VERSION
-    volume_config = _get_required_keys_dict(
-        config=config_dict, include_keys=INCLUDE_KEYS
+    volume_config = _volume_config(config_dict)
+    metadata_volume_config = _volume_config(
+        config_dict,
+        canonicalize_shard_layout=False,
     )
     config_id = _hash_volume_config(volume_config)
     commit = _git_commit_short(log)
@@ -413,10 +458,6 @@ def get_dataset(
     # same branch. Scanning the shared filesystem independently per rank lets
     # divergent views (stale metadata caches, a racing job's rename) strand some
     # ranks in the generation collectives while others return early.
-    # Everything rank 0 does here happens while the peers are already blocked in
-    # the broadcast below, so a rank-0 exception would strand the whole job.
-    # Any failure is therefore turned into an error sentinel that travels
-    # through the same broadcast and makes every rank raise the same error.
     interrupt = None
     if rank == 0:
         try:
@@ -424,10 +465,6 @@ def get_dataset(
                 base, config_id, commit, require_commit, log
             )
         except BaseException as e:
-            # BaseException, not (Exception, SystemExit): a KeyboardInterrupt
-            # delivered to rank 0 alone (Ctrl-C on the launching terminal, a
-            # site watchdog SIGINT) would otherwise skip the broadcast and hang
-            # every peer -- the exact failure this guard exists to prevent.
             decision = (
                 "error",
                 f"rank 0 failed to select a dataset under {base}: "
@@ -439,8 +476,6 @@ def get_dataset(
     decision = comm.bcast(decision, root=0)
 
     if decision[0] == "error":
-        # Rank 0 keeps the abort signal it was actually given; the peers, which
-        # only ever saw the sentinel, report it as a generation failure.
         if interrupt is not None:
             raise interrupt
         raise RuntimeError(f"dataset selection failed: {decision[1]}")
@@ -493,7 +528,7 @@ def get_dataset(
             meta = {
                 "config_id": config_id,
                 "dataset_format_version": DATASET_FORMAT_VERSION,
-                "config_subset": volume_config,
+                "config_subset": metadata_volume_config,
                 "include_keys": INCLUDE_KEYS,
                 "code_commit": commit,
                 "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),

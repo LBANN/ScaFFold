@@ -14,6 +14,7 @@
 
 import hashlib
 import pickle
+import re
 from dataclasses import dataclass
 from os import listdir
 from os.path import isfile, join, splitext
@@ -27,9 +28,18 @@ import yaml
 from torch.utils.data import Dataset
 
 from ScaFFold.utils.data_types import MASK_DTYPE, VOLUME_DTYPE
+from ScaFFold.utils.spatial_sharding import (
+    chunk_slice,
+    normalize_sharding,
+    shard_file_suffix,
+    shard_indices_to_id,
+    total_shards,
+)
 from ScaFFold.utils.utils import customlog
 
 DATASET_FORMAT_VERSION = 2
+PHYSICAL_SHARDED_DATASET_FORMAT_VERSION = 5
+MAX_SUPPORTED_DATASET_FORMAT_VERSION = PHYSICAL_SHARDED_DATASET_FORMAT_VERSION
 LEGACY_DATASET_FORMAT_VERSION = 1
 META_FILENAME = "meta.yaml"
 
@@ -71,14 +81,11 @@ class SpatialShardSpec:
     def _chunk_slice(size: int, num_shards: int, shard_index: int) -> slice:
         """Match torch.chunk-style uneven shard boundaries."""
 
-        chunk_size = (size + num_shards - 1) // num_shards
-        start = shard_index * chunk_size
-        if start >= size:
-            raise ValueError(
-                f"Empty local shard: dim size {size}, num_shards {num_shards}, shard_index {shard_index}"
-            )
-        stop = min(size, start + chunk_size)
-        return slice(start, stop)
+        return chunk_slice(size, num_shards, shard_index)
+
+    @property
+    def shard_id(self) -> int:
+        return shard_indices_to_id(self.shard_indices, self.num_shards)
 
     def slice_array(
         self, array: np.ndarray, axis_map: Dict[int, int], array_label: str
@@ -118,7 +125,30 @@ class BasicDataset(Dataset):
         self.mask_suffix = mask_suffix
         self.spatial_shard_spec = spatial_shard_spec
         self.dataset_root = self.images_dir.parents[1]
-        self.dataset_format_version = self._load_dataset_format_version()
+        self.dataset_meta = self._load_dataset_metadata()
+        self.dataset_format_version = int(
+            self.dataset_meta.get(
+                "dataset_format_version", LEGACY_DATASET_FORMAT_VERSION
+            )
+        )
+        if self.dataset_format_version > MAX_SUPPORTED_DATASET_FORMAT_VERSION:
+            raise RuntimeError(
+                f"Unsupported dataset format version {self.dataset_format_version}; "
+                f"expected <= {MAX_SUPPORTED_DATASET_FORMAT_VERSION}"
+            )
+        self.physical_shards = (
+            self.dataset_format_version >= PHYSICAL_SHARDED_DATASET_FORMAT_VERSION
+        )
+        self.physical_num_shards, self.physical_shard_dims = (
+            self._load_physical_sharding()
+        )
+        self.physical_total_shards = (
+            total_shards(self.physical_num_shards) if self.physical_shards else 1
+        )
+        self.shard_id = self._select_physical_shard_id()
+        self.shard_suffix = (
+            shard_file_suffix(self.shard_id) if self.physical_shards else ""
+        )
 
         # os.listdir order is filesystem/client dependent and explicitly
         # arbitrary. Sorting makes the index -> file mapping deterministic and
@@ -131,7 +161,9 @@ class BasicDataset(Dataset):
             for file in listdir(images_dir)
             if isfile(join(images_dir, file)) and not file.startswith(".")
         ]
-        self.ids = sorted(splitext(file)[0] for file in image_files)
+        self.ids, self._image_paths = self._index_paths_by_id(
+            self.images_dir, image_files, "image"
+        )
         if not self.ids:
             raise RuntimeError(
                 f"No input file found in {images_dir}, make sure you put your images there"
@@ -141,15 +173,14 @@ class BasicDataset(Dataset):
         # fetches then index these maps in O(1) instead of scanning (and
         # fnmatching) the whole directory on every call, which on a shared
         # filesystem turns each fetch into a burst of metadata traffic.
-        self._image_paths = self._index_paths_by_stem(
-            self.images_dir, image_files, "image"
-        )
         mask_files = [
             entry.name
             for entry in self.mask_dir.iterdir()
             if entry.is_file() and not entry.name.startswith(".")
         ]
-        self._mask_paths = self._index_paths_by_stem(self.mask_dir, mask_files, "mask")
+        _, self._mask_paths = self._index_paths_by_id(
+            self.mask_dir, mask_files, "mask"
+        )
 
         # Belt-and-braces: when a process group is live, verify every rank built
         # the identical id list. Any residual divergence (e.g. inconsistent
@@ -163,6 +194,12 @@ class BasicDataset(Dataset):
         self.mask_values = self._load_mask_values(data_dir)
         customlog(f"Unique mask values: {self.mask_values}")
         customlog(f"Dataset format version: {self.dataset_format_version}")
+        if self.physical_shards:
+            customlog(
+                f"Loading physical shard files with suffix {self.shard_suffix}; "
+                f"dc_num_shards={self.physical_num_shards}, "
+                f"dc_shard_dims={self.physical_shard_dims}"
+            )
 
         # Masks are handed off in a signed 16-bit carrier (widened to long on
         # the compute device), so the largest class id the carrier will hold
@@ -198,7 +235,7 @@ class BasicDataset(Dataset):
     def _load_mask_values(self, data_dir):
         """Return the label-remap table for this split.
 
-        v2 datasets store dense class ids and never remap, so the per-split
+        v2+ datasets store dense class ids and never remap, so the per-split
         pickle is loaded verbatim for bookkeeping. Legacy (v1) datasets remap
         raw voxel values by their position in this list; a per-split table would
         assign the same raw value different class ids across splits whenever a
@@ -271,32 +308,54 @@ class BasicDataset(Dataset):
     def __len__(self):
         return len(self.ids)
 
-    @staticmethod
-    def _index_paths_by_stem(directory, filenames, label):
-        """Map each file's extension-less name to its full path.
+    def _id_from_filename(self, filename, label):
+        if not self.physical_shards:
+            stem = splitext(filename)[0]
+            if label == "mask":
+                if not stem.endswith(self.mask_suffix):
+                    return None
+                return stem
+            return stem
 
-        Raises if two files in ``directory`` share a stem, which would make the
-        stem an ambiguous key and silently pick one of them at fetch time.
+        suffix = re.escape(self.shard_suffix)
+        if label == "mask":
+            pattern = re.compile(
+                rf"^(?P<id>.+){suffix}{re.escape(self.mask_suffix)}\.npy$"
+            )
+        else:
+            pattern = re.compile(rf"^(?P<id>.+){suffix}\.npy$")
+        match = pattern.match(filename)
+        if match is None:
+            return None
+        return match.group("id")
+
+    def _index_paths_by_id(self, directory, filenames, label):
+        """Map each logical sample id to its full path.
+
+        Raises if two files in ``directory`` share an id, which would make the
+        id an ambiguous key and silently pick one of them at fetch time.
         """
         paths = {}
         for filename in filenames:
-            stem = splitext(filename)[0]
+            sample_id = self._id_from_filename(filename, label)
+            if sample_id is None:
+                continue
             full_path = directory / filename
-            existing = paths.get(stem)
+            existing = paths.get(sample_id)
             if existing is not None:
                 raise RuntimeError(
-                    f"Ambiguous {label} id '{stem}' in {directory}: matches both "
-                    f"{existing.name} and {filename}. Every id must map to exactly "
-                    "one file."
+                    f"Ambiguous {label} id '{sample_id}' in {directory}: matches "
+                    f"both {existing.name} and {filename}. Every id must map to "
+                    "exactly one file."
                 )
-            paths[stem] = full_path
-        return paths
+            paths[sample_id] = full_path
+        return sorted(paths), paths
 
     @staticmethod
     def _load_numpy_array(path, mmap_mode=None):
         return np.load(path, allow_pickle=False, mmap_mode=mmap_mode)
 
-    def _load_dataset_format_version(self):
+    def _load_dataset_metadata(self):
         """Determine which on-disk layout this dataset uses.
 
         Only a *missing* ``meta.yaml`` means legacy v1: those datasets predate
@@ -309,7 +368,7 @@ class BasicDataset(Dataset):
         """
         meta_path = self.dataset_root / META_FILENAME
         if not meta_path.exists():
-            return LEGACY_DATASET_FORMAT_VERSION
+            return {"dataset_format_version": LEGACY_DATASET_FORMAT_VERSION}
 
         try:
             with open(meta_path, "r") as meta_file:
@@ -324,7 +383,7 @@ class BasicDataset(Dataset):
 
         version = meta.get("dataset_format_version") if isinstance(meta, dict) else None
         try:
-            return int(version)
+            int(version)
         except (TypeError, ValueError):
             raise ValueError(
                 f"Dataset metadata {meta_path} is missing a usable "
@@ -332,6 +391,73 @@ class BasicDataset(Dataset):
                 f"a {META_FILENAME} is not a legacy dataset; refusing to guess "
                 "its layout. Repair the file or regenerate the dataset."
             ) from None
+
+        return meta
+
+    def _load_physical_sharding(self):
+        if not self.physical_shards:
+            return (), ()
+
+        config_subset = self.dataset_meta.get("config_subset") or {}
+        num_shards = config_subset.get("dc_num_shards")
+        shard_dims = config_subset.get("dc_shard_dims")
+        if num_shards is None or shard_dims is None:
+            raise RuntimeError(
+                "Physical dataset is missing shard metadata. Expected "
+                "config_subset.dc_num_shards/config_subset.dc_shard_dims in meta.yaml."
+            )
+
+        return normalize_sharding(num_shards, shard_dims)
+
+    @staticmethod
+    def _layout_by_dim(num_shards, shard_dims):
+        return {int(dim): int(num) for num, dim in zip(num_shards, shard_dims)}
+
+    def _physical_layout_matches_spatial_spec(self):
+        if self.spatial_shard_spec is None:
+            return False
+        return self._layout_by_dim(
+            self.physical_num_shards, self.physical_shard_dims
+        ) == self._layout_by_dim(
+            self.spatial_shard_spec.num_shards,
+            self.spatial_shard_spec.shard_dims,
+        )
+
+    def _physical_shard_id_for_spatial_spec(self):
+        spec_indices_by_dim = {
+            int(dim): int(index)
+            for dim, index in zip(
+                self.spatial_shard_spec.shard_dims,
+                self.spatial_shard_spec.shard_indices,
+            )
+        }
+        shard_indices = tuple(
+            spec_indices_by_dim[int(dim)] for dim in self.physical_shard_dims
+        )
+        return shard_indices_to_id(shard_indices, self.physical_num_shards)
+
+    def _select_physical_shard_id(self):
+        if not self.physical_shards:
+            return 0
+        if self.spatial_shard_spec is None:
+            if self.physical_total_shards == 1:
+                return 0
+            raise RuntimeError(
+                "Physical dataset has multiple shard files, but no SpatialShardSpec "
+                "was provided. Use a DistConv layout matching the dataset."
+            )
+        if not self._physical_layout_matches_spatial_spec():
+            raise RuntimeError(
+                "Physical dataset shard layout does not match the requested "
+                "DistConv layout. Physical dataset layout and DistConv layout "
+                "must match. "
+                f"dataset dc_num_shards={self.physical_num_shards}, "
+                f"dataset dc_shard_dims={self.physical_shard_dims}, "
+                f"dc_num_shards={self.spatial_shard_spec.num_shards}, "
+                f"dc_shard_dims={self.spatial_shard_spec.shard_dims}"
+            )
+
+        return self._physical_shard_id_for_spatial_spec()
 
     @staticmethod
     def _prepare_legacy_image(img):
@@ -368,7 +494,7 @@ class BasicDataset(Dataset):
         return np.asarray(mask, dtype=MASK_DTYPE, order="C")
 
     def _slice_image_array(self, img):
-        if self.spatial_shard_spec is None:
+        if self.spatial_shard_spec is None or self.physical_shards:
             return img
 
         if self.dataset_format_version >= DATASET_FORMAT_VERSION:
@@ -378,7 +504,7 @@ class BasicDataset(Dataset):
         return self.spatial_shard_spec.slice_array(img, axis_map, "image")
 
     def _slice_mask_array(self, mask):
-        if self.spatial_shard_spec is None:
+        if self.spatial_shard_spec is None or self.physical_shards:
             return mask
 
         axis_map = {2: 0, 3: 1, 4: 2}
@@ -393,15 +519,18 @@ class BasicDataset(Dataset):
             )
 
     def _mask_path(self, name):
-        key = name + self.mask_suffix
+        key = name if self.physical_shards else name + self.mask_suffix
         try:
             return self._mask_paths[key]
         except KeyError:
             raise KeyError(f"No mask file found for the ID {key} in {self.mask_dir}")
 
+    def _materialize_shard_slice(self):
+        return self.spatial_shard_spec is not None and not self.physical_shards
+
     def _load_prepared_mask(self, name):
         """Load, shard-slice, and label-prepare one mask as ``MASK_DTYPE``."""
-        materialize = self.spatial_shard_spec is not None
+        materialize = self._materialize_shard_slice()
         # Memmap lets each rank slice out just its local shard without eagerly
         # reading the full sample into process memory first; the prepare step
         # then copies that slice out of the backing file.
@@ -432,7 +561,7 @@ class BasicDataset(Dataset):
 
     def __getitem__(self, idx):
         name = self.ids[idx]
-        materialize = self.spatial_shard_spec is not None
+        materialize = self._materialize_shard_slice()
         mmap_mode = "r" if materialize else None
         img = self._load_numpy_array(self._image_path(name), mmap_mode=mmap_mode)
         img = self._slice_image_array(img)
