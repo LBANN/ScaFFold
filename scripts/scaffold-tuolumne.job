@@ -5,7 +5,7 @@
 # flux: -g=1
 # flux: -t 60m
 # flux: -qpdebug
-# flux: -B fractale
+# flux: -B flask
 
 ml cce/21.0.0 cray-mpich/9.1.0 rocm/7.1.1 rccl/fast-env-slows-mpi
 
@@ -20,7 +20,7 @@ export LD_PRELOAD="/opt/rocm-7.1.1/llvm/lib/libomp.so /opt/cray/pe/mpich/9.1.0/o
 # Disable direct naive convolution benchmarking (naive_conv_ab_nonpacked_fwd_ndhwc_half_double_half.kd)
 export MIOPEN_DEBUG_CONV_DIRECT_NAIVE_CONV_FWD=0
 # Disable naive_conv_ab_nonpacked_bwd_ndhwc_half_double_half.kd
-# export MIOPEN_DEBUG_CONV_DIRECT_NAIVE_CONV_BWD=0
+export MIOPEN_DEBUG_CONV_DIRECT_NAIVE_CONV_BWD=0
 # Disable naive_conv_ab_nonpacked_wrw_ndhwc_half_double_half.kd
 export MIOPEN_DEBUG_CONV_DIRECT_NAIVE_CONV_WRW=0
 
@@ -30,4 +30,4 @@ torchrun-hpc -N 1 -n 1 $(which scaffold) generate_fractals -c $(pwd)/ScaFFold/co
 #export PROFILE_TORCH=ON
 
 torchrun-hpc -N 1 -n 4 --gpus-per-proc 1 $(which scaffold) benchmark -c $(pwd)/ScaFFold/configs/benchmark_default.yml
-#torchrun-hpc -N 2 -n 4 --gpus-per-proc 1 $(which scaffold) benchmark -c $(pwd)/ScaFFold/configs/benchmark_default.yml
+# torchrun-hpc -N 2 -n 4 --gpus-per-proc 1 $(which scaffold) benchmark -c $(pwd)/ScaFFold/configs/benchmark_default.yml
