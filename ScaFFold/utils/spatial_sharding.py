@@ -50,7 +50,9 @@ def shard_id_to_indices(shard_id: int, num_shards: Iterable[int]) -> Tuple[int, 
     num_shards = tuple(int(x) for x in num_shards)
     total = total_shards(num_shards)
     if shard_id < 0 or shard_id >= total:
-        raise ValueError(f"shard_id {shard_id} out of range for num_shards={num_shards}")
+        raise ValueError(
+            f"shard_id {shard_id} out of range for num_shards={num_shards}"
+        )
 
     indices = []
     linear_idx = int(shard_id)
@@ -62,9 +64,7 @@ def shard_id_to_indices(shard_id: int, num_shards: Iterable[int]) -> Tuple[int, 
     return tuple(indices)
 
 
-def shard_indices_to_id(
-    shard_indices: Iterable[int], num_shards: Iterable[int]
-) -> int:
+def shard_indices_to_id(shard_indices: Iterable[int], num_shards: Iterable[int]) -> int:
     """Convert multi-dimensional shard indices to row-major linear shard id."""
 
     shard_indices = tuple(int(x) for x in shard_indices)
@@ -76,7 +76,9 @@ def shard_indices_to_id(
 
     shard_id = 0
     stride = 1
-    for shard_index_i, num_shards_i in zip(reversed(shard_indices), reversed(num_shards)):
+    for shard_index_i, num_shards_i in zip(
+        reversed(shard_indices), reversed(num_shards)
+    ):
         if shard_index_i < 0 or shard_index_i >= num_shards_i:
             raise ValueError(
                 f"Invalid shard index {shard_index_i} for num_shards={num_shards}"
