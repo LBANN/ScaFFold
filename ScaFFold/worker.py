@@ -38,6 +38,7 @@ from ScaFFold.utils.distributed import (
     initialize_dist,
 )
 from ScaFFold.utils.perf_measure import (
+    adiak_value,
     annotate,
     begin_code_region,
     end_code_region,
@@ -220,6 +221,10 @@ def main(kwargs_dict: dict = {}):
         total_shards = math.prod(config.dc_num_shards)
         global_batch_size = config.batch_size * (world_size // total_shards)
         ddp_ranks = world_size // total_shards
+        adiak_value("global_batch_size", global_batch_size)
+        adiak_value("ddp_ranks", ddp_ranks)
+        adiak_value("total_shards", total_shards)
+        adiak_value("num_spatial_dims", num_spatial_dims)
         if rank == 0:
             log.info(
                 f"Effective global batch size = {global_batch_size} "
