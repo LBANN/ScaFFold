@@ -77,16 +77,6 @@ class SpatialShardSpec:
                     f"Invalid shard_index {shard_index} for shard_dim {shard_dim} with {num_shards} shards"
                 )
 
-    @staticmethod
-    def _chunk_slice(size: int, num_shards: int, shard_index: int) -> slice:
-        """Match torch.chunk-style uneven shard boundaries."""
-
-        return chunk_slice(size, num_shards, shard_index)
-
-    @property
-    def shard_id(self) -> int:
-        return shard_indices_to_id(self.shard_indices, self.num_shards)
-
     def slice_array(
         self, array: np.ndarray, axis_map: Dict[int, int], array_label: str
     ) -> np.ndarray:
@@ -106,7 +96,7 @@ class SpatialShardSpec:
                 raise ValueError(
                     f"Axis {axis} out of range for {array_label} with shape {array.shape}"
                 )
-            slices[axis] = self._chunk_slice(array.shape[axis], num_shards, shard_index)
+            slices[axis] = chunk_slice(array.shape[axis], num_shards, shard_index)
 
         return array[tuple(slices)]
 
