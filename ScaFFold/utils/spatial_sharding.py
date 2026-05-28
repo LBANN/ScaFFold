@@ -41,6 +41,8 @@ def normalize_sharding(num_shards: Iterable[int], shard_dims: Iterable[int]):
 
 
 def total_shards(num_shards: Iterable[int]) -> int:
+    """Return the total number of shards in a multi-dimensional layout."""
+
     return prod(tuple(int(x) for x in num_shards))
 
 
@@ -126,4 +128,6 @@ def spatial_slices(
 
 
 def shard_file_suffix(shard_id: int) -> str:
+    """Return the filename suffix for a physical shard id."""
+
     return f"_shard{int(shard_id):06d}"
