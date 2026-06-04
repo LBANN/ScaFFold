@@ -26,7 +26,15 @@ from ScaFFold.utils.perf_measure import annotate
 @annotate()
 @torch.inference_mode()
 def evaluate(
-    net, dataloader, device, amp, primary, criterion, n_categories, parallel_strategy
+    net,
+    dataloader,
+    device,
+    amp,
+    primary,
+    criterion,
+    n_categories,
+    parallel_strategy,
+    max_batches=None,
 ):
     def foreground_dice_stats(dice_scores):
         if dice_scores.size(1) > 1:
@@ -41,6 +49,8 @@ def evaluate(
     if amp:
         autocast_kwargs["dtype"] = AMP_DTYPE
     num_val_batches = len(dataloader)
+    if max_batches is not None:
+        num_val_batches = min(num_val_batches, max_batches)
     total_dice_score = 0.0
     processed_batches = 0
     processed_samples = 0
@@ -55,14 +65,18 @@ def evaluate(
     with torch.autocast(**autocast_kwargs):
         val_loss_epoch = 0.0
         class_weights = getattr(criterion, "weight", None)
-        for batch in tqdm(
-            dataloader,
-            total=num_val_batches,
-            desc="Validation round",
-            unit="batch",
-            leave=False,
-            disable=not primary,
+        for batch_idx, batch in enumerate(
+            tqdm(
+                dataloader,
+                total=num_val_batches,
+                desc="Validation round",
+                unit="batch",
+                leave=False,
+                disable=not primary,
+            )
         ):
+            if batch_idx >= num_val_batches:
+                break
             image, mask_true = batch["image"], batch["mask"]
 
             image = image.to(

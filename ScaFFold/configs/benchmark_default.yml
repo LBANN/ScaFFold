@@ -19,8 +19,8 @@ variance_threshold: 0.15           # Variance threshold for valid fractals. Defa
 n_fracts_per_vol: 3                # Number of fractals overlaid in each volume. Default is 3.
 val_split: 30                      # In percent.
 epochs: -1                         # Number of training epochs.
-starting_learning_rate: 0.01       # Initial learning rate for training.
-min_learning_rate: 0.001           # Minimum learning rate for CosineAnnealingWarmRestarts.
+starting_learning_rate: 0.001      # Initial learning rate for training.
+min_learning_rate: 0.0001          # Minimum learning rate for CosineAnnealingWarmRestarts.
 T_0: 100                           # Epochs in the first cosine restart cycle.
 T_mult: 2                          # Restart cycle growth factor.
 disable_scheduler: 0               # If 1, disable scheduler during training to use constant LR.
@@ -33,7 +33,7 @@ framework: "torch"                 # The DL framework to train with. Only valid 
 checkpoint_dir: "checkpoints"      # Subfolder in which to save training checkpoints.
 loss_freq: 1                       # Number of epochs between logging the overall loss.
 normalize: 1                       # Cateogry search normalization parameter
-warmup_batches: 5                  # How many warmup batches per rank to run before training.
+warmup_batches: 64                 # How many warmup batches per rank to run before training.
 ce_weight_sample_fraction: 0.1     # Fraction of training masks to sample when estimating background vs foreground CE weights.
 dataset_reuse_enforce_commit_id: 0 # Enforce matching commit IDs for dataset reuse.
 target_dice: 0.95

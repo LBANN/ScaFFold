@@ -105,6 +105,46 @@ class CheckpointManager:
                 self._log(f"Background save failed with error: {e}")
             self.future = None
 
+    def snapshot_training_state(self) -> Dict[str, Any]:
+        """Capture mutable in-memory training state without writing a checkpoint."""
+        model_ref = self.model.module if hasattr(self.model, "module") else self.model
+        return {
+            "model_state_dict": self._clone_state_dict(model_ref.state_dict()),
+            "optimizer_state_dict": self._clone_state_dict(self.optimizer.state_dict())
+            if self.optimizer
+            else None,
+            "scheduler_state_dict": self._clone_state_dict(self.scheduler.state_dict())
+            if self.scheduler
+            else None,
+            "grad_scaler_state_dict": self._clone_state_dict(
+                self.grad_scaler.state_dict()
+            )
+            if self.grad_scaler
+            else None,
+            "model_training": model_ref.training,
+            **self._get_rng_snapshot(),
+        }
+
+    def restore_training_state(self, snapshot: Dict[str, Any]) -> None:
+        """Restore an in-memory training snapshot."""
+        model_ref = self.model.module if hasattr(self.model, "module") else self.model
+        model_ref.load_state_dict(snapshot["model_state_dict"])
+
+        if self.optimizer and snapshot.get("optimizer_state_dict") is not None:
+            self.optimizer.load_state_dict(snapshot["optimizer_state_dict"])
+
+        if self.scheduler and snapshot.get("scheduler_state_dict") is not None:
+            self.scheduler.load_state_dict(snapshot["scheduler_state_dict"])
+
+        if self.grad_scaler and snapshot.get("grad_scaler_state_dict") is not None:
+            self.grad_scaler.load_state_dict(snapshot["grad_scaler_state_dict"])
+
+        self._restore_rng(snapshot)
+        model_ref.train(snapshot.get("model_training", True))
+
+        if self.optimizer:
+            self.optimizer.zero_grad(set_to_none=True)
+
     def load_from_checkpoint(self) -> int:
         """Load the latest checkpoint. Returns start_epoch (default 1)."""
         self.wait_for_save()  # Safety: don't load while writing
@@ -285,6 +325,19 @@ class CheckpointManager:
         else:
             return obj
 
+    def _clone_state_dict(self, obj):
+        """Recursively clone tensors so in-memory snapshots are isolated."""
+        if torch.is_tensor(obj):
+            return obj.detach().clone()
+        elif isinstance(obj, dict):
+            return {k: self._clone_state_dict(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [self._clone_state_dict(v) for v in obj]
+        elif isinstance(obj, tuple):
+            return tuple(self._clone_state_dict(v) for v in obj)
+        else:
+            return obj
+
     def _barrier(self):
         if self.dist_enabled:
             dist.barrier()
@@ -305,7 +358,7 @@ class CheckpointManager:
     def _get_rng_snapshot(self) -> Dict[str, Any]:
         snap = {"rng_state_pytorch": torch.get_rng_state()}
         if torch.cuda.is_available():
-            snap["rng_state_pytorch_cuda"] = torch.cuda.get_rng_state()
+            snap["rng_state_pytorch_cuda"] = torch.cuda.get_rng_state_all()
         try:
             snap["rng_state_numpy"] = np.random.get_state()
         except ImportError:
@@ -321,7 +374,11 @@ class CheckpointManager:
             if "rng_state_pytorch" in snap:
                 torch.set_rng_state(snap["rng_state_pytorch"])
             if "rng_state_pytorch_cuda" in snap and torch.cuda.is_available():
-                torch.cuda.set_rng_state(snap["rng_state_pytorch_cuda"])
+                cuda_state = snap["rng_state_pytorch_cuda"]
+                if isinstance(cuda_state, list):
+                    torch.cuda.set_rng_state_all(cuda_state)
+                else:
+                    torch.cuda.set_rng_state(cuda_state)
             if "rng_state_numpy" in snap:
                 np.random.set_state(snap["rng_state_numpy"])
             if "rng_state_python" in snap:
