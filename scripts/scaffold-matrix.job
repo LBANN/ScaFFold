@@ -12,10 +12,17 @@
 
 export LD_LIBRARY_PATH=/usr/lib64:$LD_LIBRARY_PATH
 
-scaffold generate_fractals -c ScaFFold/configs/benchmark_default.yml
+CONFIG_PATH="$(pwd)/ScaFFold/configs/benchmark_default.yml"
+FRACT_BASE_DIR="${FRACT_BASE_DIR:-$(pwd)/ScaFFold/fractals}"
+
+scaffold generate_fractals \
+    -c "$CONFIG_PATH" \
+    --fract-base-dir "$FRACT_BASE_DIR"
 
 # Uncomment if you want torch profiling
 #export PROFILE_TORCH=ON
 
-torchrun-hpc -N 1 -n 4 --gpus-per-proc 1 $(which scaffold) benchmark -c $(pwd)/ScaFFold/configs/benchmark_default.yml
-#torchrun-hpc -N 2 -n 4 --gpus-per-proc 1 $(which scaffold) benchmark -c $(pwd)/ScaFFold/configs/benchmark_default.yml
+torchrun-hpc -N 1 -n 4 --gpus-per-proc 1 $(which scaffold) benchmark \
+    -c "$CONFIG_PATH" \
+    --fract-base-dir "$FRACT_BASE_DIR"
+#torchrun-hpc -N 2 -n 4 --gpus-per-proc 1 $(which scaffold) benchmark -c "$CONFIG_PATH" --fract-base-dir "$FRACT_BASE_DIR"

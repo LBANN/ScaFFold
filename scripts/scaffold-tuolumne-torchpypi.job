@@ -22,10 +22,17 @@ export MIOPEN_DEBUG_CONV_DIRECT_NAIVE_CONV_BWD=0
 # Disable naive_conv_ab_nonpacked_wrw_ndhwc_half_double_half.kd
 export MIOPEN_DEBUG_CONV_DIRECT_NAIVE_CONV_WRW=0
 
-torchrun-hpc -N 1 -n 1 $(which scaffold) generate_fractals -c $(pwd)/ScaFFold/configs/benchmark_default.yml
+CONFIG_PATH="$(pwd)/ScaFFold/configs/benchmark_default.yml"
+FRACT_BASE_DIR="${FRACT_BASE_DIR:-$(pwd)/ScaFFold/fractals}"
+
+torchrun-hpc -N 1 -n 1 $(which scaffold) generate_fractals \
+    -c "$CONFIG_PATH" \
+    --fract-base-dir "$FRACT_BASE_DIR"
 
 # Uncomment if you want torch profiling
 #export PROFILE_TORCH=ON
 
-torchrun-hpc -N 1 -n 4 --gpus-per-proc 1 $(which scaffold) benchmark -c $(pwd)/ScaFFold/configs/benchmark_default.yml
-# torchrun-hpc -N 2 -n 4 --gpus-per-proc 1 $(which scaffold) benchmark -c $(pwd)/ScaFFold/configs/benchmark_default.yml
+torchrun-hpc -N 1 -n 4 --gpus-per-proc 1 $(which scaffold) benchmark \
+    -c "$CONFIG_PATH" \
+    --fract-base-dir "$FRACT_BASE_DIR"
+# torchrun-hpc -N 2 -n 4 --gpus-per-proc 1 $(which scaffold) benchmark -c "$CONFIG_PATH" --fract-base-dir "$FRACT_BASE_DIR"
