@@ -50,8 +50,8 @@ def generate_single_category(config: Config) -> tuple[bool, np.array, bool, bool
         A bool for whether a valid category was found on this attempt.
     params : np.array
         A numpy array containing IFS parameters for this category attempt, if attempt was valid.
-    (not nan_check_pass) : bool
-        A bool for whether this attempt passed the NaN check.
+    (not value_check_pass) : bool
+        A bool for whether this attempt passed the NaN/non-finite check.
     (not variance_check_pass) : bool
         A bool for whether this attempt passed the variance check.
     (not runaway_check_pass) : bool
@@ -80,31 +80,40 @@ def generate_single_category(config: Config) -> tuple[bool, np.array, bool, bool
         ),
     )
 
-    # Sum number of NaNs
+    # Sum number of NaNs and reject infinities before normalization.
     nan_count = np.isnan(points).sum()
-    nan_check_pass = nan_count == 0
+    value_check_pass = nan_count == 0 and np.isfinite(points).all()
     variance_check_pass = False
 
-    if nan_check_pass:
+    if value_check_pass:
         # Normalize + center
         mins = points.min(axis=0)
         maxs = points.max(axis=0)
         means = points.mean(axis=0)
-        scales = (2 * config.normalize) / (maxs - mins)
-        points = (points - means) * scales
+        with np.errstate(over="ignore", invalid="ignore"):
+            ranges = maxs - mins
+        value_check_pass = np.all(np.isfinite(ranges)) and np.all(ranges > 0)
+        if value_check_pass:
+            scales = (2 * config.normalize) / ranges
+            with np.errstate(over="ignore", invalid="ignore"):
+                points = (points - means) * scales
 
-        # Calc dimension-wise variance and compare to threshold
-        points_variance = np.var(points, axis=1)
-        variance_check_pass = np.all(points_variance > config.variance_threshold)
-        if variance_check_pass and nan_check_pass and runaway_check_pass:
+            value_check_pass = np.isfinite(points).all()
+            if value_check_pass:
+                # Calc dimension-wise variance and compare to threshold
+                points_variance = np.var(points, axis=0)
+                variance_check_pass = np.all(
+                    points_variance > config.variance_threshold
+                )
+        if variance_check_pass and value_check_pass and runaway_check_pass:
             valid = True
 
     # Return result
     return (
         valid,
         params,
-        not nan_check_pass,
-        not variance_check_pass,
+        bool(not value_check_pass),
+        bool(value_check_pass and not variance_check_pass),
         not runaway_check_pass,
     )
 
@@ -129,7 +138,7 @@ def generate_categories_batch(
     params : np.array
         A numpy array containing IFS parameters for this category attempt, if attempt was valid.
     failed_nan_check_count : int
-        The number of attempts in this batch which failed the nan check.
+        The number of attempts in this batch which failed the NaN/non-finite check.
     failed_var_check_count : int
         The number of attempts in this batch which failed the var check.
     runaway_failure_count : int
@@ -186,7 +195,11 @@ def main(config: Config) -> None:
     rank = comm.Get_rank()
     size = comm.Get_size()
 
-    datagen_batch_size = 10000
+    datagen_batch_size = int(getattr(config, "datagen_batch_size", 10000))
+    if datagen_batch_size < 1:
+        raise ValueError(
+            f"datagen_batch_size must be positive, got {datagen_batch_size}"
+        )
 
     # FIXME anything else to ensure determinism?
     np.random.seed(config.seed + rank)
@@ -224,7 +237,7 @@ def main(config: Config) -> None:
     var_fail_count = 0
     runaway_fail_count = 0
     while categories_remaining > 0:
-        attempts += size
+        attempts += datagen_batch_size * size
 
         # Each rank attempts to generate datagen_batch_size categories
         (
@@ -245,12 +258,15 @@ def main(config: Config) -> None:
         # Process IFS params one at a time, writing each to a CSV
         if rank == 0:
             params_valid = [item for sublist in gathered_params for item in sublist]
-            if attempts % 10000 * size / datagen_batch_size == 0:
-                print(
-                    f"cat_remaining = {categories_remaining} | total attempts = {attempts} | stats for rank 0: nan_fail_count = {nan_fail_count}, var_fail_count = {var_fail_count}, runaway_fail_count = {runaway_fail_count}"
-                )
+            print(
+                f"cat_remaining = {categories_remaining} | total attempts = {attempts} | stats for rank 0: invalid_value_fail_count = {nan_fail_count}, var_fail_count = {var_fail_count}, runaway_fail_count = {runaway_fail_count}",
+                flush=True,
+            )
             if len(params_valid) > 0:
-                print(f"Processing {len(params_valid)} param sets from this attempt")
+                print(
+                    f"Processing {len(params_valid)} valid param sets from this batch",
+                    flush=True,
+                )
             for p in params_valid:
                 # Ensure we don't save more categories than needed
                 if categories_remaining > 0:
@@ -284,14 +300,15 @@ def main(config: Config) -> None:
     global_runaway_fail_count = comm.reduce(runaway_fail_count, op=MPI.SUM, root=0)
 
     if rank == 0 and attempts > 0:
+        generated_categories = config.n_categories - existing_categories
         print(
-            f"Generated {config.n_categories - existing_categories} new categories in {attempts * datagen_batch_size} total attempts | {attempts * datagen_batch_size / (config.n_categories - existing_categories)} Attempts per category | Total categories is now {config.n_categories}"
+            f"Generated {generated_categories} new categories in {attempts} total attempts | {attempts / generated_categories} Attempts per category | Total categories is now {config.n_categories}"
         )
         print(
-            f"Failures experienced: {global_nan_fail_count} nan attempts, {100 * global_nan_fail_count / (attempts * datagen_batch_size):.4f}% of all attempts, {global_var_fail_count} var fail attempts, {100 * global_var_fail_count / (attempts * datagen_batch_size):.4f}% of all attempts, {global_runaway_fail_count} runaway attempts, {100 * global_runaway_fail_count / (attempts * datagen_batch_size):.4f}% of all attempts"
+            f"Failures experienced: {global_nan_fail_count} invalid-value attempts, {100 * global_nan_fail_count / attempts:.4f}% of all attempts, {global_var_fail_count} var fail attempts, {100 * global_var_fail_count / attempts:.4f}% of all attempts, {global_runaway_fail_count} runaway attempts, {100 * global_runaway_fail_count / attempts:.4f}% of all attempts"
         )
         print(
-            f"Rank 0 wall time = {rank_total_time:.2f} | Total CPU time = {global_sum_time:.2f} | Avg wall time per rank {global_sum_time / size:.2f} | {attempts * datagen_batch_size / rank_total_time:.2f} total attempts per wall second | {attempts * datagen_batch_size / rank_total_time / size:.2f} attempts per wall second per rank"
+            f"Rank 0 wall time = {rank_total_time:.2f} | Total CPU time = {global_sum_time:.2f} | Avg wall time per rank {global_sum_time / size:.2f} | {attempts / rank_total_time:.2f} total attempts per wall second | {attempts / rank_total_time / size:.2f} attempts per wall second per rank"
         )
 
     return 0
