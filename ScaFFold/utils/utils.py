@@ -16,11 +16,6 @@ import logging
 import random
 import sys
 
-import matplotlib.pyplot as plt
-import numpy as np
-import torch
-import torch.distributed as dist
-
 from ScaFFold.utils.distributed import get_world_rank
 
 logging.basicConfig(
@@ -29,6 +24,8 @@ logging.basicConfig(
 
 
 def plot_img_and_mask(img, mask):
+    import matplotlib.pyplot as plt
+
     classes = mask.max() + 1
     fig, ax = plt.subplots(1, classes + 1)
     ax[0].set_title("Input image")
@@ -42,13 +39,17 @@ def plot_img_and_mask(img, mask):
 
 def set_seeds(seed_value=42):
     """Set seeds for reproducibility."""
+
+    import numpy as np
+    import torch
+
     random.seed(seed_value)  # Python
     np.random.seed(seed_value)  # NumPy
     torch.manual_seed(seed_value)  # PyTorch
     torch.cuda.manual_seed_all(seed_value)  # PyTorch for GPUs
 
 
-def customlog(msg: str, ranks=[0], allranks=False, level=0, verbose=0):
+def customlog(msg: str, ranks=(0,), allranks=False, level=0, verbose=0):
     rank = get_world_rank()
     if (rank in ranks or allranks) and level <= verbose:
         logging.info(f"(rank {rank}): {msg}")
@@ -60,12 +61,13 @@ class MPIRankFilter(logging.Filter):
         self.allowed_ranks = ranks
 
     def filter(self, record: logging.LogRecord) -> bool:
-        record.mpi_rank = get_world_rank()
+        rank = get_world_rank()
+        record.mpi_rank = rank
         # If no allowed ranks specified, only rank 0 logs
         if self.allowed_ranks is None:
-            return get_world_rank() == 0
+            return rank == 0
         # Otherwise only allow logs from the specified ranks
-        return record.mpi_rank in self.allowed_ranks
+        return rank in self.allowed_ranks
 
 
 def setup_mpi_logger(
@@ -81,23 +83,37 @@ def setup_mpi_logger(
     logger = logging.getLogger(name)
     logger.setLevel(log_level)
 
-    # Create a StreamHandler (to stderr) and attach MPI filter
-    handler = logging.StreamHandler(stream=sys.stderr)
-    handler.setLevel(log_level)
-    handler.addFilter(MPIRankFilter(ranks))
-
     # Set formatting, including MPI rank
     fmt = "[%(asctime)s][%(filename)s:%(lineno)d][rank=%(mpi_rank)d][%(levelname)s] %(message)s"
-    handler.setFormatter(logging.Formatter(fmt, datefmt="%H:%M:%S"))
+    formatter = logging.Formatter(fmt, datefmt="%H:%M:%S")
 
-    # Attach handler
-    logger.addHandler(handler)
+    for handler in logger.handlers:
+        if getattr(handler, "_scaffold_mpi_handler", False):
+            handler.setLevel(log_level)
+            handler.setFormatter(formatter)
+            handler.filters = [
+                f for f in handler.filters if not isinstance(f, MPIRankFilter)
+            ]
+            handler.addFilter(MPIRankFilter(ranks))
+            break
+    else:
+        # Create a StreamHandler (to stderr) and attach MPI filter
+        handler = logging.StreamHandler(stream=sys.stderr)
+        handler._scaffold_mpi_handler = True
+        handler.setLevel(log_level)
+        handler.addFilter(MPIRankFilter(ranks))
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+
     # Prevent duplicate logging from Basic Logger
     logger.propagate = False
     return logger
 
 
 def mem_stats():
+    import torch
+    import torch.distributed as dist
+
     dev = torch.cuda.current_device()
     free, total = torch.cuda.mem_get_info()  # device-level (driver) view
     stats = torch.cuda.memory_stats(dev)  # allocator internals
@@ -118,6 +134,8 @@ def mem_stats():
 
 
 def gather_and_print_mem(log, tag=""):
+    import torch.distributed as dist
+
     if log.getEffectiveLevel() > 10:  # 10 -> DEBUG
         return
     stats = mem_stats()

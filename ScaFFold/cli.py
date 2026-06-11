@@ -24,6 +24,7 @@ from mpi4py import MPI
 from ScaFFold.utils import config_utils
 from ScaFFold.utils.collect_scheduler_info import collect_scheduler_metadata
 from ScaFFold.utils.create_restart_script import create_restart_script
+from ScaFFold.utils.utils import setup_mpi_logger
 
 
 def main():
@@ -94,9 +95,9 @@ def main():
         "benchmark",
         help="Run the benchmark.",
         description=(
-            "The default run method for ScaFFold."
-            "Users may specify lists of run parameters in the config file."
-            "This subcommand runs one instance of the benchmark for each parameter combination."
+            "The default run method for ScaFFold. "
+            "Users may specify lists of run parameters in the config file. "
+            "This subcommand runs one instance of the benchmark for each parameter combination. "
             "Requires path to config file."
         ),
     )
@@ -218,10 +219,11 @@ def main():
     rank = comm.Get_rank()
     # Parse the command-line arguments.
     args = parser.parse_args()
+    log = setup_mpi_logger(__file__, args.verbose)
     combined_config = None
 
     if rank == 0:
-        print(f"args = {args}")
+        log.debug("args = %s", args)
 
         bench_config = config_utils.load_config(Path(args.config), "sweep")
         bench_config_dict = (
@@ -235,7 +237,13 @@ def main():
             if key not in combined_config:
                 combined_config[key] = value
             elif value is not None and key != "command":
-                print(f"Overriding '{key}={combined_config[key]}' with '{key}={value}'")
+                log.info(
+                    "Overriding '%s=%s' with '%s=%s'",
+                    key,
+                    combined_config[key],
+                    key,
+                    value,
+                )
                 combined_config[key] = value
 
         # Recalculate unet_layers to capture any CLI overrides
@@ -268,13 +276,13 @@ def main():
 
         # Handle Restart / Resume logic
         if hasattr(args, "restart") and args.restart:
-            print("Restart flag detected: Forcing train_from_scratch = False")
+            log.info("Restart flag detected: forcing train_from_scratch = False")
             combined_config["train_from_scratch"] = False
             combined_config["restart"] = True
 
         # If user manually supplied --run-dir (via restart script), use it.
         if hasattr(args, "run_dir") and args.run_dir is not None:
-            print(f"Resuming in existing directory: {args.run_dir}")
+            log.info("Resuming in existing directory: %s", args.run_dir)
             benchmark_run_dir = Path(args.run_dir)
             # Ensure we don't accidentally wipe checkpoints even if --restart wasn't explicitly passed
             combined_config["train_from_scratch"] = False
@@ -284,8 +292,9 @@ def main():
                 f"{combined_config.get('job_name')}_%Y%m%d-%H%M%S"
             )
             benchmark_run_dir = base_run_dir / timestamp
-            print(
-                f"benchmark_run_dir created at path {Path.resolve(benchmark_run_dir)}"
+            log.info(
+                "benchmark_run_dir created at path %s",
+                Path.resolve(benchmark_run_dir),
             )
 
             combined_config["benchmark_run_dir"] = str(benchmark_run_dir)
@@ -310,7 +319,7 @@ def main():
     comm.Barrier()
     combined_config = comm.bcast(combined_config, root=0)
     if rank == 0:
-        print(f"combined_config = {combined_config}")
+        log.debug("combined_config = %s", combined_config)
 
     if args.command == "benchmark":
         from ScaFFold import benchmark

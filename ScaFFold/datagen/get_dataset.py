@@ -27,6 +27,7 @@ import yaml
 from mpi4py import MPI
 
 from ScaFFold.datagen import volumegen
+from ScaFFold.utils.utils import setup_mpi_logger
 
 META_FILENAME = "meta.yaml"
 DATASET_FORMAT_VERSION = 2
@@ -76,7 +77,7 @@ def _hash_volume_config(volume_config: Dict[str, Any]) -> str:
     return hashlib.sha256(s).hexdigest()[:12]
 
 
-def _git_commit_short() -> str:
+def _git_commit_short(log=None) -> str:
     try:
         return (
             subprocess.check_output(
@@ -87,14 +88,18 @@ def _git_commit_short() -> str:
             .strip()
         )
     except subprocess.CalledProcessError:
-        print(
-            "Tried to get git commit id in non-git repo. No commit id will be enforced for dataset reuse."
-        )
+        if log is not None:
+            log.warning(
+                "Tried to get git commit id in non-git repo. "
+                "No commit id will be enforced for dataset reuse."
+            )
         return "no-commit-id"
     except Exception:
-        print(
-            "Exception when trying to get git commit for dataset. No commit id will be enforced for dataset reuse."
-        )
+        if log is not None:
+            log.warning(
+                "Exception when trying to get git commit for dataset. "
+                "No commit id will be enforced for dataset reuse."
+            )
         return "no-commit-id"
 
 
@@ -114,6 +119,7 @@ def get_dataset(
 
     comm = MPI.COMM_WORLD
     rank = comm.Get_rank()
+    log = setup_mpi_logger(__file__, getattr(config, "verbose", 0))
 
     root = Path(config.dataset_dir)
     root.mkdir(exist_ok=True)
@@ -125,7 +131,7 @@ def get_dataset(
         config=config_dict, include_keys=INCLUDE_KEYS
     )
     config_id = _hash_volume_config(volume_config)
-    commit = _git_commit_short()
+    commit = _git_commit_short(log)
 
     base = root / config_id
     base.mkdir(parents=True, exist_ok=True)
@@ -146,13 +152,11 @@ def get_dataset(
         if require_commit and meta.get("code_commit") != commit:
             continue
         # If we pass the above checks, this dataset can be reused
-        print(
-            "Valid existing dataset found. Reusing this dataset..."
-        )  # FIXME replace with updated logging
+        log.info("Reusing existing dataset at %s", dataset_path)
         return dataset_path
 
     # Otherwise, generate a new dataset
-    print(f"No valid existing dataset found at {base}. Generating new dataset...")
+    log.info("No valid existing dataset found at %s. Generating new dataset.", base)
     if rank == 0:
         ts = time.strftime("%Y%m%d-%H%M%S")
         dest = base / f"{ts}__{commit}"
@@ -178,18 +182,19 @@ def get_dataset(
     all_ok = comm.allreduce(1 if ok else 0, op=MPI.MIN) == 1
     comm.Barrier()
 
-    # rank 0 has file write + move
-    if rank == 0:
-        if not all_ok:
+    errs = comm.gather(err, root=0) if not all_ok else None
+    if not all_ok:
+        if rank == 0:
             try:
                 shutil.rmtree(tmp, ignore_errors=True)
             except Exception:
                 pass
-            # collect & raise a representative error
-            errs = comm.gather(err, root=0)
             msgs = "; ".join(e for e in errs if e)
             raise RuntimeError(f"dataset generation failed: {msgs or 'unknown error'}")
+        raise RuntimeError("dataset generation failed on another rank")
 
+    # rank 0 has file write + move
+    if rank == 0:
         # Write to tmp, then move, so readers never see half-written dataset
         meta = {
             "config_id": config_id,
