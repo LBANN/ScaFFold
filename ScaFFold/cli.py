@@ -21,11 +21,9 @@ from pathlib import Path
 import yaml
 from mpi4py import MPI
 
-from ScaFFold import benchmark, generate_fractals
 from ScaFFold.utils import config_utils
 from ScaFFold.utils.collect_scheduler_info import collect_scheduler_metadata
 from ScaFFold.utils.create_restart_script import create_restart_script
-from ScaFFold.utils.utils import customlog
 
 
 def main():
@@ -55,7 +53,7 @@ def main():
     generate_fractals_parser = subparsers.add_parser(
         "generate_fractals",
         help="Generate fractal classes and instances.",
-        description="Must be ran before 'benchmark'",
+        description="Must be run before 'benchmark'",
     )
     generate_fractals_parser.add_argument(
         "-c",
@@ -143,7 +141,7 @@ def main():
     )
     benchmark_parser.add_argument("--seed", type=int, help="Random seed.")
     benchmark_parser.add_argument(
-        "--batch-size", type=int, help="Batch sizes for each volume size."
+        "--batch-size", type=int, help="Batch size per data-parallel rank."
     )
     benchmark_parser.add_argument(
         "--warmup-batches",
@@ -181,6 +179,12 @@ def main():
         type=int,
         nargs=3,
         help="DistConv param: number of shards to divide the tensor into. It's best to choose the fewest ranks needed to fit one sample in GPU memory, since that keeps communication at a minimum",
+    )
+    benchmark_parser.add_argument(
+        "--dc-shard-dims",
+        type=int,
+        nargs=3,
+        help="DistConv param: tensor dimensions to shard.",
     )
     benchmark_parser.add_argument(
         "--epochs",
@@ -277,7 +281,7 @@ def main():
                 f"{combined_config.get('job_name')}_%Y%m%d-%H%M%S"
             )
             benchmark_run_dir = base_run_dir / timestamp
-            customlog(
+            print(
                 f"benchmark_run_dir created at path {Path.resolve(benchmark_run_dir)}"
             )
 
@@ -306,8 +310,12 @@ def main():
         print(f"combined_config = {combined_config}")
 
     if args.command == "benchmark":
+        from ScaFFold import benchmark
+
         benchmark.main(kwargs_dict=combined_config)
     elif args.command == "generate_fractals":
+        from ScaFFold import generate_fractals
+
         generate_fractals.main(kwargs_dict=combined_config)
     else:
         raise ValueError(
