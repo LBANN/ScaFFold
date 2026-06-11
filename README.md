@@ -60,6 +60,8 @@ The model is trained from a random initialization until convergence, which is de
 1. Once fractal generation completes, run the benchmark:  
     `torchrun-hpc -N 1 -n 4 --gpus-per-proc 1 $(which scaffold) benchmark -c ScaFFold/configs/benchmark_default.yml`
 
+ScaFFold benchmark training always uses PyTorch distributed execution with DistConv spatial parallelism. For a singleton run, launch one distributed rank rather than disabling distributed execution.
+
 `benchmark` creates a folder for the benchmark run(s) at `base_run_dir` set in the config file. For reproducibility, we store a copy of the benchmark run config yml. Within each run subfolder, `benchmark` creates a yml config for that specific run.
 
 After each run completes, statistics from the run are stored in `train_stats.csv`. Additionally, users can inspect plots of the training and validation losses over time in `<base_run_dir/figures`.
@@ -69,14 +71,19 @@ Parameters are set in a `.yml` config file and can be modified by the user:
 ```yml
 # External/user-facing
 base_run_dir: "benchmark_runs"     # Subfolder of $(pwd) in which to run jobs.
+dataset_dir: "datasets"            # Directory in which to store and query generated datasets.
 fract_base_dir: "fractals"         # Base directory for fractal IFS and instances.
 n_categories: 5                    # Number of fractal categories present in the dataset.
 n_instances_used_per_fractal: 145  # Number of unique instances to pull from each fractal class. There are 145 unique; exceeding this number will reuse some instances.
-problem_scale: 6                   # Determines dataset resolution and number of unet layers. Default is 6.
+problem_scale: 7                   # Determines dataset resolution and number of unet layers.
 unet_bottleneck_dim: 3             # Power of 2 of the unet bottleneck layer dimension. Default of 3 -> bottleneck layer of size 8.
 seed: 42                           # Random seed.
-batch_size: 1                      # Batch sizes for each vol size.
-optimizer: "ADAM"                  # "ADAM" is preferred option, otherwise training defautls to RMSProp.
+batch_size: 1                      # Batch size per data-parallel rank.
+dataloader_num_workers: 1          # Number of DataLoader worker processes per rank.
+optimizer: "ADAM"                  # "ADAM" is preferred option, otherwise training defaults to RMSProp.
+dc_num_shards: [1, 1, 1]           # DistConv spatial shard counts.
+dc_shard_dims: [2, 3, 4]           # Tensor dimensions sharded by DistConv.
+checkpoint_interval: -1            # Checkpoint every C epochs; set to -1 to disable checkpointing entirely.
 
 # Internal/dev use only
 variance_threshold: 0.15           # Variance threshold for valid fractals. Default is 0.15.
@@ -91,12 +98,12 @@ disable_scheduler: 1               # If 1, disable scheduler during training to 
 more_determinism: 0                # If 1, improve model training determinism.
 datagen_from_scratch: 0            # If 1, delete existing fractals and instances, then regenerate from scratch.
 train_from_scratch: 1              # If 1, delete existing train stats and checkpoint files. Keep 0 if want to restart runs where we left off.
-dist: 1                            # If 1, use torch DDP.
 torch_amp: 1                       # If 1, use mixed precision in training.
 framework: "torch"                 # The DL framework to train with. Only valid option for now is "torch".
 checkpoint_dir: "checkpoints"      # Subfolder in which to save training checkpoints.
-checkpoint_interval: 1             # Number of epochs between saving training checkpoints.
 loss_freq: 1                       # Number of epochs between logging the overall loss.
+warmup_batches: 64                 # How many warmup batches per rank to run before training.
+target_dice: 0.95                  # Validation Dice score threshold for convergence when epochs is -1.
 ```
 
 ## How the benchmark works

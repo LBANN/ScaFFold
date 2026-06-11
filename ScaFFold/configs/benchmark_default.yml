@@ -9,7 +9,7 @@ unet_bottleneck_dim: 3             # Power of 2 of the unet bottleneck layer dim
 seed: 42                           # Random seed.
 batch_size: 1                      # Batch sizes for each vol size per rank.
 dataloader_num_workers: 1          # Number of DataLoader worker processes per rank. More workers will use more memory
-optimizer: "ADAM"                  # "ADAM" is preferred option, otherwise training defautls to RMSProp.
+optimizer: "ADAM"                  # "ADAM" is preferred option, otherwise training defaults to RMSProp.
 dc_num_shards: [1, 1, 1]           # DistConv param: number of shards to divide the tensor into. It's best to choose the fewest ranks needed to fit one sample in GPU memory, since that keeps communication at a minimum
 dc_shard_dims: [2, 3, 4]           # DistConv param: dimension on which to shard
 checkpoint_interval: -1            # Checkpoint every C epochs; set to -1 to disable checkpointing entirely.
@@ -27,7 +27,6 @@ disable_scheduler: 0               # If 1, disable scheduler during training to 
 more_determinism: 0                # If 1, improve model training determinism.
 datagen_from_scratch: 0            # If 1, delete existing fractals and instances, then regenerate from scratch.
 train_from_scratch: 1              # If 1, delete existing train stats and checkpoint files. Keep 0 if want to restart runs where we left off.
-dist: 1                            # If 1, use torch DDP.
 torch_amp: 1                       # If 1, use mixed precision in training.
 framework: "torch"                 # The DL framework to train with. Only valid option for now is "torch".
 checkpoint_dir: "checkpoints"      # Subfolder in which to save training checkpoints.

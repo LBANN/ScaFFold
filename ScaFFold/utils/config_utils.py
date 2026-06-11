@@ -62,7 +62,12 @@ class Config:
         self.train_from_scratch = bool(config_dict["train_from_scratch"])
         self.val_split = config_dict["val_split"]
         self.seed = config_dict["seed"]
-        self.dist = bool(config_dict["dist"])
+        if "dist" in config_dict and not bool(config_dict["dist"]):
+            raise ValueError(
+                "The 'dist: 0' mode is no longer supported. ScaFFold benchmark "
+                "training always runs with distributed execution; use a one-rank "
+                "torchrun-hpc job for singleton runs."
+            )
         self.framework = config_dict["framework"]
         self.starting_learning_rate = config_dict["starting_learning_rate"]
         self.min_learning_rate = config_dict["min_learning_rate"]
@@ -120,5 +125,5 @@ def load_config(file_path: str, config_type: str):
         return RunConfig(config_dict)
     else:
         raise ValueError(
-            f"Invalid config type specified: {type}. Must be either 'sweep' or 'run'"
+            f"Invalid config type specified: {config_type}. Must be either 'sweep' or 'run'"
         )
