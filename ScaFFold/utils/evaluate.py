@@ -37,10 +37,7 @@ def evaluate(
     max_batches=None,
 ):
     def foreground_dice_stats(dice_scores):
-        if dice_scores.size(1) > 1:
-            per_sample_scores = dice_scores[:, 1:].mean(dim=1)
-        else:
-            per_sample_scores = dice_scores.mean(dim=1)
+        per_sample_scores = dice_scores[:, 1:].mean(dim=1)
         return per_sample_scores.sum().item(), per_sample_scores.numel()
 
     net.eval()

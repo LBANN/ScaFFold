@@ -73,7 +73,7 @@ Parameters are set in a `.yml` config file and can be modified by the user:
 base_run_dir: "benchmark_runs"     # Subfolder of $(pwd) in which to run jobs.
 dataset_dir: "datasets"            # Directory in which to store and query generated datasets.
 fract_base_dir: "fractals"         # Base directory for fractal IFS and instances.
-n_categories: 5                    # Number of fractal categories present in the dataset.
+n_categories: 5                    # Positive number of fractal categories present in the dataset.
 n_instances_used_per_fractal: 145  # Number of unique instances to pull from each fractal class. There are 145 unique; exceeding this number will reuse some instances.
 problem_scale: 7                   # Determines dataset resolution and number of unet layers.
 unet_bottleneck_dim: 3             # Power of 2 of the unet bottleneck layer dimension. Default of 3 -> bottleneck layer of size 8.

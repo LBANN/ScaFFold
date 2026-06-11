@@ -237,6 +237,9 @@ def main():
         combined_config["unet_layers"] = (
             combined_config["problem_scale"] - combined_config["unet_bottleneck_dim"]
         )
+        config_utils.require_positive_int(
+            "n_categories", combined_config["n_categories"]
+        )
 
         # Resolve paths to absolute, matching Config() behavior
         if "base_run_dir" in combined_config and combined_config["base_run_dir"]:

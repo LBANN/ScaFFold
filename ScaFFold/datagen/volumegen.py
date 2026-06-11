@@ -162,7 +162,7 @@ def main(config: Dict):
         )
 
         np.random.seed(config.seed)
-        fractal_colors = np.random.rand(max(config.n_categories, n_fracts_per_vol), 3)
+        fractal_colors = np.random.rand(config.n_categories, 3)
 
         grid_size = math.floor(config.vol_size * config.scale)
         fract_base_dir = str(config.fract_base_dir)
