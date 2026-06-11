@@ -62,7 +62,7 @@ def get_local_size(required: bool = False) -> int:
 
 
 def get_world_rank(required: bool = False) -> int:
-    """Return the global MPI rank.."""
+    """Return the global MPI rank."""
     if "MV2_COMM_WORLD_RANK" in os.environ:
         return int(os.environ["MV2_COMM_WORLD_RANK"])
     if "OMPI_COMM_WORLD_RANK" in os.environ:
@@ -89,16 +89,6 @@ def get_world_size(required: bool = False) -> int:
     if required:
         raise RuntimeError("Could not get world size")
     return 1
-
-
-def force_cuda_visible_devices(force: bool = False) -> None:
-    """Set CUDA_VISIBLE_DEVICES.
-
-    This seems to help avoid PyTorch or something else from touching
-    other GPUs.
-
-    """
-    print("force_cuda_visible_devices is deprecated. Skipping...")
 
 
 def get_device() -> torch.device:
