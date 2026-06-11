@@ -21,6 +21,12 @@ import yaml
 import ScaFFold.paths
 
 
+def require_positive_int(name: str, value: int) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        raise ValueError(f"{name} must be a positive integer")
+    return value
+
+
 class Config:
     """
     A class for storing configuration settings for a specific run.
@@ -36,7 +42,9 @@ class Config:
             Path(config_dict.get("fract_base_dir", "fractals/")).resolve()
         )
         self.job_name = config_dict.get("job_name", "benchmark")
-        self.n_categories = config_dict["n_categories"]
+        self.n_categories = require_positive_int(
+            "n_categories", config_dict["n_categories"]
+        )
         self.problem_scale = config_dict["problem_scale"]
         try:
             assert isinstance(self.problem_scale, int), (

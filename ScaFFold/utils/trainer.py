@@ -220,24 +220,18 @@ class BaseTrainer:
         self.grad_scaler = torch.amp.GradScaler("cuda", enabled=self.use_grad_scaler)
 
         # Set up loss function
-        if self.config.n_categories + 1 > 1:
-            ce_class_weights = _compute_ce_class_weights(
-                train_set=self.train_set,
-                n_train=self.n_train,
-                n_categories=self.config.n_categories,
-                device=self.device,
-                sample_fraction=self.config.ce_weight_sample_fraction,
-                dist_enabled=True,
-                world_rank=self.world_rank,
-                log=self.log,
-            )
-            self.criterion = nn.CrossEntropyLoss(weight=ce_class_weights).to(
-                self.device
-            )
-        else:
-            self.criterion = nn.BCEWithLogitsLoss().to(self.device)
-        if isinstance(self.criterion, nn.CrossEntropyLoss):
-            self.ce_class_weights = self.criterion.weight
+        ce_class_weights = _compute_ce_class_weights(
+            train_set=self.train_set,
+            n_train=self.n_train,
+            n_categories=self.config.n_categories,
+            device=self.device,
+            sample_fraction=self.config.ce_weight_sample_fraction,
+            dist_enabled=True,
+            world_rank=self.world_rank,
+            log=self.log,
+        )
+        self.criterion = nn.CrossEntropyLoss(weight=ce_class_weights).to(self.device)
+        self.ce_class_weights = self.criterion.weight
 
         self.log.info(
             f"Optimizer: {self.optimizer}, Scheduler: {self.scheduler}, AMP dtype: {self.amp_dtype}, Gradient Scaler Enabled: {self.use_grad_scaler}"
@@ -255,9 +249,7 @@ class BaseTrainer:
     @staticmethod
     def _foreground_dice_mean(dice_scores):
         """Match optimization to the reported validation metric by excluding background."""
-        if dice_scores.size(1) > 1:
-            return dice_scores[:, 1:].mean()
-        return dice_scores.mean()
+        return dice_scores[:, 1:].mean()
 
     def _current_learning_rate(self):
         if self.optimizer is None or not self.optimizer.param_groups:
