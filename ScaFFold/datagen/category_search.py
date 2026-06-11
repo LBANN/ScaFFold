@@ -186,7 +186,9 @@ def main(config: Config) -> None:
     rank = comm.Get_rank()
     size = comm.Get_size()
 
-    datagen_batch_size = 10000
+    datagen_batch_size = int(getattr(config, "datagen_batch_size", 10000))
+    if datagen_batch_size <= 0:
+        raise ValueError("datagen_batch_size must be positive")
 
     # FIXME anything else to ensure determinism?
     np.random.seed(config.seed + rank)
