@@ -12,18 +12,19 @@
 #
 # SPDX-License-Identifier: (Apache-2.0)
 
+from __future__ import annotations
+
 import os
 import os.path
 import socket
 import time
 from typing import Literal, Optional
 
-import torch
-import torch.distributed
-
 
 def get_num_gpus() -> int:
     """Return the number of GPUs on this node."""
+    import torch
+
     return torch.cuda.device_count()
 
 
@@ -92,6 +93,8 @@ def get_world_size(required: bool = False) -> int:
 
 
 def get_device() -> torch.device:
+    import torch
+
     if torch.cuda.is_available():
         torch.cuda.init()
 
@@ -133,9 +136,12 @@ def get_job_id() -> Optional[str]:
 
 
 def initialize_dist(
-    init_file: Optional[str] = None, rendezvous: Literal["env", "tcp", "file"] = "env"
+    init_file: Optional[str] = None,
+    rendezvous: Literal["env", "tcp", "file"] = "env",
+    log=None,
 ) -> None:
     """Initialize the PyTorch distributed backend and set up NCCL."""
+    import torch
 
     if rendezvous == "env":
         init_method = "env://"
@@ -173,9 +179,12 @@ def initialize_dist(
     else:
         raise ValueError(f'Unrecognized scheme "{rendezvous}"')
 
-    print(
-        f"distributed.py: rank {get_world_rank()} / {get_world_size()} calling init_process_group()"
-    )
+    if log is not None:
+        log.debug(
+            "rank %s / %s calling init_process_group()",
+            get_world_rank(),
+            get_world_size(),
+        )
 
     # Initialize
     torch.distributed.init_process_group(

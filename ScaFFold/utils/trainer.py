@@ -581,6 +581,7 @@ class PyTorchTrainer(BaseTrainer):
                     self.config.n_categories,
                     self.config._parallel_strategy,
                     max_batches=max_val_batches,
+                    log=self.log,
                 )
         finally:
             self.checkpoint_manager.restore_training_state(snapshot)
@@ -599,8 +600,10 @@ class PyTorchTrainer(BaseTrainer):
             start = time.time()
             while dice_score_train < self.config.target_dice:
                 if self.config.epochs != -1 and epoch > self.config.epochs:
-                    print(
-                        f"Maxmimum epochs reached '{self.config.epochs}'. Concluding training early (may have not converged)."
+                    self.log.warning(
+                        "Maximum epochs reached '%s'. Concluding training early "
+                        "(may have not converged).",
+                        self.config.epochs,
                     )
                     break
 
@@ -677,6 +680,7 @@ class PyTorchTrainer(BaseTrainer):
                     self.criterion,
                     self.config.n_categories,
                     self.config._parallel_strategy,
+                    log=self.log,
                 )
                 dice_info = torch.tensor(
                     [dice_sum, numsamples], dtype=VOLUME_TORCH_DTYPE
@@ -718,8 +722,13 @@ class PyTorchTrainer(BaseTrainer):
                         + "\n"
                     )
                     outfile.flush()
-                    print(
-                        f"Epoch {epoch} completed in {epoch_duration} seconds. Total train time so far: {time.time() - start}. Rank 0 first batch minibatch_time_s={minibatch_time_s:.6f}."
+                    self.log.info(
+                        "Epoch %s completed in %.2f seconds. Total train time so "
+                        "far: %.2f seconds. Rank 0 first batch minibatch_time_s=%.6f.",
+                        epoch,
+                        epoch_duration,
+                        time.time() - start,
+                        minibatch_time_s,
                     )
 
                 #

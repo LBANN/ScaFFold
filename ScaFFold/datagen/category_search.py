@@ -27,6 +27,7 @@ from mpi4py import MPI
 
 from ScaFFold.datagen.generate_fractal_points import generate_fractal_points
 from ScaFFold.utils.config_utils import Config
+from ScaFFold.utils.utils import setup_mpi_logger
 
 DEFAULT_NP_DTYPE = np.float64
 
@@ -185,6 +186,7 @@ def main(config: Config) -> None:
     comm = MPI.COMM_WORLD
     rank = comm.Get_rank()
     size = comm.Get_size()
+    log = setup_mpi_logger(__file__, getattr(config, "verbose", 0))
 
     datagen_batch_size = int(getattr(config, "datagen_batch_size", 10000))
     if datagen_batch_size <= 0:
@@ -193,8 +195,7 @@ def main(config: Config) -> None:
     # FIXME anything else to ensure determinism?
     np.random.seed(config.seed + rank)
 
-    if rank == 0:
-        print(f"MPI size = {size}")
+    log.info("MPI size = %s", size)
 
     # Setup directories
     fracts_sub_dir = f"var{config.variance_threshold}"
@@ -202,9 +203,9 @@ def main(config: Config) -> None:
         config.fract_base_dir, fracts_sub_dir, "3DIFS_param"
     )
     if rank == 0:
-        print(f"Writing fractals to {fracts_write_dir}")
+        log.info("Writing fractals to %s", fracts_write_dir)
         if os.path.exists(fracts_write_dir) and config.datagen_from_scratch:
-            print("Removing existing fractals dir")
+            log.info("Removing existing fractals directory")
             shutil.rmtree(fracts_write_dir)
         os.makedirs(fracts_write_dir, exist_ok=True)
 
@@ -215,8 +216,12 @@ def main(config: Config) -> None:
     existing_categories = len(glob.glob(f"{fracts_write_dir}/*.csv"))
     categories_remaining = config.n_categories - existing_categories
     if rank == 0:
-        print(
-            f"category_search found {existing_categories} existing fractal categories | {config.n_categories} needed | {max(0, categories_remaining)} remaining"
+        log.info(
+            "category_search found %s existing fractal categories | %s needed | "
+            "%s remaining",
+            existing_categories,
+            config.n_categories,
+            max(0, categories_remaining),
         )
 
     rank_start_time = time.time()
@@ -248,11 +253,17 @@ def main(config: Config) -> None:
         if rank == 0:
             params_valid = [item for sublist in gathered_params for item in sublist]
             if attempts % 10000 * size / datagen_batch_size == 0:
-                print(
-                    f"cat_remaining = {categories_remaining} | total attempts = {attempts} | stats for rank 0: nan_fail_count = {nan_fail_count}, var_fail_count = {var_fail_count}, runaway_fail_count = {runaway_fail_count}"
+                log.info(
+                    "cat_remaining = %s | total attempts = %s | stats for rank 0: "
+                    "nan_fail_count = %s, var_fail_count = %s, runaway_fail_count = %s",
+                    categories_remaining,
+                    attempts,
+                    nan_fail_count,
+                    var_fail_count,
+                    runaway_fail_count,
                 )
             if len(params_valid) > 0:
-                print(f"Processing {len(params_valid)} param sets from this attempt")
+                log.info("Processing %s param sets from this attempt", len(params_valid))
             for p in params_valid:
                 # Ensure we don't save more categories than needed
                 if categories_remaining > 0:
@@ -267,8 +278,9 @@ def main(config: Config) -> None:
                     # Update categories_remaining
                     categories_remaining -= 1
                 else:
-                    print(
-                        "Generated all fractal categories needed. Ignoring additional found valid categories..."
+                    log.info(
+                        "Generated all fractal categories needed. Ignoring additional "
+                        "valid categories."
                     )
                     break
 
@@ -286,14 +298,35 @@ def main(config: Config) -> None:
     global_runaway_fail_count = comm.reduce(runaway_fail_count, op=MPI.SUM, root=0)
 
     if rank == 0 and attempts > 0:
-        print(
-            f"Generated {config.n_categories - existing_categories} new categories in {attempts * datagen_batch_size} total attempts | {attempts * datagen_batch_size / (config.n_categories - existing_categories)} Attempts per category | Total categories is now {config.n_categories}"
+        categories_generated = config.n_categories - existing_categories
+        total_attempts = attempts * datagen_batch_size
+        log.info(
+            "Generated %s new categories in %s total attempts | %.2f attempts per "
+            "category | total categories is now %s",
+            categories_generated,
+            total_attempts,
+            total_attempts / categories_generated,
+            config.n_categories,
         )
-        print(
-            f"Failures experienced: {global_nan_fail_count} nan attempts, {100 * global_nan_fail_count / (attempts * datagen_batch_size):.4f}% of all attempts, {global_var_fail_count} var fail attempts, {100 * global_var_fail_count / (attempts * datagen_batch_size):.4f}% of all attempts, {global_runaway_fail_count} runaway attempts, {100 * global_runaway_fail_count / (attempts * datagen_batch_size):.4f}% of all attempts"
+        log.info(
+            "Failures experienced: %s nan attempts (%.4f%%), %s variance-fail "
+            "attempts (%.4f%%), %s runaway attempts (%.4f%%)",
+            global_nan_fail_count,
+            100 * global_nan_fail_count / total_attempts,
+            global_var_fail_count,
+            100 * global_var_fail_count / total_attempts,
+            global_runaway_fail_count,
+            100 * global_runaway_fail_count / total_attempts,
         )
-        print(
-            f"Rank 0 wall time = {rank_total_time:.2f} | Total CPU time = {global_sum_time:.2f} | Avg wall time per rank {global_sum_time / size:.2f} | {attempts * datagen_batch_size / rank_total_time:.2f} total attempts per wall second | {attempts * datagen_batch_size / rank_total_time / size:.2f} attempts per wall second per rank"
+        log.info(
+            "Rank 0 wall time = %.2f | total CPU time = %.2f | avg wall time per "
+            "rank = %.2f | %.2f total attempts per wall second | %.2f attempts "
+            "per wall second per rank",
+            rank_total_time,
+            global_sum_time,
+            global_sum_time / size,
+            total_attempts / rank_total_time,
+            total_attempts / rank_total_time / size,
         )
 
     return 0

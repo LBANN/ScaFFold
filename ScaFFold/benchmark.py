@@ -12,57 +12,26 @@
 #
 # SPDX-License-Identifier: (Apache-2.0)
 
-import logging
 import shutil
 from argparse import Namespace
 from pathlib import Path, PosixPath
 
-import yaml
 from mpi4py import MPI
 
 from ScaFFold import worker
 from ScaFFold.utils.distributed import get_world_rank
 from ScaFFold.utils.perf_measure import adiak_init, adiak_value
-
-
-def create_run_directory(base_dir, combination_index, num_runs):
-    """
-    Create new directory for current run, named using unique combination_index
-    """
-    run_dir = base_dir / f"param_set_{combination_index}"
-    for i in range(num_runs):
-        run_dir_with_iter = Path(f"{run_dir}/run{i}")
-        run_dir_with_iter.mkdir(parents=True, exist_ok=True)
-    return run_dir
-
-
-def write_run_config(run_dir, iter, keys, combination):
-    """
-    Write run config to a yaml file, and create optional override yaml
-    """
-    run_config = {key: value for key, value in zip(keys, combination)}
-    run_config["run_dir"] = str(
-        run_dir.resolve()
-    )  # Add abs path to run dir as entry in dict
-    run_config["run_iter"] = iter  # Add run_iter identifier as entry in dict
-    run_config_path = run_dir / "run_config.yaml"
-    with open(run_config_path, "w") as file:
-        yaml.dump(run_config, file)
-    return run_config_path
+from ScaFFold.utils.utils import setup_mpi_logger
 
 
 def main(kwargs_dict: dict = {}):
     args = Namespace(**kwargs_dict)
-
-    logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
-    )
+    log = setup_mpi_logger(__file__, args.verbose)
 
     # Get MPI information
     comm = MPI.COMM_WORLD
     rank = get_world_rank(required=True)
-    if rank == 0:
-        print(f"args found: {args}")
+    log.debug("args found: %s", args)
 
     kdict = None
     # Now set up and start benchmark run(s)
@@ -88,7 +57,7 @@ def main(kwargs_dict: dict = {}):
     adiak_init(comm)
     for key, value in kdict.items():
         if isinstance(value, dict):
-            print(f"Adiak: skipping key with dict value '{key}'")
+            log.debug("Adiak: skipping key with dict value '%s'", key)
             continue
         if isinstance(value, PosixPath):
             value = str(value)

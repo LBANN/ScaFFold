@@ -12,12 +12,10 @@
 #
 # SPDX-License-Identifier: (Apache-2.0)
 
-import logging
 import math
 import os
 import pickle
 import random
-import sys
 import time
 from math import ceil
 from typing import Dict
@@ -27,6 +25,7 @@ from mpi4py import MPI
 
 from ScaFFold.utils.config_utils import Config
 from ScaFFold.utils.data_types import DEFAULT_NP_DTYPE, MASK_DTYPE, VOLUME_DTYPE
+from ScaFFold.utils.utils import setup_mpi_logger
 
 
 def load_np_ptcloud(path: str) -> np.ndarray:
@@ -66,12 +65,11 @@ def points_to_voxelgrid(
 
 
 def main(config: Dict):
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
-
     # Initialize MPI
     comm = MPI.COMM_WORLD
     rank = comm.Get_rank()
     size = comm.Get_size()
+    log = setup_mpi_logger(__file__, getattr(config, "verbose", 0))
 
     dataset_dir = str(config.dataset_dir)
 
@@ -96,9 +94,11 @@ def main(config: Dict):
 
         # Force n_instances_used_per_fractal to be multiple of n_fracts_per_vol
         if config.n_instances_used_per_fractal % n_fracts_per_vol != 0:
-            print(
-                f"volumegen.py: WARNING: n_instances_used_per_fractal ({config.n_instances_used_per_fractal}) \n"
-                f"NOT multiple of n_fracts_per_vol={n_fracts_per_vol}. Rounding down."
+            log.warning(
+                "n_instances_used_per_fractal (%s) is not a multiple of "
+                "n_fracts_per_vol=%s. Rounding down.",
+                config.n_instances_used_per_fractal,
+                n_fracts_per_vol,
             )
             config.n_instances_used_per_fractal = (
                 config.n_instances_used_per_fractal
@@ -132,8 +132,8 @@ def main(config: Dict):
 
         with open(volumes_contents_path, "wb") as f:
             np.savetxt(f, volumes_contents.astype(int), fmt="%i", delimiter=",")
-        print(
-            f"volumegen.py({rank}): finished writing volumes_contents (shape = {volumes_contents.shape})"
+        log.info(
+            "Finished writing volumes_contents with shape %s", volumes_contents.shape
         )
 
     # Broadcast to all ranks
@@ -153,12 +153,15 @@ def main(config: Dict):
     end_idx = min(((rank + 1) * stride), num_volumes)
 
     if start_idx >= end_idx:
-        logging.info(f"Rank {rank} given no volumes to generate")
+        log.debug("Rank %s given no volumes to generate", rank)
 
     else:
         volumes_contents_subset = volumes_contents[start_idx:end_idx]
-        print(
-            f"rank {rank} responsible for volumes {volumes_contents_subset[0][0]} through {volumes_contents_subset[-1][0]}"
+        log.debug(
+            "Rank %s responsible for volumes %s through %s",
+            rank,
+            volumes_contents_subset[0][0],
+            volumes_contents_subset[-1][0],
         )
 
         np.random.seed(config.seed)
@@ -171,7 +174,7 @@ def main(config: Dict):
         start_time = time.time()
         for i, curr_vol in enumerate(volumes_contents_subset):
             if i % 10 == 0:
-                logging.info(f"Rank {rank} processing local volume {i}...")
+                log.debug("Rank %s processing local volume %s", rank, i)
 
             volume = np.full(
                 (config.vol_size, config.vol_size, config.vol_size, 3),
@@ -204,10 +207,10 @@ def main(config: Dict):
                 )
 
                 if not os.path.exists(point_cloud_path):
-                    print(
-                        f"File {point_cloud_path} does not exist. Ensure you have run 'scaffold generate_fractals ...'"
+                    raise FileNotFoundError(
+                        f"File {point_cloud_path} does not exist. "
+                        "Ensure you have run 'scaffold generate_fractals ...'"
                     )
-                    sys.exit(1)
 
                 points = load_np_ptcloud(point_cloud_path)
                 mask3d = points_to_voxelgrid(points, grid_size)
@@ -239,19 +242,22 @@ def main(config: Dict):
         end_time = time.time()
         total_time = end_time - start_time
         if rank == 0:
-            print(
-                f"Rank 0 generated {len(volumes_contents_subset)} volumes in {total_time:.2f} seconds | {len(volumes_contents_subset) / total_time:.2f} volumes per second"
+            log.info(
+                "Rank 0 generated %s volumes in %.2f seconds | %.2f volumes per second",
+                len(volumes_contents_subset),
+                total_time,
+                len(volumes_contents_subset) / total_time,
             )
 
     # Barrier to ensure all ranks are finished writing
     comm.Barrier()
 
     if rank == 0:
-        print(f"volumegen.py({rank}): All ranks done. Proceeding to split.")
+        log.info("All ranks done. Proceeding to split.")
 
     # Do the train/val split and generate lists of unique train/val masks
     if rank == 0:
-        print("volumegen.py: volume gen COMPLETE. Now generating unique mask lists")
+        log.info("Volume generation complete. Generating unique mask lists.")
 
         # Directories are already created at start of script
 
@@ -259,13 +265,15 @@ def main(config: Dict):
         val_files = sorted(list(val_indices))
         train_files = sorted(list(set(range(num_volumes)) - val_indices))
 
-        print(
-            f"volumegen.py({rank}): len(val_files)={len(val_files)}, len(train_files)={len(train_files)}."
+        log.info(
+            "len(val_files)=%s, len(train_files)=%s",
+            len(val_files),
+            len(train_files),
         )
 
         # Save lists of unique train and val mask values
-        print(
-            f"volumegen.py({rank}): calculating unique mask values from configuration (no file read)"
+        log.info(
+            "Calculating unique mask values from configuration without reading mask files."
         )
 
         # volumes_contents layout is [vol_idx, cat1, inst1, cat2, inst2, ...]

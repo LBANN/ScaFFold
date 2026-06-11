@@ -17,6 +17,7 @@ from argparse import Namespace
 from mpi4py import MPI
 
 from ScaFFold.datagen import category_search, instance
+from ScaFFold.utils.utils import setup_mpi_logger
 
 
 def main(kwargs_dict: dict = {}):
@@ -24,9 +25,9 @@ def main(kwargs_dict: dict = {}):
     comm = MPI.COMM_WORLD
     size = comm.Get_size()
     rank = comm.Get_rank()
+    log = setup_mpi_logger(__file__, getattr(args, "verbose", 0))
 
-    if rank == 0:
-        print(f"generate_fractals.py: world size = {size}")
+    log.info("Fractal generation world size = %s", size)
 
     comm.Barrier()
 
@@ -38,10 +39,7 @@ def main(kwargs_dict: dict = {}):
 
     comm.Barrier()
 
-    if rank == 0:
-        print(
-            f"generate_fractals.py({rank}): Fractal and instance generation has finished. Exiting..."
-        )
+    log.info("Fractal and instance generation has finished.")
 
     MPI.Finalize()
 

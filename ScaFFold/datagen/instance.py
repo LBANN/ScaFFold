@@ -29,6 +29,7 @@ from mpi4py import MPI
 
 from ScaFFold.datagen.generate_fractal_points import generate_fractal_points
 from ScaFFold.utils.config_utils import Config
+from ScaFFold.utils.utils import setup_mpi_logger
 
 DEFAULT_NP_DTYPE = np.float64
 
@@ -72,12 +73,12 @@ def main(config: Config):
     comm = MPI.COMM_WORLD
     size = comm.Get_size()
     rank = comm.Get_rank()
+    log = setup_mpi_logger(__file__, getattr(config, "verbose", 0))
 
     # FIXME anything else to ensure determinism?
     np.random.seed(config.seed + rank)
 
-    if rank == 0:
-        print(f"MPI size = {size}")
+    log.info("MPI size = %s", size)
 
     # Setup directories
     fracts_sub_dir = f"var{config.variance_threshold}"
@@ -86,11 +87,13 @@ def main(config: Config):
         config.fract_base_dir, fracts_sub_dir, "instances", f"np{config.point_num}"
     )
     if rank == 0:
-        print(
-            f"Generating instances for num_points={config.point_num}, writing to {instance_write_dir}"
+        log.info(
+            "Generating instances for num_points=%s, writing to %s",
+            config.point_num,
+            instance_write_dir,
         )
         if os.path.exists(instance_write_dir) and config.datagen_from_scratch:
-            print("Removing existing instances dir")
+            log.info("Removing existing instances directory")
             shutil.rmtree(instance_write_dir)
         os.makedirs(instance_write_dir, exist_ok=True)
 
@@ -184,8 +187,10 @@ def main(config: Config):
     end_time = time.time()
     total_time = end_time - start_time
     if rank == 0:
-        print(
-            f"Generated {len(instances_to_generate)} instances in {total_time:.2f} seconds"
+        log.info(
+            "Generated %s instances in %.2f seconds",
+            len(instances_to_generate),
+            total_time,
         )
 
     return 0

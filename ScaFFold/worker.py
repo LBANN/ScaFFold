@@ -112,7 +112,7 @@ def main(kwargs_dict: dict = {}):
     begin_code_region("init_ddp")
     if not dist.is_initialized():
         log.info("Initializing distributed process group...")
-        initialize_dist(rendezvous="env")
+        initialize_dist(rendezvous="env", log=log)
     else:
         log.info("Distributed process group already initialized by launcher.")
     end_code_region("init_ddp")
@@ -183,7 +183,7 @@ def main(kwargs_dict: dict = {}):
     if config.framework == "torch":
         # Optionally enable additional determinism settings
         if config.more_determinism:
-            print(
+            log.info(
                 "Enabling additional determinism settings to improve training reproducibility"
             )
             torch.backends.cudnn.benchmark = False
@@ -248,7 +248,7 @@ def main(kwargs_dict: dict = {}):
         hostname = socket.gethostname()
         tracename = f"torch-{hostname}-r{rank}-N{world_size // ranks_per_node}-n{world_size}-ps{config.problem_scale}-e{config.epochs}-nipf{config.n_instances_used_per_fractal}-{int(time.time())}.json"
         prof.export_chrome_trace(tracename)
-        print(f"Wrote PyTorch trace '{tracename}'")
+        log.info("Wrote PyTorch trace '%s'", tracename)
 
     #
     # Calculate benchmark score
