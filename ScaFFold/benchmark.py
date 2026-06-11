@@ -60,7 +60,7 @@ def main(kwargs_dict: dict = {}):
 
     # Get MPI information
     comm = MPI.COMM_WORLD
-    rank = get_world_rank(required=args.dist)
+    rank = get_world_rank(required=True)
     if rank == 0:
         print(f"args found: {args}")
 

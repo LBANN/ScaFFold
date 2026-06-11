@@ -58,9 +58,9 @@ class BaseTrainer:
         self.amp_device_type = self.device.type if self.device.type != "mps" else "cpu"
         self.amp_dtype = AMP_DTYPE
         self.use_grad_scaler = False
-        self.world_size = get_world_size(required=self.config.dist)
-        self.world_rank = get_world_rank(required=self.config.dist)
-        self.local_rank = get_local_rank(required=self.config.dist)
+        self.world_size = get_world_size(required=True)
+        self.world_rank = get_world_rank(required=True)
+        self.local_rank = get_local_rank(required=True)
 
         # Initialize placeholders for attributes that will be set up later
         self.train_set = None
@@ -140,21 +140,17 @@ class BaseTrainer:
 
     def create_sampler(self):
         """Create DistributedSamplers for train and validation datasets."""
-        if self.config.dist:
-            self.train_sampler = torch.utils.data.distributed.DistributedSampler(
-                self.train_set,
-                num_replicas=self.data_num_replicas,
-                rank=self.data_replica_rank,
-            )
-            self.val_sampler = torch.utils.data.distributed.DistributedSampler(
-                self.val_set,
-                num_replicas=self.data_num_replicas,
-                rank=self.data_replica_rank,
-                shuffle=False,
-            )
-        else:
-            self.train_sampler = torch.utils.data.RandomSampler(self.train_set)
-            self.val_sampler = torch.utils.data.SequentialSampler(self.val_set)
+        self.train_sampler = torch.utils.data.distributed.DistributedSampler(
+            self.train_set,
+            num_replicas=self.data_num_replicas,
+            rank=self.data_replica_rank,
+        )
+        self.val_sampler = torch.utils.data.distributed.DistributedSampler(
+            self.val_set,
+            num_replicas=self.data_num_replicas,
+            rank=self.data_replica_rank,
+            shuffle=False,
+        )
 
     def create_dataloaders(self):
         """Create dataloaders for training and validation."""
@@ -231,7 +227,7 @@ class BaseTrainer:
                 n_categories=self.config.n_categories,
                 device=self.device,
                 sample_fraction=self.config.ce_weight_sample_fraction,
-                dist_enabled=self.config.dist,
+                dist_enabled=True,
                 world_rank=self.world_rank,
                 log=self.log,
             )
@@ -287,7 +283,7 @@ class PyTorchTrainer(BaseTrainer):
             base_dir=self.checkpoint_path_absolute,
             log=self.log,
             world_rank=self.world_rank,
-            dist_enabled=self.config.dist,
+            dist_enabled=True,
             # Check config for async setting, default to False
             async_save=getattr(self.config, "async_save", False),
         )
@@ -573,8 +569,7 @@ class PyTorchTrainer(BaseTrainer):
         if warmup_batches <= 0:
             return
 
-        if self.config.dist:
-            self.train_loader.sampler.set_epoch(0)
+        self.train_loader.sampler.set_epoch(0)
 
         start_warmup = time.time()
         max_batches = min(warmup_batches, len(self.train_loader))
@@ -604,8 +599,7 @@ class PyTorchTrainer(BaseTrainer):
                     f"  warmup: batch {batch_idx} completed in {batch_t_end - start_warmup} seconds"
                 )
 
-            if self.config.dist:
-                self.val_loader.sampler.set_epoch(0)
+            self.val_loader.sampler.set_epoch(0)
 
             if max_val_batches > 0:
                 self.log.debug("  warmup: running validation warmup pass")
@@ -623,8 +617,7 @@ class PyTorchTrainer(BaseTrainer):
         finally:
             self.checkpoint_manager.restore_training_state(snapshot)
 
-        if self.config.dist:
-            torch.distributed.barrier()
+        torch.distributed.barrier()
         self.log.info(f"Done warmup. Took {int(time.time() - start_warmup)}s")
 
     def train(self):
@@ -652,9 +645,8 @@ class PyTorchTrainer(BaseTrainer):
                 minibatch_events = []
 
                 # Set necessary modes/states
-                if self.config.dist:
-                    self.train_loader.sampler.set_epoch(epoch)
-                    self.val_loader.sampler.set_epoch(epoch)
+                self.train_loader.sampler.set_epoch(epoch)
+                self.val_loader.sampler.set_epoch(epoch)
                 self.model.train()
                 self.optimizer.zero_grad(set_to_none=False)
 
@@ -733,11 +725,10 @@ class PyTorchTrainer(BaseTrainer):
                 dice_info = torch.tensor(
                     [dice_sum, numsamples], dtype=VOLUME_TORCH_DTYPE
                 )
-                if self.config.dist:
-                    dice_info = dice_info.to(device=self.device)
-                    torch.distributed.all_reduce(
-                        dice_info, op=torch.distributed.ReduceOp.SUM
-                    )
+                dice_info = dice_info.to(device=self.device)
+                torch.distributed.all_reduce(
+                    dice_info, op=torch.distributed.ReduceOp.SUM
+                )
                 val_score = dice_info[0].item() / max(dice_info[1].item(), 1)
                 if not self.config.disable_scheduler:
                     self.scheduler.step()

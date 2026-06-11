@@ -15,7 +15,6 @@
 import math
 import os
 import socket
-import sys
 import time
 from argparse import Namespace
 
@@ -23,7 +22,6 @@ import numpy as np
 import psutil
 import torch
 import torch.distributed as dist
-import yaml
 from distconv import DistConvDDP, ParallelStrategy
 from torch.distributed.tensor import Replicate, Shard
 
@@ -47,11 +45,6 @@ from ScaFFold.utils.perf_measure import (
 from ScaFFold.utils.trainer import PyTorchTrainer
 from ScaFFold.utils.utils import set_seeds, setup_mpi_logger
 from ScaFFold.viz import standard_viz
-
-if hasattr(os, "sched_getaffinity"):
-    _orig_affinity = os.sched_getaffinity(0)
-else:
-    _orig_affinity = None
 
 
 def check_resource_utilization(log, rank, world_size):
@@ -84,26 +77,6 @@ def check_resource_utilization(log, rank, world_size):
         log.debug(f"  Device Properties: {torch.cuda.get_device_properties(this_gpu)}")
 
 
-def override_config(config) -> None:
-    """Override base run config if additional configs are provided."""
-    if "--config" in sys.argv:
-        config_idx = 1  # Start at 1 to skip the base run config
-        while True:
-            try:
-                config_idx = sys.argv.index("--config", config_idx) + 1
-            except ValueError:
-                break
-            config_file = sys.argv[config_idx]
-            if not os.path.isfile(config_file):
-                raise ValueError(f"Additional config file {config_file} does not exist")
-            with open(config_file) as f:
-                override_config = yaml.full_load(f)
-            for k, v in override_config.items():
-                if not hasattr(config, k):
-                    raise ValueError(f"Unknown configuration option {k}={v}")
-                setattr(config, k, v)
-
-
 @annotate()
 def main(kwargs_dict: dict = {}):
     #
@@ -120,8 +93,8 @@ def main(kwargs_dict: dict = {}):
     log.debug(f"random seeds set to {config.seed}")
 
     # Get MPI information
-    rank = get_world_rank(required=config.dist)
-    world_size = get_world_size(required=config.dist)
+    rank = get_world_rank(required=True)
+    world_size = get_world_size(required=True)
 
     # Optionally enable additional determinism settings
     if config.more_determinism:
@@ -134,14 +107,14 @@ def main(kwargs_dict: dict = {}):
         # Default
         torch.backends.cudnn.benchmark = True
 
-    # Initialize DDP
+    # Initialize DDP. ScaFFold always runs the benchmark as a distributed job;
+    # a one-rank launch is the supported singleton case.
     begin_code_region("init_ddp")
-    if config.dist:
-        if not dist.is_initialized():
-            log.info("Initializing distributed process group...")
-            initialize_dist(rendezvous="env")
-        else:
-            log.info("Distributed process group already initialized by launcher.")
+    if not dist.is_initialized():
+        log.info("Initializing distributed process group...")
+        initialize_dist(rendezvous="env")
+    else:
+        log.info("Distributed process group already initialized by launcher.")
     end_code_region("init_ddp")
 
     # More useful info
@@ -150,7 +123,7 @@ def main(kwargs_dict: dict = {}):
     log.debug(
         f"Backend={dist.get_backend()}, world_size={world_size}, rank={rank}, local_rank={get_local_rank()}"
     )
-    log.info(f"rank={rank}, world_size={world_size} test")
+    log.info(f"rank={rank}, world_size={world_size}")
 
     # Generate or retrieve dataset
     begin_code_region("get_dataset")
@@ -162,8 +135,6 @@ def main(kwargs_dict: dict = {}):
 
     # Initialize model
     begin_code_region("init_model")
-    config.dc_num_shards = getattr(config, "dc_num_shards", config.dc_num_shards)
-    config.dc_shard_dims = getattr(config, "dc_shard_dims", config.dc_shard_dims)
     log.info(
         f"DistConv num_shards={config.dc_num_shards}, shard_dim={config.dc_shard_dims}"
     )
@@ -176,29 +147,33 @@ def main(kwargs_dict: dict = {}):
         layers=config.unet_layers,
         group_norm_groups=config.group_norm_groups,
     )
-    if config.dist:
-        # DDP + DistConv setup
-        # Ensure world_size is divisible by total distconv shards
-        assert dist.get_world_size() % math.prod(config.dc_num_shards) == 0, (
-            f"world_size={dist.get_world_size()} must be divisible by total number of distconv shards = {math.prod(config.dc_num_shards)}"
+    # DDP + DistConv setup
+    # Ensure world_size is divisible by total distconv shards
+    total_distconv_shards = math.prod(config.dc_num_shards)
+    if world_size % total_distconv_shards != 0:
+        raise ValueError(
+            f"world_size={world_size} must be divisible by total number of "
+            f"distconv shards={total_distconv_shards}"
         )
 
-        ps = ParallelStrategy(
-            num_shards=config.dc_num_shards,
-            shard_dim=config.dc_shard_dims,
-            device_type=device.type,
-        )
+    ps = ParallelStrategy(
+        num_shards=config.dc_num_shards,
+        shard_dim=config.dc_shard_dims,
+        device_type=device.type,
+    )
 
-        model = model.to(device, memory_format=torch.channels_last_3d)
-        # Wrap with DistConvDDP that corrects gradient scaling for dc submesh
-        model = DistConvDDP(
-            model,
-            parallel_strategy=ps,
-            device_ids=[get_local_rank()],
-            output_device=get_local_rank(),
-        )
-        # Store ps for use in the training loop
-        config._parallel_strategy = ps
+    model = model.to(device, memory_format=torch.channels_last_3d)
+    ddp_device_ids = [device.index] if device.type == "cuda" else None
+    ddp_output_device = device.index if device.type == "cuda" else None
+    # Wrap with DistConvDDP that corrects gradient scaling for dc submesh
+    model = DistConvDDP(
+        model,
+        parallel_strategy=ps,
+        device_ids=ddp_device_ids,
+        output_device=ddp_output_device,
+    )
+    # Store ps for use in the training loop
+    config._parallel_strategy = ps
     end_code_region("init_model")
 
     check_resource_utilization(log, rank, world_size)
@@ -310,7 +285,8 @@ def main(kwargs_dict: dict = {}):
         standard_viz.main(config)
         end_code_region("generate_figures")
 
-    dist.barrier()
-    dist.destroy_process_group()
+    if dist.is_initialized():
+        dist.barrier()
+        dist.destroy_process_group()
 
     return 0
