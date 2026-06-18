@@ -263,7 +263,9 @@ def main(config: Config) -> None:
                     runaway_fail_count,
                 )
             if len(params_valid) > 0:
-                log.info("Processing %s param sets from this attempt", len(params_valid))
+                log.info(
+                    "Processing %s param sets from this attempt", len(params_valid)
+                )
             for p in params_valid:
                 # Ensure we don't save more categories than needed
                 if categories_remaining > 0:
