@@ -51,8 +51,8 @@ def generate_single_category(config: Config) -> tuple[bool, np.array, bool, bool
         A bool for whether a valid category was found on this attempt.
     params : np.array
         A numpy array containing IFS parameters for this category attempt, if attempt was valid.
-    (not nan_check_pass) : bool
-        A bool for whether this attempt passed the NaN check.
+    (not value_check_pass) : bool
+        A bool for whether this attempt passed the NaN/non-finite check.
     (not variance_check_pass) : bool
         A bool for whether this attempt passed the variance check.
     (not runaway_check_pass) : bool
@@ -81,31 +81,40 @@ def generate_single_category(config: Config) -> tuple[bool, np.array, bool, bool
         ),
     )
 
-    # Sum number of NaNs
+    # Sum number of NaNs and reject infinities before normalization.
     nan_count = np.isnan(points).sum()
-    nan_check_pass = nan_count == 0
+    value_check_pass = nan_count == 0 and np.isfinite(points).all()
     variance_check_pass = False
 
-    if nan_check_pass:
+    if value_check_pass:
         # Normalize + center
         mins = points.min(axis=0)
         maxs = points.max(axis=0)
         means = points.mean(axis=0)
-        scales = (2 * config.normalize) / (maxs - mins)
-        points = (points - means) * scales
+        with np.errstate(over="ignore", invalid="ignore"):
+            ranges = maxs - mins
+        value_check_pass = np.all(np.isfinite(ranges)) and np.all(ranges > 0)
+        if value_check_pass:
+            scales = (2 * config.normalize) / ranges
+            with np.errstate(over="ignore", invalid="ignore"):
+                points = (points - means) * scales
 
-        # Calc dimension-wise variance and compare to threshold
-        points_variance = np.var(points, axis=1)
-        variance_check_pass = np.all(points_variance > config.variance_threshold)
-        if variance_check_pass and nan_check_pass and runaway_check_pass:
+            value_check_pass = np.isfinite(points).all()
+            if value_check_pass:
+                # Calc dimension-wise variance and compare to threshold
+                points_variance = np.var(points, axis=0)
+                variance_check_pass = np.all(
+                    points_variance > config.variance_threshold
+                )
+        if variance_check_pass and value_check_pass and runaway_check_pass:
             valid = True
 
     # Return result
     return (
         valid,
         params,
-        not nan_check_pass,
-        not variance_check_pass,
+        bool(not value_check_pass),
+        bool(value_check_pass and not variance_check_pass),
         not runaway_check_pass,
     )
 
@@ -130,7 +139,7 @@ def generate_categories_batch(
     params : np.array
         A numpy array containing IFS parameters for this category attempt, if attempt was valid.
     failed_nan_check_count : int
-        The number of attempts in this batch which failed the nan check.
+        The number of attempts in this batch which failed the NaN/non-finite check.
     failed_var_check_count : int
         The number of attempts in this batch which failed the var check.
     runaway_failure_count : int
@@ -231,7 +240,7 @@ def main(config: Config) -> None:
     var_fail_count = 0
     runaway_fail_count = 0
     while categories_remaining > 0:
-        attempts += size
+        attempts += datagen_batch_size * size
 
         # Each rank attempts to generate datagen_batch_size categories
         (

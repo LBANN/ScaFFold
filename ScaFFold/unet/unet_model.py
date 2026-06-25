@@ -41,33 +41,63 @@ class UNet(nn.Module):
     """
 
     @_unet_annotate
-    def __init__(self, n_channels, n_classes, trilinear=False, layers=4):
+    def __init__(
+        self,
+        n_channels,
+        n_classes,
+        trilinear=False,
+        layers=4,
+        group_norm_groups=8,
+    ):
         super(UNet, self).__init__()
         self.n_channels = n_channels
         self.n_classes = n_classes
         self.trilinear = trilinear
         self.layers = layers
+        self.group_norm_groups = group_norm_groups
         factor = 2 if trilinear else 1
 
         self.down_list = nn.ModuleList([])
         layer_channels = 64
-        self.down_list.append(DoubleConv(n_channels, layer_channels))
+        self.down_list.append(
+            DoubleConv(n_channels, layer_channels, self.group_norm_groups)
+        )
 
         for i in range(self.layers - 1):
-            self.down_list.append(Down(layer_channels, layer_channels * 2))
+            self.down_list.append(
+                Down(layer_channels, layer_channels * 2, self.group_norm_groups)
+            )
             layer_channels *= 2
 
-        self.down_list.append(Down(layer_channels, (layer_channels * 2) // factor))
+        self.down_list.append(
+            Down(
+                layer_channels,
+                (layer_channels * 2) // factor,
+                self.group_norm_groups,
+            )
+        )
         layer_channels *= 2
 
         self.up_list = nn.ModuleList([])
         for i in range(self.layers - 1):
             self.up_list.append(
-                Up(layer_channels, (layer_channels // 2) // factor, trilinear)
+                Up(
+                    layer_channels,
+                    (layer_channels // 2) // factor,
+                    self.group_norm_groups,
+                    trilinear,
+                )
             )
             layer_channels //= 2
 
-        self.up_list.append(Up(layer_channels, layer_channels // 2, trilinear))
+        self.up_list.append(
+            Up(
+                layer_channels,
+                layer_channels // 2,
+                self.group_norm_groups,
+                trilinear,
+            )
+        )
         layer_channels //= 2
 
         self.up_list.append(OutConv(layer_channels, n_classes))

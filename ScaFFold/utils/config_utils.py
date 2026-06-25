@@ -86,6 +86,7 @@ class Config:
         self.loss_freq = config_dict["loss_freq"]
         self.checkpoint_dir = config_dict["checkpoint_dir"]
         self.normalize = config_dict["normalize"]
+        self.group_norm_groups = config_dict.get("group_norm_groups", 8)
         self.warmup_batches = config_dict.get("warmup_batches")
         self.ce_weight_sample_fraction = config_dict.get(
             "ce_weight_sample_fraction", 0.1

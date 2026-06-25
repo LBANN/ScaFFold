@@ -16,6 +16,7 @@
 import math
 import os
 import shutil
+import statistics
 import time
 from pathlib import Path
 
@@ -531,6 +532,29 @@ class PyTorchTrainer(BaseTrainer):
 
         return batch_size, detached_loss, batch_dice_score
 
+    def _sync_gather_minibatch_timer(self, minibatch_events):
+        minibatch_events[-1][1].synchronize()
+        local_minibatch_times = torch.tensor(
+            [
+                start_event.elapsed_time(end_event) / 1000.0
+                for start_event, end_event in minibatch_events
+            ],
+            device=self.device,
+        )
+        if self.config.dist:
+            gathered_minibatch_times = [
+                torch.empty_like(local_minibatch_times) for _ in range(self.world_size)
+            ]
+            torch.distributed.all_gather(
+                gathered_minibatch_times, local_minibatch_times
+            )
+            minibatch_times = torch.stack(gathered_minibatch_times)
+            minibatch_times = torch.max(minibatch_times, dim=0).values
+        else:
+            minibatch_times = local_minibatch_times
+        minibatch_time_s = statistics.median(minibatch_times.cpu().tolist())
+        return minibatch_time_s
+
     def warmup(self):
         """Run warmup iterations before the main training loop."""
         warmup_batches = self.config.warmup_batches
@@ -596,6 +620,7 @@ class PyTorchTrainer(BaseTrainer):
 
         epoch = self.start_epoch
         dice_score_train = 0
+        epoch_minibatch_times_s = []
         with open(self.outfile_path, "a", newline="") as outfile:
             start = time.time()
             while dice_score_train < self.config.target_dice:
@@ -611,6 +636,8 @@ class PyTorchTrainer(BaseTrainer):
                 epoch_start_time = time.time()
                 train_dice_total = 0
                 epoch_loss = 0  # Accumulator for per-batch losses
+                minibatch_time_s = None
+                minibatch_events = []
 
                 # Set necessary modes/states
                 self.train_loader.sampler.set_epoch(epoch)
@@ -632,9 +659,20 @@ class PyTorchTrainer(BaseTrainer):
                 ) as pbar:
                     begin_code_region("batch_loop")
                     for batch_idx, batch in enumerate(self.train_loader):
-                        time_minibatch = batch_idx == 0 and self.world_rank == 0
+                        # We don't want to time partial batches, i.e. last batch (time will be lower than expected).
+                        time_minibatch = (
+                            batch_idx
+                            < len(self.train_sampler) // self.config.batch_size
+                        )
                         if time_minibatch:
-                            minibatch_start_time = time.perf_counter()
+                            minibatch_start_event = torch.cuda.Event(enable_timing=True)
+                            minibatch_end_event = torch.cuda.Event(enable_timing=True)
+                            minibatch_start_event.record()
+                            minibatch_events.append(
+                                (minibatch_start_event, minibatch_end_event)
+                            )
+                        begin_code_region("minibatch_time")
+                        begin_code_region("run_training_batch")
                         batch_size, batch_loss, batch_dice_score = (
                             self._run_training_batch(
                                 batch,
@@ -642,6 +680,7 @@ class PyTorchTrainer(BaseTrainer):
                             )
                         )
                         train_dice_total += batch_dice_score
+                        end_code_region("run_training_batch")
 
                         # Update the loss
                         begin_code_region("update_loss")
@@ -649,14 +688,11 @@ class PyTorchTrainer(BaseTrainer):
                         self.global_step += 1
                         # Stay on GPU
                         epoch_loss += batch_loss
-                        if time_minibatch:
-                            # This sync has some potential performance impact
-                            # TODO: Would be better to measure this with Caliper, which uses CUDA events.
-                            torch.cuda.synchronize(self.device)
-                            minibatch_time_s = (
-                                time.perf_counter() - minibatch_start_time
-                            )
                         end_code_region("update_loss")
+                        end_code_region("minibatch_time")
+
+                        if time_minibatch:
+                            minibatch_end_event.record()
                     end_code_region("batch_loop")
 
                 # Calculate overall loss as average of per-batch loss
@@ -697,12 +733,20 @@ class PyTorchTrainer(BaseTrainer):
 
                 epoch_end_time = time.time()
                 epoch_duration = epoch_end_time - epoch_start_time
+
+                # Sync for batch time happens once after epoch is already done (low overhead)
+                if len(minibatch_events) > 0:
+                    minibatch_time_s = self._sync_gather_minibatch_timer(
+                        minibatch_events
+                    )
+                    epoch_minibatch_times_s.append(minibatch_time_s)
+
                 #
                 # Write out data for this epoch to train stats csv
                 #
                 train_dice = float(train_dice_total.item() / len(self.train_loader))
                 self.log.info(
-                    f" epoch {epoch} | train_dice_score {train_dice:.6f} | val_dice_score {val_score:.6f} | lr {self._current_learning_rate():.8f}"
+                    f" epoch {epoch} | train_loss={overall_loss:.6f} | val_loss={val_loss_avg:.6f} | train_dice_score {train_dice:.6f} | val_dice_score {val_score:.6f} | lr {self._current_learning_rate():.8f}"
                 )
                 self.log.debug(f" writing to csv at {self.outfile_path}")
                 if self.world_rank == 0:
@@ -755,4 +799,12 @@ class PyTorchTrainer(BaseTrainer):
                         "Invalid value (NaN) encountered in dice score computation"
                     )
 
-        adiak_value("final_epochs", epoch)
+        completed_epochs = epoch - 1
+        if epoch_minibatch_times_s:
+            minibatch_time_s = statistics.median(epoch_minibatch_times_s)
+            adiak_value("minibatch_time_s", minibatch_time_s)
+            if self.world_rank == 0:
+                self.log.info(
+                    f"Median of epoch minibatch time medians: {minibatch_time_s:.6f} seconds."
+                )
+        adiak_value("final_epochs", completed_epochs)
