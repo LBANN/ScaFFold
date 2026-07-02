@@ -541,17 +541,12 @@ class PyTorchTrainer(BaseTrainer):
             ],
             device=self.device,
         )
-        if self.config.dist:
-            gathered_minibatch_times = [
-                torch.empty_like(local_minibatch_times) for _ in range(self.world_size)
-            ]
-            torch.distributed.all_gather(
-                gathered_minibatch_times, local_minibatch_times
-            )
-            minibatch_times = torch.stack(gathered_minibatch_times)
-            minibatch_times = torch.max(minibatch_times, dim=0).values
-        else:
-            minibatch_times = local_minibatch_times
+        gathered_minibatch_times = [
+            torch.empty_like(local_minibatch_times) for _ in range(self.world_size)
+        ]
+        torch.distributed.all_gather(gathered_minibatch_times, local_minibatch_times)
+        minibatch_times = torch.stack(gathered_minibatch_times)
+        minibatch_times = torch.max(minibatch_times, dim=0).values
         minibatch_time_s = statistics.median(minibatch_times.cpu().tolist())
         return minibatch_time_s
 
