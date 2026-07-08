@@ -16,6 +16,9 @@ import logging
 import random
 import sys
 
+import torch
+import torch.distributed as dist
+
 from ScaFFold.utils.distributed import get_world_rank
 
 logging.basicConfig(
@@ -41,7 +44,6 @@ def set_seeds(seed_value=42):
     """Set seeds for reproducibility."""
 
     import numpy as np
-    import torch
 
     random.seed(seed_value)  # Python
     np.random.seed(seed_value)  # NumPy
@@ -111,9 +113,6 @@ def setup_mpi_logger(
 
 
 def mem_stats():
-    import torch
-    import torch.distributed as dist
-
     dev = torch.cuda.current_device()
     free, total = torch.cuda.mem_get_info()  # device-level (driver) view
     stats = torch.cuda.memory_stats(dev)  # allocator internals
@@ -134,8 +133,6 @@ def mem_stats():
 
 
 def gather_and_print_mem(log, tag=""):
-    import torch.distributed as dist
-
     if log.getEffectiveLevel() > 10:  # 10 -> DEBUG
         return
     stats = mem_stats()

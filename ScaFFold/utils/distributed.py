@@ -20,11 +20,12 @@ import socket
 import time
 from typing import Literal, Optional
 
+import torch
+import torch.distributed
+
 
 def get_num_gpus() -> int:
     """Return the number of GPUs on this node."""
-    import torch
-
     return torch.cuda.device_count()
 
 
@@ -93,8 +94,6 @@ def get_world_size(required: bool = False) -> int:
 
 
 def get_device() -> torch.device:
-    import torch
-
     if torch.cuda.is_available():
         torch.cuda.init()
 
@@ -141,8 +140,6 @@ def initialize_dist(
     log=None,
 ) -> None:
     """Initialize the PyTorch distributed backend and set up NCCL."""
-    import torch
-
     if rendezvous == "env":
         init_method = "env://"
     elif rendezvous == "tcp":
