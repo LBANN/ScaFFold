@@ -51,7 +51,7 @@ dependencies = [
   "wandb>=0.19.6",
   "PyYAML>=6.0.2",
   "psutil>=5.9.0",
-  "distconv @ git+https://github.com/LBANN/DistConv.git@232cba6",
+  "distconv @ git+https://github.com/LBANN/DistConv.git@084b20a",
 ]
 requires-python = ">=3.9"
 
