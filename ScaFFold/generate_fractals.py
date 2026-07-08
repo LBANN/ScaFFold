@@ -24,7 +24,6 @@ def main(kwargs_dict: dict = {}):
     args = Namespace(**kwargs_dict)
     comm = MPI.COMM_WORLD
     size = comm.Get_size()
-    rank = comm.Get_rank()
     log = setup_mpi_logger(__file__, getattr(args, "verbose", 0))
 
     log.info("Fractal generation world size = %s", size)
