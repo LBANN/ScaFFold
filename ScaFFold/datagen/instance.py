@@ -186,11 +186,10 @@ def main(config: Config):
 
     end_time = time.time()
     total_time = end_time - start_time
-    if rank == 0:
-        log.info(
-            "Generated %s instances in %.2f seconds",
-            len(instances_to_generate),
-            total_time,
-        )
+    log.info(
+        "Generated %s instances in %.2f seconds",
+        len(instances_to_generate),
+        total_time,
+    )
 
     return 0

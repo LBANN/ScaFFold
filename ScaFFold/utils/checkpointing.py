@@ -297,7 +297,7 @@ class CheckpointManager:
         return is_best
 
     @staticmethod
-    def _write_to_disk(state_dict, last_path, best_path, is_best, log=None):
+    def _write_to_disk(state_dict, last_path, best_path, is_best, log):
         """Worker function to perform actual disk I/O."""
         # Save 'last'
         try:
@@ -317,11 +317,7 @@ class CheckpointManager:
 
     @staticmethod
     def _log_save_failure(log, exc):
-        if log is not None:
-            log.warning("Saving checkpoint failed. Continuing: %s", exc)
-        else:
-            print("Saving checkpoint failed. Continuing...")
-            print(exc)
+        log.warning("Saving checkpoint failed. Continuing: %s", exc)
 
     def _transfer_dict_to_cpu(self, obj):
         """Recursively move tensors to CPU."""

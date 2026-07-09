@@ -77,7 +77,7 @@ def _hash_volume_config(volume_config: Dict[str, Any]) -> str:
     return hashlib.sha256(s).hexdigest()[:12]
 
 
-def _git_commit_short(log=None) -> str:
+def _git_commit_short(log) -> str:
     try:
         return (
             subprocess.check_output(
@@ -88,18 +88,16 @@ def _git_commit_short(log=None) -> str:
             .strip()
         )
     except subprocess.CalledProcessError:
-        if log is not None:
-            log.warning(
-                "Tried to get git commit id in non-git repo. "
-                "No commit id will be enforced for dataset reuse."
-            )
+        log.warning(
+            "Tried to get git commit id in non-git repo. "
+            "No commit id will be enforced for dataset reuse."
+        )
         return "no-commit-id"
     except Exception:
-        if log is not None:
-            log.warning(
-                "Exception when trying to get git commit for dataset. "
-                "No commit id will be enforced for dataset reuse."
-            )
+        log.warning(
+            "Exception when trying to get git commit for dataset. "
+            "No commit id will be enforced for dataset reuse."
+        )
         return "no-commit-id"
 
 
