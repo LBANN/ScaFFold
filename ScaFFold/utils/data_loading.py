@@ -206,7 +206,7 @@ class BasicDataset(Dataset):
         """Return the largest class id ``_to_mask_carrier`` will have to carry.
 
         The bound differs by format, and using the wrong one is unsafe in one
-        direction and needlessly strict in the other. v2+ masks ship *raw*
+        direction and needlessly strict in the other. Modern masks ship *raw*
         ``category + 1`` ids, and the per-split table lists only the categories
         present in that split -- so a sparse split can declare two classes while
         holding an id in the tens of thousands, which the class *count* check
@@ -225,7 +225,7 @@ class BasicDataset(Dataset):
     def _load_mask_values(self, data_dir):
         """Return the label-remap table for this split.
 
-        v2+ datasets store dense class ids and never remap, so the per-split
+        Modern datasets store dense class ids and never remap, so the per-split
         pickle is loaded verbatim for bookkeeping. Legacy (v1) datasets remap
         raw voxel values by their position in this list; a per-split table would
         assign the same raw value different class ids across splits whenever a
