@@ -67,7 +67,7 @@ ScaFFold benchmark training always uses PyTorch distributed execution with DistC
 
 `benchmark` creates or reuses datasets under `dataset_dir`. New datasets use the current physical-shard dataset format, which stores one volume and mask file per logical sample per DistConv shard. The physical layout is controlled by `dc_num_shards` and `dc_shard_dims`; for example, `dc_num_shards: [1, 1, 2]` writes two physical shards per logical volume, with filenames such as `120_shard000000.npy` and `120_shard000001.npy`. Datasets are generated with the same sharding configuration used for model training.
 
-Changing the DistConv shard layout changes the dataset cache key, so a run either reuses a dataset with matching sharding metadata or generates a new one.
+Unsharded runs use `dc_num_shards: [1, 1, 1]` and are still stored with `_shard000000` files. Changing the DistConv shard layout changes the dataset cache key, so a run either reuses a dataset with matching sharding metadata or generates a new one. Older full-volume caches are ignored.
 
 Each `benchmark` invocation performs exactly one benchmark run, in a run folder created under `base_run_dir` set in the config file. Every run parameter must be single-valued; a list (e.g. `problem_scale: [6, 7]`) is rejected by name, since parameter sweeps are not supported. To compare parameter settings, launch one benchmark run per setting. For reproducibility, the run folder holds a copy of the benchmark config yml as `base_config.yaml` plus the fully merged `config.yaml` for that run.
 
