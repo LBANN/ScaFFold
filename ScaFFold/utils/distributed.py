@@ -133,9 +133,9 @@ def get_job_id() -> Optional[str]:
 
 
 def initialize_dist(
+    log,
     init_file: Optional[str] = None,
     rendezvous: Literal["env", "tcp", "file"] = "env",
-    log=None,
 ) -> None:
     """Initialize the PyTorch distributed backend and set up NCCL."""
     if rendezvous == "env":
@@ -174,12 +174,11 @@ def initialize_dist(
     else:
         raise ValueError(f'Unrecognized scheme "{rendezvous}"')
 
-    if log is not None:
-        log.debug(
-            "rank %s / %s calling init_process_group()",
-            get_world_rank(),
-            get_world_size(),
-        )
+    log.debug(
+        "rank %s / %s calling init_process_group()",
+        get_world_rank(),
+        get_world_size(),
+    )
 
     # Initialize
     torch.distributed.init_process_group(

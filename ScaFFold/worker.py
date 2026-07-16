@@ -112,7 +112,7 @@ def main(kwargs_dict: dict = {}):
     begin_code_region("init_ddp")
     if not dist.is_initialized():
         log.info("Initializing distributed process group...")
-        initialize_dist(rendezvous="env", log=log)
+        initialize_dist(log, rendezvous="env")
     else:
         log.info("Distributed process group already initialized by launcher.")
     end_code_region("init_ddp")
