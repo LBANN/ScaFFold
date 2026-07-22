@@ -208,9 +208,7 @@ class CheckpointManager:
         for path in candidates:
             self._log(f"Loading checkpoint from {path}")
             try:
-                checkpoint = torch.load(
-                    path, map_location="cpu", weights_only=False
-                )
+                checkpoint = torch.load(path, map_location="cpu", weights_only=False)
                 break
             except Exception as e:
                 self._log(f"Failed to load checkpoint {path}: {e}")
