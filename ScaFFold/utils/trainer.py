@@ -45,6 +45,44 @@ from ScaFFold.utils.perf_measure import adiak_value, begin_code_region, end_code
 from ScaFFold.utils.utils import gather_and_print_mem
 
 
+class _UnpaddedDistributedSampler(torch.utils.data.Sampler):
+    """Shard a dataset into contiguous, unpadded, per-rank index ranges.
+
+    Unlike ``DistributedSampler`` (which pads by repeating leading samples so
+    every rank iterates ``ceil(n / num_replicas)`` items), this hands each
+    sample to exactly one rank. Ranks therefore receive uneven counts and a
+    rank may legitimately receive zero samples, but no sample is ever visited
+    twice. That property is required for an unbiased validation metric that is
+    aggregated by SUM across replicas: duplicated samples would otherwise be
+    counted multiple times in both the score numerator and its sample count.
+
+    Sample order is preserved (matching ``shuffle=False`` semantics). The split
+    is near-even and contiguous: the first ``n % num_replicas`` ranks each take
+    one extra sample.
+    """
+
+    def __init__(self, dataset, num_replicas, rank):
+        self.num_replicas = num_replicas
+        self.rank = rank
+        n = len(dataset)
+        base, remainder = divmod(n, num_replicas)
+        start = rank * base + min(rank, remainder)
+        count = base + (1 if rank < remainder else 0)
+        self.indices = list(range(start, start + count))
+
+    def __iter__(self):
+        return iter(self.indices)
+
+    def __len__(self):
+        return len(self.indices)
+
+    def set_epoch(self, epoch):
+        # Present for API parity with DistributedSampler (the trainer calls
+        # set_epoch every epoch). Order is fixed (shuffle=False), so this is a
+        # no-op; validation must be reproducible across epochs.
+        return None
+
+
 class BaseTrainer:
     """
     A class that encapsulates some basic functionality for training our model.
@@ -146,11 +184,16 @@ class BaseTrainer:
             num_replicas=self.data_num_replicas,
             rank=self.data_replica_rank,
         )
-        self.val_sampler = torch.utils.data.distributed.DistributedSampler(
+        # Validation is sharded WITHOUT padding: the metric aggregation
+        # sums each replica's dice and sample count across the data-parallel
+        # group, so a padded (duplicated) sample would be double counted and
+        # bias val_score. Contiguous uneven shards give every sample to
+        # exactly one replica; the SUM all_reduce tolerates the uneven (and
+        # possibly zero) per-rank counts.
+        self.val_sampler = _UnpaddedDistributedSampler(
             self.val_set,
             num_replicas=self.data_num_replicas,
             rank=self.data_replica_rank,
-            shuffle=False,
         )
 
     def create_dataloaders(self):
@@ -177,12 +220,26 @@ class BaseTrainer:
             self.val_set, sampler=self.val_sampler, drop_last=False, **loader_args
         )
         if len(self.val_loader) == 0:
-            raise ValueError(
-                "Validation DataLoader has zero batches. "
-                f"n_val={self.n_val}, local_batch_size={self.config.local_batch_size}, "
-                f"data_num_replicas={self.data_num_replicas}. "
-                "Reduce local_batch_size or adjust validation sharding."
-            )
+            # With unpadded validation sharding a rank can legitimately hold
+            # zero samples (fewer validation samples than data-parallel
+            # replicas). The metric reduction sums dice and sample counts across
+            # the data-parallel group, so an empty rank simply contributes zero
+            # and the global mean stays correct. Only the non-distributed /
+            # single-replica case -- where an empty loader means there is no
+            # validation data at all -- is a real error.
+            if self.config.dist and self.data_num_replicas > 1:
+                self.log.warning(
+                    "Validation DataLoader has zero batches on this rank "
+                    f"(n_val={self.n_val}, data_num_replicas={self.data_num_replicas}); "
+                    "this rank contributes nothing to the reduced validation metric."
+                )
+            else:
+                raise ValueError(
+                    "Validation DataLoader has zero batches. "
+                    f"n_val={self.n_val}, local_batch_size={self.config.local_batch_size}, "
+                    f"data_num_replicas={self.data_num_replicas}. "
+                    "Reduce local_batch_size or adjust validation sharding."
+                )
 
     def setup_training_components(self):
         """Set up the optimizer, scheduler, gradient scaler, and loss function."""
@@ -256,6 +313,31 @@ class BaseTrainer:
         if self.optimizer is None or not self.optimizer.param_groups:
             return self.config.starting_learning_rate
         return self.optimizer.param_groups[0]["lr"]
+
+    def _data_parallel_group(self):
+        """Process group over which to reduce epoch-level metrics.
+
+        Metrics such as loss and dice are already reduced across the *spatial*
+        mesh inside the sharded loss/dice kernels, so every rank within one
+        data-parallel replica holds the same global-over-space value. Reducing
+        those across all world ranks would therefore multiply each replica's
+        contribution by its number of spatial shards. To get one contribution
+        per replica we reduce only over the data-parallel ("ddp") mesh
+        dimension when a parallel strategy is present. Without a parallel
+        strategy there is no spatial sharding (one rank per replica), so the
+        default world group is correct.
+        """
+        if self.ps is not None:
+            return self.ps.device_mesh["ddp"].get_group()
+        return None  # default: the world group
+
+    def _all_reduce_data_parallel(self, tensor):
+        """SUM-reduce ``tensor`` across the data-parallel replicas in place."""
+        torch.distributed.all_reduce(
+            tensor,
+            op=torch.distributed.ReduceOp.SUM,
+            group=self._data_parallel_group(),
+        )
 
 
 class PyTorchTrainer(BaseTrainer):
@@ -639,6 +721,14 @@ class PyTorchTrainer(BaseTrainer):
         epoch = self.start_epoch
         dice_score_train = 0
         epoch_minibatch_times_s = []
+        # Track the last epoch checkpointed inside the loop so the final-save
+        # decision below is identical on every rank. The in-loop checkpoint
+        # condition depends only on the epoch number and the interval, so this
+        # stays consistent across ranks -- unlike the checkpoint manager's
+        # last_saved_epoch, which it records on rank 0 only. Reading that on the
+        # other ranks would make them disagree about whether to call
+        # save_checkpoint on exit, deadlocking its internal collective.
+        last_checkpoint_epoch = None
         with open(self.outfile_path, "a", newline="") as outfile:
             start = time.time()
             while dice_score_train < self.config.target_dice:
@@ -650,11 +740,15 @@ class PyTorchTrainer(BaseTrainer):
                     )
                     break
 
-                # Timer and tracking variables
+                # Timer and tracking variables. The loss/dice accumulators hold
+                # sample-weighted sums (per-batch mean times the batch's sample
+                # count) so a ragged final batch is not overweighted; dividing by
+                # the total sample count below yields the true per-sample mean.
                 epoch_start_time = time.time()
                 train_dice_total = 0
-                epoch_loss = 0  # Accumulator for per-batch losses
+                epoch_loss = 0  # Sample-weighted sum of per-batch losses
                 epoch_optimizer_steps = 0
+                train_sample_count = 0
                 minibatch_time_s = None
                 minibatch_events = []
 
@@ -698,7 +792,10 @@ class PyTorchTrainer(BaseTrainer):
                                 gather_mem_stats=True,
                             )
                         )
-                        train_dice_total += batch_dice_score
+                        # Weight the (spatial-mesh-reduced) per-batch dice by
+                        # the batch's sample count so a ragged final batch does
+                        # not skew the epoch mean.
+                        train_dice_total += batch_dice_score * batch_size
                         end_code_region("run_training_batch")
 
                         # Update the loss
@@ -710,8 +807,9 @@ class PyTorchTrainer(BaseTrainer):
                         if getattr(self, "_last_step_applied", True):
                             self.global_step += 1
                             epoch_optimizer_steps += 1
-                        # Stay on GPU
-                        epoch_loss += batch_loss
+                        # Stay on GPU; accumulate the sample-weighted loss sum.
+                        epoch_loss += batch_loss * batch_size
+                        train_sample_count += batch_size
                         end_code_region("update_loss")
                         end_code_region("minibatch_time")
 
@@ -719,9 +817,36 @@ class PyTorchTrainer(BaseTrainer):
                             minibatch_end_event.record()
                     end_code_region("batch_loop")
 
-                # Calculate overall loss as average of per-batch loss
-                overall_loss = epoch_loss.item() / len(self.train_loader)
                 self.total_optimizer_steps += epoch_optimizer_steps
+
+                # Reduce the sample-weighted train loss/dice sums and the sample
+                # count across the data-parallel replicas so the logged metrics
+                # reflect the whole epoch's data, not just this replica's shard.
+                # Each replica's per-batch values are already reduced over the
+                # spatial mesh, so reducing over the "ddp" dimension only (see
+                # _all_reduce_data_parallel) counts every replica exactly once.
+                train_loss_sum = (
+                    float(epoch_loss.item())
+                    if torch.is_tensor(epoch_loss)
+                    else float(epoch_loss)
+                )
+                train_dice_sum = (
+                    float(train_dice_total.item())
+                    if torch.is_tensor(train_dice_total)
+                    else float(train_dice_total)
+                )
+                train_info = torch.tensor(
+                    [train_loss_sum, train_dice_sum, float(train_sample_count)],
+                    dtype=VOLUME_TORCH_DTYPE,
+                )
+                train_info = train_info.to(device=self.device)
+                self._all_reduce_data_parallel(train_info)
+                global_train_samples = max(train_info[2].item(), 1)
+                # epoch_loss column keeps the (reduced) sample-weighted loss sum;
+                # overall_loss is the global per-sample mean.
+                epoch_loss_total = train_info[0].item()
+                overall_loss = epoch_loss_total / global_train_samples
+                train_dice = float(train_info[1].item() / global_train_samples)
 
                 #
                 # Evaluate model on validation set, update LR if necessary
@@ -743,14 +868,24 @@ class PyTorchTrainer(BaseTrainer):
                     self.config._parallel_strategy,
                     log=self.log,
                 )
-                dice_info = torch.tensor(
-                    [dice_sum, numsamples], dtype=VOLUME_TORCH_DTYPE
+                # Reduce the validation dice sum, sample-weighted loss sum, and
+                # sample count together across the data-parallel replicas. Like
+                # the train metrics these are already spatial-mesh-reduced, so
+                # the "ddp"-only reduction counts each replica once. val_loss is
+                # bundled here (rather than inside evaluate) so best-checkpoint
+                # selection and the CSV use the global sample-weighted mean, not
+                # rank 0's replica-local value.
+                val_info = torch.tensor(
+                    [dice_sum, val_loss_epoch, numsamples],
+                    dtype=VOLUME_TORCH_DTYPE,
                 )
-                dice_info = dice_info.to(device=self.device)
-                torch.distributed.all_reduce(
-                    dice_info, op=torch.distributed.ReduceOp.SUM
-                )
-                val_score = dice_info[0].item() / max(dice_info[1].item(), 1)
+                val_info = val_info.to(device=self.device)
+                self._all_reduce_data_parallel(val_info)
+                global_val_samples = max(val_info[2].item(), 1)
+                val_score = val_info[0].item() / global_val_samples
+                # Reduced sample-weighted total and per-sample mean val loss.
+                val_loss_epoch = val_info[1].item()
+                val_loss_avg = val_loss_epoch / global_val_samples
                 if not self.config.disable_scheduler:
                     self.scheduler.step()
                 else:
@@ -769,7 +904,6 @@ class PyTorchTrainer(BaseTrainer):
                 #
                 # Write out data for this epoch to train stats csv
                 #
-                train_dice = float(train_dice_total.item() / len(self.train_loader))
                 self.log.info(
                     f" epoch {epoch} | train_loss={overall_loss:.6f} | val_loss={val_loss_avg:.6f} | train_dice_score {train_dice:.6f} | val_dice_score {val_score:.6f} | lr {self._current_learning_rate():.8f} | optimizer_steps {epoch_optimizer_steps} | total_optimizer_steps {self.total_optimizer_steps}"
                 )
@@ -779,7 +913,7 @@ class PyTorchTrainer(BaseTrainer):
                         ",".join(
                             [
                                 str(epoch),
-                                str(epoch_loss.item()),
+                                str(epoch_loss_total),
                                 str(overall_loss),
                                 str(val_loss_epoch),
                                 str(val_loss_avg),
@@ -818,6 +952,7 @@ class PyTorchTrainer(BaseTrainer):
                 ):
                     extras = {"train_mask_values": self.train_set.mask_values}
                     self.checkpoint_manager.save_checkpoint(epoch, val_loss_avg, extras)
+                    last_checkpoint_epoch = epoch
 
                 end_code_region("checkpoint")
 
@@ -840,7 +975,7 @@ class PyTorchTrainer(BaseTrainer):
         if (
             self.config.checkpoint_interval > 0
             and completed_epochs >= 1
-            and self.checkpoint_manager.last_saved_epoch != completed_epochs
+            and last_checkpoint_epoch != completed_epochs
         ):
             extras = {"train_mask_values": self.train_set.mask_values}
             self.checkpoint_manager.save_checkpoint(
