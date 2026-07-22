@@ -18,6 +18,7 @@
 """
 
 import glob
+import logging
 import os
 import shutil
 import time
@@ -34,28 +35,176 @@ from ScaFFold.utils.utils import setup_mpi_logger
 
 DEFAULT_NP_DTYPE = np.float64
 
+logger = logging.getLogger(__name__)
+
+# Temp files written during an atomic save carry this prefix so the six-digit
+# resume glob (``NNNNNN_NNNN.npy``) can never mistake a half-written file for a
+# finished instance.
+TEMP_PREFIX = ".tmp-"
+
+# Factors that pull a weight vector's deviation from 1.0 progressively toward
+# the unweighted parameters a category was validated against. If the requested
+# weights turn a contractive map expansive, these recover a finite point cloud
+# while sacrificing as little of the intended variation as possible.
+_WEIGHT_ATTENUATION = (0.5, 0.25, 0.1)
+
 comm = None
 rank = None
 size = None
 
 
-def generate_single_instance(pointcloud_point_num: int, params: np.array) -> np.array:
+def generate_single_instance(
+    pointcloud_point_num: int, params: np.array
+) -> tuple[np.array, bool]:
     """
     Generate a single fractal instance.
 
     Parameters
     ----------
-    config.point_num : int
+    pointcloud_point_num : int
         An int for the number of points to generate in the fractal point cloud.
     params : np.array
         A numpy array containing IFS parameters for this category.
+
+    Returns
+    -------
+    points : np.array
+        The generated fractal point cloud.
+    valid : bool
+        True when the point cloud stayed bounded (no runaway divergence) and
+        every coordinate is finite; False when the caller should reject it.
     """
 
     # Generate points in the fractal
     points, runaway_check_pass = generate_fractal_points(params, pointcloud_point_num)
 
-    # Return result
+    # A runaway (diverging) map or any non-finite coordinate makes this instance
+    # unusable downstream: voxelization would cast NaN/inf to garbage indices.
+    valid = bool(runaway_check_pass) and bool(np.isfinite(points).all())
+
+    return points, valid
+
+
+def generate_instance_points(
+    point_num: int,
+    base_params: np.array,
+    weights: np.array,
+    category: int,
+    instance: int,
+    seed: int,
+) -> np.array:
+    """
+    Generate a validated, weighted fractal point cloud for one instance.
+
+    The requested ``weights`` scale the IFS coefficients to add variation, but a
+    weight can turn a category that was validated as contractive at weight 1.0
+    into a diverging map, producing non-finite points. When that happens the
+    weight deviation from 1.0 is attenuated and the attempt retried; if every
+    attenuated attempt still fails, generation falls back to the unweighted
+    parameters (weight 1.0), which were validated at category-search time, so
+    every instance slot fills deterministically with a finite point cloud.
+
+    Parameters
+    ----------
+    point_num : int
+        Number of points to generate.
+    base_params : np.array
+        The unweighted IFS parameters for this category.
+    weights : np.array
+        The per-instance weight vector applied to columns 0-11.
+    category, instance : int
+        Identify the work item, used for the per-item seed and log messages.
+    seed : int
+        The configured base seed.
+
+    Returns
+    -------
+    points : np.array
+        A finite fractal point cloud.
+    """
+
+    # Seed numba's internal RNG per item so the point cloud is reproducible for a
+    # given (seed, category, instance) regardless of retries below (each attempt
+    # re-seeds identically, so the fallback result is itself deterministic).
+    def _attempt(scaled_weights: np.array) -> tuple[np.array, bool]:
+        params = base_params.copy()
+        params[:, :12] *= scaled_weights
+        seed_numba(derive_seed(seed, category, instance))
+        return generate_single_instance(point_num, params)
+
+    points, valid = _attempt(weights)
+    if valid:
+        return points
+
+    # Pull the weights toward 1.0 (no variation) in stages before giving up.
+    for factor in _WEIGHT_ATTENUATION:
+        attenuated = 1.0 + (weights - 1.0) * factor
+        points, valid = _attempt(attenuated)
+        if valid:
+            logger.warning(
+                "Attenuated weights (factor %.2f) for non-finite instance "
+                "(category %d, instance %d)",
+                factor,
+                category,
+                instance,
+            )
+            return points
+
+    # Final fallback: the unweighted parameters, validated at search time.
+    points, valid = _attempt(np.ones_like(weights))
+    if not valid:
+        # The unweighted category itself should have been validated; surface the
+        # inconsistency rather than saving corrupt data.
+        raise ValueError(
+            f"Unweighted parameters for category {category} produced a "
+            f"non-finite point cloud (instance {instance})"
+        )
+    logger.warning(
+        "Fell back to unweighted parameters for non-finite instance "
+        "(category %d, instance %d)",
+        category,
+        instance,
+    )
     return points
+
+
+def save_instance_atomic(out_path: Path, points: np.array) -> None:
+    """
+    Write a point cloud to ``out_path`` atomically.
+
+    The array is written to a temp file (a name the resume glob cannot match),
+    flushed and fsynced, then ``os.replace``d onto the final name, so a job
+    killed mid-write never leaves a truncated file under a name resume accepts.
+    """
+    tmp_path = out_path.parent / f"{TEMP_PREFIX}{out_path.name}"
+    try:
+        with open(tmp_path, "wb") as handle:
+            np.save(handle, points)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, out_path)
+    except BaseException:
+        # A failed or interrupted write must not leave a temp file behind, and
+        # the final name must keep whatever complete file was already there.
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
+def _is_valid_npy(path: str) -> bool:
+    """Return True if ``path`` is a readable .npy file.
+
+    A truncated file left by a killed non-atomic write loads far enough to read
+    the header but raises when the array data is memory-mapped; treating that as
+    invalid lets the resume logic regenerate it instead of accepting it forever.
+    """
+    try:
+        np.load(path, mmap_mode="r")
+        return True
+    except (ValueError, EOFError, OSError):
+        return False
 
 
 def main(config: Config):
@@ -104,6 +253,17 @@ def main(config: Config):
     # Wait until dir setup completes
     comm.Barrier()
 
+    # Remove stale temp files from any previous interrupted run. These carry a
+    # dotted prefix the six-digit resume glob below cannot match, but cleaning
+    # them keeps the directory tidy and reclaims space before regeneration.
+    if rank == 0:
+        for stale in glob.glob(f"{instance_write_dir}/*/{TEMP_PREFIX}*"):
+            try:
+                os.remove(stale)
+            except OSError:
+                pass
+    comm.Barrier()
+
     # Parse existing instances to get list of what we have
     existing_instance_dirs = glob.glob(
         f"{instance_write_dir}/[0-9][0-9][0-9][0-9][0-9][0-9]/"
@@ -113,14 +273,26 @@ def main(config: Config):
     ]
     all_existing_instances = []
 
-    # Construct list of existing instances in [category, instance] pairs
+    # Construct list of existing instances in [category, instance] pairs. Each
+    # candidate is opened via a memory-mapped load: a file truncated by a killed
+    # job reads its header but fails here, so it is treated as missing (and
+    # removed) rather than accepted as complete and left to crash volumegen.
     for category in fracts_with_existing_instances:
-        existing_instances = [
-            int(path_str.split("_")[-1].split(".")[0])
-            for path_str in glob.glob(
-                f"{instance_write_dir}/{category:06d}/[0-9][0-9][0-9][0-9][0-9][0-9]_[0-9][0-9][0-9][0-9].npy"
-            )
-        ]
+        existing_instances = []
+        for path_str in glob.glob(
+            f"{instance_write_dir}/{category:06d}/[0-9][0-9][0-9][0-9][0-9][0-9]_[0-9][0-9][0-9][0-9].npy"
+        ):
+            if _is_valid_npy(path_str):
+                existing_instances.append(int(path_str.split("_")[-1].split(".")[0]))
+            else:
+                logger.warning(
+                    "Discarding unreadable instance file %s; it will be regenerated",
+                    path_str,
+                )
+                try:
+                    os.remove(path_str)
+                except OSError:
+                    pass
         category_instance_pairs = [
             [category, instance] for instance in existing_instances
         ]
@@ -169,16 +341,17 @@ def main(config: Config):
         )
         weights = weights_all[instance]
 
-        # Apply weights
-        params[:, :12] *= weights
-
-        # Seed numba's internal RNG per item so this instance's point cloud is
-        # reproducible for a given (config.seed, category, instance).
-        instance_seed = derive_seed(config.seed, category, instance)
-        seed_numba(instance_seed)
-
-        # Generate points
-        points = generate_single_instance(config.point_num, params)
+        # Generate a validated, weighted point cloud. Weighting can turn a
+        # category validated at weight 1.0 into a diverging map; this attenuates
+        # the weights or falls back to weight 1.0 so the saved cloud is finite.
+        points = generate_instance_points(
+            config.point_num,
+            params,
+            weights,
+            category,
+            instance,
+            config.seed,
+        )
 
         # Force point_data to be contiguous
         points_contiguous = np.ascontiguousarray(points, dtype=DEFAULT_NP_DTYPE)
@@ -190,8 +363,9 @@ def main(config: Config):
         # Ensure parent directory exists
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        # Save array to out_dir
-        np.save(out_dir / filename, points_contiguous)
+        # Save array atomically so a killed job never leaves a truncated file
+        # under a name the resume glob would accept as complete.
+        save_instance_atomic(out_dir / filename, points_contiguous)
 
     end_time = time.time()
     total_time = end_time - start_time

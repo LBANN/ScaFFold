@@ -46,11 +46,18 @@ def get_args():
 
 
 def unique_mask_values(idx, directory):
-    mask_file = list(directory.glob(idx + ".*"))[0]
+    mask_files = list(directory.glob(idx + ".*"))
+    # Require exactly one match: an empty list (extensionless id or a glob
+    # metacharacter in the name) would otherwise raise an opaque IndexError deep
+    # inside the worker pool, and multiple matches (a stale sibling sharing the
+    # stem) would silently scan an arbitrary one, missing labels present in the
+    # file the training loader actually reads.
+    assert len(mask_files) == 1, (
+        f"Either no mask or multiple masks found for the ID {idx}: {mask_files}"
+    )
+    mask_file = mask_files[0]
     with open(mask_file, "rb") as f:
         mask = np.load(f)
-    f.close()
-    # print(f'mask_detection.py: file {mask_file}, unique = {np.unique(mask)}')
 
     return np.unique(mask)
 

@@ -12,7 +12,6 @@
 #
 # SPDX-License-Identifier: (Apache-2.0)
 
-import math
 import os
 import pickle
 import random
@@ -42,26 +41,68 @@ def points_to_voxelgrid(
     """
     Convert an (N,3) float64 point cloud directly into a boolean voxel grid
     of shape (grid_size, grid_size, grid_size).
+
+    Normalization is isotropic: all three axes are divided by the single
+    largest extent and the result is centered in the grid, so a fractal's
+    aspect ratio and relative size are preserved instead of every cloud being
+    stretched to fill the cube on every axis.
+
+    Non-finite input (NaN/inf coordinates, e.g. from a diverging IFS) is
+    rejected: casting such coordinates to integer indices would otherwise yield
+    platform-dependent garbage that ``np.clip`` silently forces in-bounds and
+    scatters into the mask as a legitimate label.
     """
-    # 1) Axis‐aligned bounding box in float64
+    if not np.isfinite(points).all():
+        raise ValueError(
+            "points_to_voxelgrid received non-finite coordinates "
+            "(NaN or inf); refusing to rasterize corrupt point cloud"
+        )
+
+    # 1) Axis-aligned bounding box in float64
     mins = points.min(axis=0)
     maxs = points.max(axis=0)
 
-    # 2) Voxel size per dimension (float64)
-    voxel_size = (maxs - mins + eps) / grid_size
+    # 2) A single isotropic voxel size from the largest extent, so aspect ratio
+    #    and relative scale survive rasterization.
+    max_extent = float((maxs - mins).max())
+    voxel_size = (max_extent + eps) / grid_size
 
-    # 3) Map points into [0,grid_size) indices
+    # 3) Map points into index space using the shared scale.
     scaled = (points - mins) / voxel_size
-    idx = np.floor(scaled).astype(int)
 
-    # 4) Clip to valid range
+    # 4) Center the occupied region: the largest axis fills the grid while the
+    #    shorter axes are offset so their span sits in the middle.
+    span = scaled.max(axis=0)
+    offset = (grid_size - 1 - span) / 2.0
+    idx = np.floor(scaled + offset).astype(int)
+
+    # 5) Clip to valid range (guards float rounding at the boundaries).
     idx = np.clip(idx, 0, grid_size - 1)
 
-    # 5) Scatter into a boolean grid
+    # 6) Scatter into a boolean grid
     grid = np.zeros((grid_size, grid_size, grid_size), dtype=bool)
     grid[idx[:, 0], idx[:, 1], idx[:, 2]] = True
 
     return grid
+
+
+def resolve_grid_size(config) -> int:
+    """
+    Return the voxel-grid edge length, which must equal ``config.vol_size``.
+
+    The volume and mask are allocated at ``vol_size``; the grid must match or
+    the per-volume shape check fails. ``config.scale`` is not a working knob
+    (it is fixed at 1 upstream), so any other value is a configuration error
+    rather than a silently mismatched grid, and is rejected here with a clear
+    message instead of tripping an opaque shape assertion deep in the loop.
+    """
+    scale = getattr(config, "scale", 1)
+    if scale != 1:
+        raise ValueError(
+            f"config.scale must be 1 (got {scale}); scaled sub-volume "
+            "rasterization is not supported"
+        )
+    return int(config.vol_size)
 
 
 def main(config: Dict):
@@ -167,7 +208,7 @@ def main(config: Dict):
         np.random.seed(config.seed)
         fractal_colors = np.random.rand(config.n_categories, 3)
 
-        grid_size = math.floor(config.vol_size * config.scale)
+        grid_size = resolve_grid_size(config)
         fract_base_dir = str(config.fract_base_dir)
 
         # Generation loop
