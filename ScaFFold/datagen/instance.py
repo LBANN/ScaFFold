@@ -264,53 +264,57 @@ def main(config: Config):
                 pass
     comm.Barrier()
 
-    # Parse existing instances to get list of what we have
-    existing_instance_dirs = glob.glob(
-        f"{instance_write_dir}/[0-9][0-9][0-9][0-9][0-9][0-9]/"
-    )
-    fracts_with_existing_instances = [
-        int(path_str.split("/")[-2]) for path_str in existing_instance_dirs
-    ]
-    all_existing_instances = []
-
-    # Construct list of existing instances in [category, instance] pairs. Each
-    # candidate is opened via a memory-mapped load: a file truncated by a killed
-    # job reads its header but fails here, so it is treated as missing (and
-    # removed) rather than accepted as complete and left to crash volumegen.
-    for category in fracts_with_existing_instances:
-        existing_instances = []
-        for path_str in glob.glob(
-            f"{instance_write_dir}/{category:06d}/[0-9][0-9][0-9][0-9][0-9][0-9]_[0-9][0-9][0-9][0-9].npy"
-        ):
-            if _is_valid_npy(path_str):
-                existing_instances.append(int(path_str.split("_")[-1].split(".")[0]))
-            else:
-                logger.warning(
-                    "Discarding unreadable instance file %s; it will be regenerated",
-                    path_str,
-                )
-                try:
-                    os.remove(path_str)
-                except OSError:
-                    pass
-        category_instance_pairs = [
-            [category, instance] for instance in existing_instances
+    # Build the global work list on rank 0 alone and broadcast it, so every
+    # rank slices an identical list. Scanning the shared filesystem
+    # independently per rank lets divergent views (stale metadata caches after
+    # the rmtree above, a partially-completed prior run, or a concurrent job)
+    # produce lists that differ across ranks; block-slicing divergent lists then
+    # assigns some (category, instance) pairs to two ranks (duplicate writes to
+    # one file) and others to none (instances that are never generated).
+    instances_to_generate = None
+    if rank == 0:
+        existing_instance_dirs = glob.glob(
+            f"{instance_write_dir}/[0-9][0-9][0-9][0-9][0-9][0-9]/"
+        )
+        fracts_with_existing_instances = [
+            int(path_str.split("/")[-2]) for path_str in existing_instance_dirs
         ]
-        all_existing_instances.extend(category_instance_pairs)
+        all_existing_instances = set()
 
-    # Create list of [category, instance] pairs we want to end up with
-    instances_desired = []
-    for category in range(num_categories):
-        instances_desired_for_this_category = list(range(145))
-        category_instance_pairs = [
-            [category, instance] for instance in instances_desired_for_this_category
+        # Construct the set of existing instances as (category, instance) pairs.
+        # Each candidate is opened via a memory-mapped load: a file truncated by
+        # a killed job reads its header but fails here, so it is treated as
+        # missing (and removed) rather than accepted as complete and left to
+        # crash volumegen.
+        for category in fracts_with_existing_instances:
+            for path_str in glob.glob(
+                f"{instance_write_dir}/{category:06d}/[0-9][0-9][0-9][0-9][0-9][0-9]_[0-9][0-9][0-9][0-9].npy"
+            ):
+                if _is_valid_npy(path_str):
+                    instance = int(path_str.split("_")[-1].split(".")[0])
+                    all_existing_instances.add((category, instance))
+                else:
+                    logger.warning(
+                        "Discarding unreadable instance file %s; it will be regenerated",
+                        path_str,
+                    )
+                    try:
+                        os.remove(path_str)
+                    except OSError:
+                        pass
+
+        # Diff the desired pairs against what already exists; membership is an
+        # O(1) set lookup so the diff stays linear in the number of desired
+        # pairs.
+        instances_to_generate = [
+            [category, instance]
+            for category in range(num_categories)
+            for instance in range(145)
+            if (category, instance) not in all_existing_instances
         ]
-        instances_desired.extend(category_instance_pairs)
 
-    # Diff of the above is what we need to generate
-    instances_to_generate = [
-        pair for pair in instances_desired if pair not in all_existing_instances
-    ]
+    # Every rank slices the same broadcast list.
+    instances_to_generate = comm.bcast(instances_to_generate, root=0)
 
     # Distribute work among ranks
     instances_per_rank = ceil(len(instances_to_generate) / size)

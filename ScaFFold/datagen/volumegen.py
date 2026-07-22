@@ -193,105 +193,124 @@ def main(config: Dict):
     start_idx = rank * stride
     end_idx = min(((rank + 1) * stride), num_volumes)
 
-    if start_idx >= end_idx:
-        log.debug("Rank %s given no volumes to generate", rank)
+    # Per-rank generation status. A rank that fails records the message here and
+    # keeps executing the collective sequence below so every rank stays in step;
+    # the failure is then propagated to all ranks via an allreduce.
+    ok = True
+    err = ""
 
-    else:
-        volumes_contents_subset = volumes_contents[start_idx:end_idx]
-        log.debug(
-            "Rank %s responsible for volumes %s through %s",
-            rank,
-            volumes_contents_subset[0][0],
-            volumes_contents_subset[-1][0],
-        )
+    try:
+        if start_idx >= end_idx:
+            log.debug("Rank %s given no volumes to generate", rank)
 
-        np.random.seed(config.seed)
-        fractal_colors = np.random.rand(config.n_categories, 3)
-
-        grid_size = resolve_grid_size(config)
-        fract_base_dir = str(config.fract_base_dir)
-
-        # Generation loop
-        start_time = time.time()
-        for i, curr_vol in enumerate(volumes_contents_subset):
-            if i % 10 == 0:
-                log.debug("Rank %s processing local volume %s", rank, i)
-
-            volume = np.full(
-                (config.vol_size, config.vol_size, config.vol_size, 3),
-                0,
-                dtype=VOLUME_DTYPE,
-            )
-            mask = np.full(
-                (config.vol_size, config.vol_size, config.vol_size), 0, dtype=MASK_DTYPE
+        else:
+            volumes_contents_subset = volumes_contents[start_idx:end_idx]
+            log.debug(
+                "Rank %s responsible for volumes %s through %s",
+                rank,
+                volumes_contents_subset[0][0],
+                volumes_contents_subset[-1][0],
             )
 
-            global_vol_idx = curr_vol[0]
-            vol_seed = config.seed + int(global_vol_idx)
-            random.seed(vol_seed)
-            np.random.seed(vol_seed)
+            np.random.seed(config.seed)
+            fractal_colors = np.random.rand(config.n_categories, 3)
 
-            for curr_fract in range(n_fracts_per_vol):
-                curr_category = curr_vol[1 + 2 * curr_fract]
-                curr_instance = curr_vol[1 + 2 * curr_fract + 1]
-                fractal_color = fractal_colors[curr_category]
+            grid_size = resolve_grid_size(config)
+            fract_base_dir = str(config.fract_base_dir)
 
-                instances_dir = (
-                    f"var{config.variance_threshold}/instances/np{config.point_num}"
+            # Generation loop
+            start_time = time.time()
+            for i, curr_vol in enumerate(volumes_contents_subset):
+                if i % 10 == 0:
+                    log.debug("Rank %s processing local volume %s", rank, i)
+
+                volume = np.full(
+                    (config.vol_size, config.vol_size, config.vol_size, 3),
+                    0,
+                    dtype=VOLUME_DTYPE,
+                )
+                mask = np.full(
+                    (config.vol_size, config.vol_size, config.vol_size), 0, dtype=MASK_DTYPE
                 )
 
-                point_cloud_path = os.path.join(
-                    fract_base_dir,
-                    instances_dir,
-                    f"{curr_category:06d}",
-                    f"{curr_category:06d}_{curr_instance:04d}.npy",
-                )
+                global_vol_idx = curr_vol[0]
+                vol_seed = config.seed + int(global_vol_idx)
+                random.seed(vol_seed)
+                np.random.seed(vol_seed)
 
-                if not os.path.exists(point_cloud_path):
-                    raise FileNotFoundError(
-                        f"File {point_cloud_path} does not exist. "
-                        "Ensure you have run 'scaffold generate_fractals ...'"
+                for curr_fract in range(n_fracts_per_vol):
+                    curr_category = curr_vol[1 + 2 * curr_fract]
+                    curr_instance = curr_vol[1 + 2 * curr_fract + 1]
+                    fractal_color = fractal_colors[curr_category]
+
+                    instances_dir = (
+                        f"var{config.variance_threshold}/instances/np{config.point_num}"
                     )
 
-                points = load_np_ptcloud(point_cloud_path)
-                mask3d = points_to_voxelgrid(points, grid_size)
+                    point_cloud_path = os.path.join(
+                        fract_base_dir,
+                        instances_dir,
+                        f"{curr_category:06d}",
+                        f"{curr_category:06d}_{curr_instance:04d}.npy",
+                    )
 
-                assert mask3d.shape == volume.shape[:3], (
-                    f"mask3d {mask3d.shape} != volume spatial dims {volume.shape[:3]}"
+                    if not os.path.exists(point_cloud_path):
+                        raise FileNotFoundError(
+                            f"File {point_cloud_path} does not exist. "
+                            "Ensure you have run 'scaffold generate_fractals ...'"
+                        )
+
+                    points = load_np_ptcloud(point_cloud_path)
+                    mask3d = points_to_voxelgrid(points, grid_size)
+
+                    assert mask3d.shape == volume.shape[:3], (
+                        f"mask3d {mask3d.shape} != volume spatial dims {volume.shape[:3]}"
+                    )
+
+                    volume[mask3d] = fractal_color
+                    mask[mask3d] = curr_category + 1
+
+                # Determine destination folder
+                subdir = "validation" if global_vol_idx in val_indices else "training"
+                # Tensors must logically be channels-first, later we will change striding/storage to channels-last on GPU (metadata will always stay channels-first).
+                volume_channels_first = volume.transpose((3, 0, 1, 2))
+                volume_to_save = np.ascontiguousarray(
+                    volume_channels_first, dtype=VOLUME_DTYPE
                 )
+                mask_to_save = np.ascontiguousarray(mask, dtype=MASK_DTYPE)
 
-                volume[mask3d] = fractal_color
-                mask[mask3d] = curr_category + 1
+                vol_file = os.path.join(vol_path, subdir, f"{global_vol_idx}.npy")
+                with open(vol_file, "wb") as f:
+                    np.save(f, volume_to_save)
 
-            # Determine destination folder
-            subdir = "validation" if global_vol_idx in val_indices else "training"
-            # Tensors must logically be channels-first, later we will change striding/storage to channels-last on GPU (metadata will always stay channels-first).
-            volume_channels_first = volume.transpose((3, 0, 1, 2))
-            volume_to_save = np.ascontiguousarray(
-                volume_channels_first, dtype=VOLUME_DTYPE
-            )
-            mask_to_save = np.ascontiguousarray(mask, dtype=MASK_DTYPE)
+                mask_file = os.path.join(mask_path, subdir, f"{global_vol_idx}_mask.npy")
+                with open(mask_file, "wb") as f:
+                    np.save(f, mask_to_save)
 
-            vol_file = os.path.join(vol_path, subdir, f"{global_vol_idx}.npy")
-            with open(vol_file, "wb") as f:
-                np.save(f, volume_to_save)
+            end_time = time.time()
+            total_time = end_time - start_time
+            if rank == 0:
+                log.info(
+                    "Rank 0 generated %s volumes in %.2f seconds | %.2f volumes per second",
+                    len(volumes_contents_subset),
+                    total_time,
+                    len(volumes_contents_subset) / total_time,
+                )
+    except (Exception, SystemExit) as e:
+        # Capture the failure locally instead of letting it unwind past the
+        # collective below, which would desynchronize the ranks.
+        ok = False
+        err = f"rank {rank}: {type(e).__name__}: {e}"
 
-            mask_file = os.path.join(mask_path, subdir, f"{global_vol_idx}_mask.npy")
-            with open(mask_file, "wb") as f:
-                np.save(f, mask_to_save)
-
-        end_time = time.time()
-        total_time = end_time - start_time
-        if rank == 0:
-            log.info(
-                "Rank 0 generated %s volumes in %.2f seconds | %.2f volumes per second",
-                len(volumes_contents_subset),
-                total_time,
-                len(volumes_contents_subset) / total_time,
-            )
-
-    # Barrier to ensure all ranks are finished writing
-    comm.Barrier()
+    # Consensus on the generation status. This replaces a bare Barrier: every
+    # rank always executes exactly this collective (regardless of success or
+    # failure), so a failing rank can never leave a peer hung in a mismatched
+    # collective. If any rank failed, all ranks raise here.
+    all_ok = comm.allreduce(1 if ok else 0, op=MPI.MIN) == 1
+    errs = comm.allgather(err)
+    if not all_ok:
+        msgs = "; ".join(e for e in errs if e)
+        raise RuntimeError(f"volume generation failed: {msgs or 'unknown error'}")
 
     if rank == 0:
         log.info("All ranks done. Proceeding to split.")
