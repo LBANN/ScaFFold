@@ -13,22 +13,17 @@
 # SPDX-License-Identifier: (Apache-2.0)
 
 import csv
-import os
-import tempfile
 from pathlib import Path
 from types import SimpleNamespace
-from unittest import mock
 
 import matplotlib
 import numpy as np
-import pytest
 
 matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
 
 from ScaFFold.utils.utils import plot_img_and_mask
-from ScaFFold.utils import perf_measure
 from ScaFFold.viz import standard_viz
 
 
@@ -254,4 +249,3 @@ class TestTorchProfiler:
         ), "Logic should use if, not elif chains for independent profiler checks"
 
 
-import sys
