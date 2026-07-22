@@ -77,6 +77,25 @@ def check_resource_utilization(log, rank, world_size):
         log.debug(f"  Device Properties: {torch.cuda.get_device_properties(this_gpu)}")
 
 
+def wrap_model_ddp(model, device, ps):
+    """Wrap a model in DistConvDDP pinned to the compute device.
+
+    The device comes from get_device(), which is the single source of truth
+    for device selection: under per-rank GPU masking every rank's only
+    visible device is index 0 regardless of its local rank, so passing the
+    local rank as a device index would address a nonexistent device. On CPU
+    (e.g. gloo test runs) DDP requires device_ids/output_device of None.
+    """
+    ddp_device_ids = [device.index] if device.type == "cuda" else None
+    ddp_output_device = device.index if device.type == "cuda" else None
+    return DistConvDDP(
+        model,
+        parallel_strategy=ps,
+        device_ids=ddp_device_ids,
+        output_device=ddp_output_device,
+    )
+
+
 @annotate()
 def main(kwargs_dict: dict = {}):
     #
@@ -120,8 +139,9 @@ def main(kwargs_dict: dict = {}):
     # More useful info
     log.debug(f"Host={socket.gethostname()} PID={os.getpid()}")
     log.debug(f"PyTorch {torch.__version__}, CUDA/ROCm {torch.version.cuda}")
+    backend = dist.get_backend() if dist.is_initialized() else "none"
     log.debug(
-        f"Backend={dist.get_backend()}, world_size={world_size}, rank={rank}, local_rank={get_local_rank()}"
+        f"Backend={backend}, world_size={world_size}, rank={rank}, local_rank={get_local_rank()}"
     )
     log.info(f"rank={rank}, world_size={world_size}")
 
@@ -163,15 +183,8 @@ def main(kwargs_dict: dict = {}):
     )
 
     model = model.to(device, memory_format=torch.channels_last_3d)
-    ddp_device_ids = [device.index] if device.type == "cuda" else None
-    ddp_output_device = device.index if device.type == "cuda" else None
     # Wrap with DistConvDDP that corrects gradient scaling for dc submesh
-    model = DistConvDDP(
-        model,
-        parallel_strategy=ps,
-        device_ids=ddp_device_ids,
-        output_device=ddp_output_device,
-    )
+    model = wrap_model_ddp(model, device, ps)
     # Store ps for use in the training loop
     config._parallel_strategy = ps
     end_code_region("init_model")
@@ -253,12 +266,24 @@ def main(kwargs_dict: dict = {}):
         prof.export_chrome_trace(tracename)
         log.info("Wrote PyTorch trace '%s'", tracename)
 
+    # Results are final here; synchronize before rank-0 post-processing so a
+    # post-processing failure on rank 0 cannot strand the other ranks in a
+    # collective they never reach.
+    if dist.is_initialized():
+        dist.barrier()
+        dist.destroy_process_group()
+
     #
     # Calculate benchmark score
     #
     if rank == 0:
         outfile_path = trainer.outfile_path
         train_data = np.genfromtxt(outfile_path, dtype=float, delimiter=",", names=True)
+        if train_data.size == 0:
+            raise RuntimeError(
+                f"Training stats file '{outfile_path}' contains no epoch rows; "
+                "cannot compute a benchmark score."
+            )
         total_train_time = train_data["epoch_duration"].sum()
         if "total_optimizer_steps" in train_data.dtype.names:
             optimizer_steps = np.atleast_1d(train_data["total_optimizer_steps"])
@@ -302,9 +327,5 @@ def main(kwargs_dict: dict = {}):
         begin_code_region("generate_figures")
         standard_viz.main(config)
         end_code_region("generate_figures")
-
-    if dist.is_initialized():
-        dist.barrier()
-        dist.destroy_process_group()
 
     return 0
