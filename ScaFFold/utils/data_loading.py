@@ -12,6 +12,7 @@
 #
 # SPDX-License-Identifier: (Apache-2.0)
 
+import hashlib
 import pickle
 from dataclasses import dataclass
 from os import listdir
@@ -21,6 +22,7 @@ from typing import Dict, Optional, Tuple
 
 import numpy as np
 import torch
+import torch.distributed as dist
 import yaml
 from torch.utils.data import Dataset
 
@@ -118,24 +120,93 @@ class BasicDataset(Dataset):
         self.dataset_root = self.images_dir.parents[1]
         self.dataset_format_version = self._load_dataset_format_version()
 
-        self.ids = [
+        # os.listdir order is filesystem/client dependent and explicitly
+        # arbitrary. Sorting makes the index -> file mapping deterministic and
+        # byte-identical across processes, which spatial sharding relies on:
+        # ranks that share a data-replica index must resolve the same dataset
+        # index to the same volume, or shard assembly stitches together halves
+        # of different samples with no error.
+        self.ids = sorted(
             splitext(file)[0]
             for file in listdir(images_dir)
             if isfile(join(images_dir, file)) and not file.startswith(".")
-        ]
+        )
         if not self.ids:
             raise RuntimeError(
                 f"No input file found in {images_dir}, make sure you put your images there"
             )
 
+        # Belt-and-braces: when a process group is live, verify every rank built
+        # the identical id list. Any residual divergence (e.g. inconsistent
+        # readdir views across parallel-filesystem clients) becomes a hard error
+        # here instead of silently corrupted training samples.
+        self._verify_ids_consistent_across_ranks(images_dir)
+
         customlog(
             f"Creating dataset with {len(self.ids)} examples. Loading from {data_dir}"
         )
-        with open(data_dir, "rb") as data_file:
-            data = pickle.load(data_file)
-        self.mask_values = data["mask_values"]
+        self.mask_values = self._load_mask_values(data_dir)
         customlog(f"Unique mask values: {self.mask_values}")
         customlog(f"Dataset format version: {self.dataset_format_version}")
+
+    def _load_mask_values(self, data_dir):
+        """Return the label-remap table for this split.
+
+        v2 datasets store dense class ids and never remap, so the per-split
+        pickle is loaded verbatim for bookkeeping. Legacy (v1) datasets remap
+        raw voxel values by their position in this list; a per-split table would
+        assign the same raw value different class ids across splits whenever a
+        category is missing from one split. To keep train and validation labels
+        consistent, v1 uses one global table: the sorted union of every
+        ``*unique_mask_vals`` pickle found in the dataset root.
+        """
+        with open(data_dir, "rb") as data_file:
+            mask_values = pickle.load(data_file)["mask_values"]
+
+        if self.dataset_format_version >= DATASET_FORMAT_VERSION:
+            return mask_values
+
+        union = set()
+        for pickle_path in sorted(self.dataset_root.glob("*unique_mask_vals")):
+            try:
+                with open(pickle_path, "rb") as handle:
+                    values = pickle.load(handle)["mask_values"]
+            except (OSError, KeyError, pickle.UnpicklingError) as exc:
+                customlog(
+                    f"Ignoring unreadable mask-values file {pickle_path}: {exc}"
+                )
+                continue
+            union.update(np.asarray(values).reshape(-1).tolist())
+
+        if not union:
+            # No sibling pickles discovered; fall back to this split's own list.
+            return mask_values
+
+        return sorted(union)
+
+    def _verify_ids_consistent_across_ranks(self, images_dir):
+        """Raise if ranks disagree on ``self.ids`` while a process group is up.
+
+        A no-op when torch.distributed is unavailable or uninitialized (CPU unit
+        tests and the ``dist=0`` path), so it costs exactly one small collective
+        only in genuinely distributed runs.
+        """
+        if not (dist.is_available() and dist.is_initialized()):
+            return
+
+        digest = hashlib.sha256("\n".join(self.ids).encode("utf-8")).digest()
+        local = torch.frombuffer(bytearray(digest), dtype=torch.uint8)
+        gathered = [torch.empty_like(local) for _ in range(dist.get_world_size())]
+        dist.all_gather(gathered, local)
+
+        for rank, other in enumerate(gathered):
+            if not torch.equal(other, local):
+                raise RuntimeError(
+                    "Dataset id lists diverge across ranks for "
+                    f"{images_dir}: rank {dist.get_rank()} disagrees with rank "
+                    f"{rank}. Every rank must observe the same files (check for "
+                    "inconsistent filesystem views across nodes)."
+                )
 
     def __len__(self):
         return len(self.ids)
