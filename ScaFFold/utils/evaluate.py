@@ -83,14 +83,19 @@ def evaluate(
     processed_batches = 0
     processed_samples = 0
 
-    spatial_mesh = parallel_strategy.device_mesh[parallel_strategy.distconv_dim_names]
-
-    if primary and log is not None:
-        log.debug(
-            "[eval] ps.shard_dim=%s num_shards=%s",
-            parallel_strategy.shard_dim,
-            parallel_strategy.num_shards,
-        )
+    if parallel_strategy is not None:
+        spatial_mesh = parallel_strategy.device_mesh[
+            parallel_strategy.distconv_dim_names
+        ]
+        if primary and log is not None:
+            log.debug(
+                "[eval] ps.shard_dim=%s num_shards=%s",
+                parallel_strategy.shard_dim,
+                parallel_strategy.num_shards,
+            )
+    else:
+        # No parallel strategy: no spatial sharding, no mesh to reduce over.
+        spatial_mesh = None
 
     with torch.autocast(**autocast_kwargs):
         val_loss_epoch = 0.0
@@ -120,8 +125,13 @@ def evaluate(
             mask_true = mask_true.unsqueeze(1)
 
             # Inputs are already loaded as local shards by the dataset.
-            dcx = DCTensor.from_shard(image, parallel_strategy)
-            mask_true_dc = DCTensor.from_shard(mask_true, parallel_strategy)
+            # Without a parallel strategy there is nothing to shard.
+            if parallel_strategy is not None:
+                dcx = DCTensor.from_shard(image, parallel_strategy)
+                mask_true_dc = DCTensor.from_shard(mask_true, parallel_strategy)
+            else:
+                dcx = image
+                mask_true_dc = mask_true
 
             # Forward pass on sharded data
             dcy = net(dcx)
@@ -141,7 +151,9 @@ def evaluate(
                     local_preds,
                     local_labels,
                     spatial_mesh,
-                    parallel_strategy.num_shards,
+                    parallel_strategy.num_shards
+                    if parallel_strategy is not None
+                    else (1,),
                     autocast_device_type,
                     class_weights,
                 )

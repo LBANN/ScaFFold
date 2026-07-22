@@ -547,15 +547,21 @@ class PyTorchTrainer(BaseTrainer):
         # Add a dummy channel dimension to get 5D [B, 1, D, H, W]
         true_masks = true_masks.unsqueeze(1)
 
-        # Inputs are already loaded as local shards by the dataset.
-        images_dc = DCTensor.from_shard(images, self.ps)
-        true_masks_dc = DCTensor.from_shard(true_masks, self.ps)
+        # Inputs are already loaded as local shards by the dataset. Without a
+        # parallel strategy there is nothing to shard; use the tensors as-is.
+        if self.ps is not None:
+            images_dc = DCTensor.from_shard(images, self.ps)
+            true_masks_dc = DCTensor.from_shard(true_masks, self.ps)
+        else:
+            images_dc = images
+            true_masks_dc = true_masks
         del images, true_masks
         self._get_memsize(images_dc, "Sharded image", self.config.verbose)
 
         with torch.autocast(**self._autocast_kwargs()):
             if gather_mem_stats:
-                torch.cuda.reset_peak_memory_stats()
+                if self.device.type == "cuda":
+                    torch.cuda.reset_peak_memory_stats()
                 gather_and_print_mem(self.log, "pre_forward")
             begin_code_region("predict")
             self.log.debug(f"  {log_prefix}running forward pass")
@@ -578,10 +584,11 @@ class PyTorchTrainer(BaseTrainer):
                 )
 
             begin_code_region("calculate_loss")
-            current_mem = torch.cuda.memory_allocated() / (1024**3)
-            self.log.debug(
-                f"  {log_prefix}Calculating sharded loss. Mem: {current_mem:.2f} GB."
-            )
+            if self.device.type == "cuda":
+                current_mem = torch.cuda.memory_allocated() / (1024**3)
+                self.log.debug(
+                    f"  {log_prefix}Calculating sharded loss. Mem: {current_mem:.2f} GB."
+                )
 
             # Calculate CE and Dice loss in single precision for numerical stability.
             with torch.autocast(**self._autocast_kwargs(enabled=False)):
@@ -646,7 +653,7 @@ class PyTorchTrainer(BaseTrainer):
         del local_preds, local_labels, local_preds_softmax, local_labels_one_hot
         del loss_ce, loss
 
-        if log_peak_mem and self.world_rank == 0:
+        if log_peak_mem and self.world_rank == 0 and self.device.type == "cuda":
             peak_alloc = torch.cuda.max_memory_allocated() / (1024**3)
             peak_reserved = torch.cuda.max_memory_reserved() / (1024**3)
             self.log.debug(
@@ -791,7 +798,8 @@ class PyTorchTrainer(BaseTrainer):
                     begin_code_region("batch_loop")
                     for batch_idx, batch in enumerate(self.train_loader):
                         # We don't want to time partial batches, i.e. last batch (time will be lower than expected).
-                        time_minibatch = (
+                        # CUDA events need a CUDA device; skip timing on CPU.
+                        time_minibatch = self.device.type == "cuda" and (
                             batch_idx
                             < len(self.train_sampler) // self.config.local_batch_size
                         )
@@ -945,15 +953,22 @@ class PyTorchTrainer(BaseTrainer):
                         + "\n"
                     )
                     outfile.flush()
+                    # minibatch_time_s stays None when every batch was a
+                    # partial (untimed) batch; skip the fragment rather than
+                    # crash formatting None.
+                    minibatch_msg = (
+                        f" Median of minibatch times: {minibatch_time_s:.6f} seconds."
+                        if minibatch_time_s is not None
+                        else ""
+                    )
                     self.log.info(
                         "Epoch %s completed in %.6f seconds. Total train time so "
-                        "far: %.6f seconds. Median of minibatch times: %.6f "
-                        "seconds. Optimizer steps this epoch: %s. Total "
-                        "optimizer steps: %s.",
+                        "far: %.6f seconds.%s Optimizer steps this epoch: %s. "
+                        "Total optimizer steps: %s.",
                         epoch,
                         epoch_duration,
                         time.time() - start,
-                        minibatch_time_s,
+                        minibatch_msg,
                         epoch_optimizer_steps,
                         self.total_optimizer_steps,
                     )

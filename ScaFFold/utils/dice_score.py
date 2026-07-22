@@ -66,6 +66,10 @@ class SpatialAllReduce(torch.autograd.Function):
     @staticmethod
     def forward(ctx, input, spatial_mesh):
         output = input.clone()
+        # No spatial mesh (non-distributed run): the local values already are
+        # the global values.
+        if spatial_mesh is None:
+            return output
         for mesh_dim in range(spatial_mesh.ndim):
             pg = spatial_mesh.get_group(mesh_dim)
             dist.all_reduce(output, op=dist.ReduceOp.SUM, group=pg)
