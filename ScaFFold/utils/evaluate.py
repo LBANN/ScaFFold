@@ -37,7 +37,37 @@ def evaluate(
     max_batches=None,
     log=None,
 ):
+    """Run validation over ``dataloader`` and return aggregate metrics.
+
+    Returns a 5-tuple ``(total_dice_score, val_loss_epoch, val_loss_avg,
+    processed_batches, processed_samples)``:
+
+    * ``total_dice_score`` -- sum over samples of the per-sample mean foreground
+      *hard* (argmax) Dice. The caller recovers the mean val Dice as
+      ``total_dice_score / processed_samples`` (summing both across data-parallel
+      replicas first when distributed).
+    * ``val_loss_epoch`` -- sample-weighted total validation loss: the sum over
+      batches of each batch's mean loss times its sample count.
+    * ``val_loss_avg`` -- ``val_loss_epoch / processed_samples``, i.e. the true
+      per-sample mean loss, independent of how samples were grouped into
+      batches.
+    * ``processed_batches`` -- number of batches actually evaluated.
+    * ``processed_samples`` -- number of samples actually evaluated.
+    """
+    # A single output channel (n_categories == 0) has no meaningful multiclass
+    # validation metric: softmax over one channel and one-hot over one class are
+    # both identically 1, so the Dice and loss would be fixed regardless of the
+    # model. Reject it here rather than report a fake perfect score.
+    if n_categories < 1:
+        raise ValueError(
+            f"evaluate requires n_categories >= 1 (got {n_categories}); a single "
+            "output channel has no meaningful multiclass validation metric."
+        )
+    n_classes = n_categories + 1
+
     def foreground_dice_stats(dice_scores):
+        # Channel 0 is background; average Dice over the foreground classes
+        # only. n_categories >= 1 guarantees at least one foreground channel.
         per_sample_scores = dice_scores[:, 1:].mean(dim=1)
         return per_sample_scores.sum().item(), per_sample_scores.numel()
 
@@ -116,30 +146,58 @@ def evaluate(
                     class_weights,
                 )
 
-                mask_pred_probs = F.softmax(local_preds.float(), dim=1)
                 mask_true_onehot = (
-                    F.one_hot(local_labels, n_categories + 1)
+                    F.one_hot(local_labels, n_classes)
                     .permute(0, 4, 1, 2, 3)
                     .float()
                 )
+
+                # The reported score is the hard (argmax) segmentation Dice: it
+                # must reflect the discrete prediction, not the model's
+                # confidence. argmax is per-voxel, so hardening is shard-local
+                # and the sharded reduction is unaffected. One-hot hard
+                # predictions also make the empty/empty guard in
+                # compute_sharded_dice reachable (a correctly-predicted absent
+                # class scores 1, not ~0).
+                mask_pred_hard = (
+                    F.one_hot(local_preds.argmax(dim=1), n_classes)
+                    .permute(0, 4, 1, 2, 3)
+                    .float()
+                )
+                dice_score_hard = compute_sharded_dice(
+                    mask_pred_hard, mask_true_onehot, spatial_mesh
+                )
+                batch_dice_sum, batch_sample_count = foreground_dice_stats(
+                    dice_score_hard
+                )
+
+                # The loss term mirrors the training objective, which uses the
+                # soft (softmax-probability) Dice.
+                mask_pred_probs = F.softmax(local_preds.float(), dim=1)
                 dice_score_probs = compute_sharded_dice(
                     mask_pred_probs, mask_true_onehot, spatial_mesh
                 )
-                batch_dice_sum, batch_sample_count = foreground_dice_stats(
+                soft_dice_sum, soft_sample_count = foreground_dice_stats(
                     dice_score_probs
                 )
-                batch_dice_score = batch_dice_sum / max(batch_sample_count, 1)
+                soft_dice_score = soft_dice_sum / max(soft_sample_count, 1)
 
-                # Sum global CE Loss and Dice loss
-                loss = CE_loss + (1.0 - batch_dice_score)
-                val_loss_epoch += loss.item()
+                # Sum global CE Loss and Dice loss.
+                loss = CE_loss + (1.0 - soft_dice_score)
+                # Weight each batch's mean loss by its sample count so a ragged
+                # final batch is not overweighted; divide by the total sample
+                # count below, mirroring the sample-weighted dice accumulation.
+                val_loss_epoch += loss.item() * batch_sample_count
                 total_dice_score += batch_dice_sum
             processed_batches += 1
             processed_samples += batch_sample_count
 
     net.train()
 
-    val_loss_avg = val_loss_epoch / max(processed_batches, 1)
+    # val_loss_epoch is the sample-weighted total loss (sum of each batch's
+    # mean loss times its sample count), so dividing by the total sample count
+    # gives the true per-sample mean, independent of how samples were batched.
+    val_loss_avg = val_loss_epoch / max(processed_samples, 1)
     if primary and log is not None:
         log.debug(
             "evaluate.py: dice_score=%s, val_loss_epoch=%s, val_loss_avg=%s, "
