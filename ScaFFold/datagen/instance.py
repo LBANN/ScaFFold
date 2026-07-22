@@ -322,9 +322,13 @@ def main(config: Config):
     end = min(((rank + 1) * instances_per_rank), len(instances_to_generate))
     instances_to_generate_for_this_rank = instances_to_generate[start:end]
 
-    # Load the fractal category IFS parameters
-    IFS_param_csv_names = os.listdir(fracts_read_dir)
-    IFS_param_csv_names.sort()
+    # Load the fractal category IFS parameters. Only category CSVs count:
+    # the directory also holds bookkeeping files (e.g. the per-rank RNG
+    # attempt counters written by the category search), which must not shift
+    # the category-index-to-file mapping.
+    IFS_param_csv_names = sorted(
+        name for name in os.listdir(fracts_read_dir) if name.endswith(".csv")
+    )
 
     # Load the weights, which will be applied during fractal generation
     # to produce more variation in the dataset
