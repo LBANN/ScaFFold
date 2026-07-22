@@ -1,0 +1,2 @@
+# Per-test scripts launched under mpi_run / torchrun_gloo live here.
+# Placeholder so the directory is tracked; populated by later test batches.
