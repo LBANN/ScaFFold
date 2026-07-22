@@ -306,8 +306,11 @@ class PyTorchTrainer(BaseTrainer):
 
             self.start_epoch = 1
         else:
-            # Load checkpoint via manager
-            self.start_epoch = self.checkpoint_manager.load_from_checkpoint()
+            # Load checkpoint via manager. An explicit restart must find a
+            # checkpoint; a plain non-scratch launch may simply start fresh.
+            self.start_epoch = self.checkpoint_manager.load_from_checkpoint(
+                require_checkpoint=getattr(self.config, "restart", False)
+            )
 
             # Restore extra metadata if needed (e.g. mask values)
             if "train_mask_values" in self.checkpoint_manager.restored_extras:
@@ -403,6 +406,18 @@ class PyTorchTrainer(BaseTrainer):
         tensor_memory_bytes = tensor[0].element_size() * tensor[0].nelement()
         tensor_memory_gb = tensor_memory_bytes / (1024**3)
         self.log.info(f"{tensor_label} size on GPU: {tensor_memory_gb:.2f} GB")
+
+    def _optimizer_step_applied(self, scale_before_update):
+        """Return whether the last GradScaler step actually updated parameters.
+
+        When the scaler is enabled it skips optimizer.step() on inf/nan grads
+        and backs the loss scale off in update(); a decreased scale therefore
+        means the step was skipped. When the scaler is disabled the scale is a
+        constant, so every step is applied.
+        """
+        if not self.use_grad_scaler:
+            return True
+        return self.grad_scaler.get_scale() >= scale_before_update
 
     def _run_training_batch(
         self,
@@ -511,10 +526,15 @@ class PyTorchTrainer(BaseTrainer):
         self.grad_scaler.unscale_(self.optimizer)
         torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
         self.log.debug(f"  {log_prefix}backward pass complete. Stepping optimizer")
+        # Record the scale before update() so we can detect a skipped step: on
+        # inf/nan gradients GradScaler.step() silently skips optimizer.step()
+        # and update() backs the scale off, leaving parameters unchanged.
+        scale_before_update = self.grad_scaler.get_scale()
         self.grad_scaler.step(self.optimizer)
         if gather_mem_stats:
             gather_and_print_mem(self.log, "after_optim_step")
         self.grad_scaler.update()
+        self._last_step_applied = self._optimizer_step_applied(scale_before_update)
         self.optimizer.zero_grad(set_to_none=False)
         end_code_region("step_and_update")
 
@@ -684,8 +704,12 @@ class PyTorchTrainer(BaseTrainer):
                         # Update the loss
                         begin_code_region("update_loss")
                         pbar.update(batch_size)
-                        self.global_step += 1
-                        epoch_optimizer_steps += 1
+                        # Only count steps the optimizer actually applied; a
+                        # GradScaler that skipped this step on inf/nan grads
+                        # left the parameters unchanged.
+                        if getattr(self, "_last_step_applied", True):
+                            self.global_step += 1
+                            epoch_optimizer_steps += 1
                         # Stay on GPU
                         epoch_loss += batch_loss
                         end_code_region("update_loss")
@@ -807,6 +831,22 @@ class PyTorchTrainer(BaseTrainer):
                     )
 
         completed_epochs = epoch - 1
+
+        # Save a final checkpoint when the run exits (convergence or max epochs)
+        # at an epoch that was not a checkpoint interval, so the converged
+        # weights that produced the reported metrics are not lost. Skipped when
+        # checkpointing is disabled, when no epoch completed, or when the last
+        # completed epoch was already checkpointed inside the loop.
+        if (
+            self.config.checkpoint_interval > 0
+            and completed_epochs >= 1
+            and self.checkpoint_manager.last_saved_epoch != completed_epochs
+        ):
+            extras = {"train_mask_values": self.train_set.mask_values}
+            self.checkpoint_manager.save_checkpoint(
+                completed_epochs, val_loss_avg, extras
+            )
+
         if epoch_minibatch_times_s:
             minibatch_time_s = statistics.median(epoch_minibatch_times_s)
             adiak_value("minibatch_time_s", minibatch_time_s)
