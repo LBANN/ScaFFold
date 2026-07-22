@@ -99,8 +99,10 @@ def main(kwargs_dict: dict = {}):
                 kdict["run_iter"] = run_dir / "run"
                 with open(run_dir / "run_config.yaml", "w") as file:
                     yaml.dump(
-                        {k: str(v) if isinstance(v, PosixPath) else v
-                         for k, v in kdict.items()},
+                        {
+                            k: str(v) if isinstance(v, PosixPath) else v
+                            for k, v in kdict.items()
+                        },
                         file,
                     )
                 run_dicts.append(kdict)

@@ -395,10 +395,15 @@ class PyTorchTrainer(BaseTrainer):
             )
 
             # Restore extra metadata if needed (e.g. mask values)
-            if "train_mask_values" in self.checkpoint_manager.restored_extras:
-                self.train_set.mask_values = self.checkpoint_manager.restored_extras[
-                    "train_mask_values"
-                ]
+            restored = self.checkpoint_manager.restored_extras
+            if "train_mask_values" in restored:
+                self.train_set.mask_values = restored["train_mask_values"]
+
+            # Continue the optimizer-step count from where the checkpoint left
+            # off; otherwise a resumed run restarts it at 0 and undercounts all
+            # pre-resume work in the reported step total.
+            if "global_step" in restored:
+                self.global_step = restored["global_step"]
 
             # If we loaded a checkpoint (start_epoch > 1), we must ensure the CSV
             # matches the state of that checkpoint.
@@ -422,9 +427,22 @@ class PyTorchTrainer(BaseTrainer):
             "optimizer_steps",
             "total_optimizer_steps",
         ]
-        if self.world_rank == 0 and self.start_epoch == 1:
-            with open(self.outfile_path, "a", newline="") as outfile:
-                outfile.write(",".join(headers) + "\n")
+        if self.world_rank == 0:
+            header_line = ",".join(headers) + "\n"
+            if self.start_epoch == 1:
+                # Fresh start (train_from_scratch, or a non-scratch launch that
+                # found no checkpoint to resume): truncate any stale stats file
+                # and write a single header. Appending here would leave a
+                # second header mid-file, which the CSV reader parses as a row
+                # of NaNs and corrupts the benchmark score.
+                with open(self.outfile_path, "w", newline="") as outfile:
+                    outfile.write(header_line)
+            elif not os.path.exists(self.outfile_path):
+                # Real resume (a checkpoint set start_epoch > 1) but the stats
+                # file is gone: recreate it with a header so the epoch rows
+                # appended below are not read as column names.
+                with open(self.outfile_path, "w", newline="") as outfile:
+                    outfile.write(header_line)
 
     def _truncate_stats_file(self, start_epoch, path=None):
         """
@@ -950,7 +968,10 @@ class PyTorchTrainer(BaseTrainer):
                     self.config.checkpoint_interval > 0
                     and epoch % self.config.checkpoint_interval == 0
                 ):
-                    extras = {"train_mask_values": self.train_set.mask_values}
+                    extras = {
+                        "train_mask_values": self.train_set.mask_values,
+                        "global_step": self.global_step,
+                    }
                     self.checkpoint_manager.save_checkpoint(epoch, val_loss_avg, extras)
                     last_checkpoint_epoch = epoch
 
@@ -977,7 +998,10 @@ class PyTorchTrainer(BaseTrainer):
             and completed_epochs >= 1
             and last_checkpoint_epoch != completed_epochs
         ):
-            extras = {"train_mask_values": self.train_set.mask_values}
+            extras = {
+                "train_mask_values": self.train_set.mask_values,
+                "global_step": self.global_step,
+            }
             self.checkpoint_manager.save_checkpoint(
                 completed_epochs, val_loss_avg, extras
             )
