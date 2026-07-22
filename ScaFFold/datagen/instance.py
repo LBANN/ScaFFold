@@ -28,6 +28,7 @@ import numpy as np
 from mpi4py import MPI
 
 from ScaFFold.datagen.generate_fractal_points import generate_fractal_points
+from ScaFFold.datagen.rng import derive_seed, seed_numba
 from ScaFFold.utils.config_utils import Config
 from ScaFFold.utils.utils import setup_mpi_logger
 
@@ -75,8 +76,11 @@ def main(config: Config):
     rank = comm.Get_rank()
     log = setup_mpi_logger(__file__, getattr(config, "verbose", 0))
 
-    # FIXME anything else to ensure determinism?
-    np.random.seed(config.seed + rank)
+    # Each instance is seeded individually inside the generation loop from
+    # (config.seed, category, instance), so its content is reproducible and
+    # independent of MPI world size, rank assignment, and resume state. A single
+    # per-rank seed here would make an instance depend on how the work list was
+    # partitioned, which shifts with world size and with pre-existing files.
 
     log.info("MPI size = %s", size)
 
@@ -167,6 +171,11 @@ def main(config: Config):
 
         # Apply weights
         params[:, :12] *= weights
+
+        # Seed numba's internal RNG per item so this instance's point cloud is
+        # reproducible for a given (config.seed, category, instance).
+        instance_seed = derive_seed(config.seed, category, instance)
+        seed_numba(instance_seed)
 
         # Generate points
         points = generate_single_instance(config.point_num, params)

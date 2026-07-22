@@ -26,6 +26,7 @@ import numpy as np
 from mpi4py import MPI
 
 from ScaFFold.datagen.generate_fractal_points import generate_fractal_points
+from ScaFFold.datagen.rng import SEED_MASK, derive_seed, seed_numba
 from ScaFFold.utils.config_utils import Config
 from ScaFFold.utils.utils import setup_mpi_logger
 
@@ -36,7 +37,54 @@ rank = None
 size = None
 
 
-def generate_single_category(config: Config) -> tuple[bool, np.array, bool, bool, bool]:
+def propose_next_params(base_seed: int, rank: int, attempt_index: int) -> np.array:
+    """
+    Propose IFS parameters for one category attempt.
+
+    Candidate parameters are drawn from an independent ``Generator`` keyed by
+    ``(base_seed, rank, attempt_index)``. Because the key includes a per-rank
+    attempt counter that persists across runs, a resumed or extended run keeps
+    advancing the candidate stream instead of replaying the same candidates a
+    fresh run produced, while remaining reproducible for a given key.
+
+    Parameters
+    ----------
+    base_seed : int
+        The configured base seed.
+    rank : int
+        The MPI rank proposing this candidate.
+    attempt_index : int
+        A per-rank counter that increases with every attempt and persists
+        across runs.
+
+    Returns
+    -------
+    params : np.array
+        A 2x13 array of IFS parameters with normalized selection probabilities
+        stored in the final column of each transformation.
+    """
+    seed_seq = np.random.SeedSequence(
+        (
+            int(base_seed) & SEED_MASK,
+            int(rank) & SEED_MASK,
+            int(attempt_index) & SEED_MASK,
+        )
+    )
+    generator = np.random.default_rng(seed_seq)
+    params = generator.uniform(-1.0, 1.0, (2, 13)).astype(DEFAULT_NP_DTYPE)
+
+    # Calculate normalized probabilities, then store in last params of each transformation
+    rotation_matrices = params[:, 0:9].reshape(-1, 3, 3)
+    probabilities_raw = np.absolute(np.linalg.det(rotation_matrices))
+    probabilties_normalized = probabilities_raw / np.sum(probabilities_raw)
+    params[:, -1] = probabilties_normalized
+
+    return params
+
+
+def generate_single_category(
+    config: Config, base_seed: int, rank: int, attempt_index: int
+) -> tuple[bool, np.array, bool, bool, bool]:
     """
     Generate a single fractal category.
 
@@ -44,6 +92,12 @@ def generate_single_category(config: Config) -> tuple[bool, np.array, bool, bool
     ----------
     config : Config
         A Config object containing run parameters.
+    base_seed : int
+        The configured base seed.
+    rank : int
+        The MPI rank running this attempt.
+    attempt_index : int
+        A per-rank, resume-persistent attempt counter identifying this attempt.
 
     Returns
     -------
@@ -62,14 +116,13 @@ def generate_single_category(config: Config) -> tuple[bool, np.array, bool, bool
     # Bool for whether this category is valid after checks
     valid = False
 
-    # Generate random params
-    params = np.random.uniform(-1.0, 1.0, (2, 13)).astype(DEFAULT_NP_DTYPE)
+    # Propose candidate params from the resume-persistent attempt stream
+    params = propose_next_params(base_seed, rank, attempt_index)
 
-    # Calculate normalized probabilities, then store in last params of each transformation
-    rotation_matrices = params[:, 0:9].reshape(-1, 3, 3)
-    probabilities_raw = np.absolute(np.linalg.det(rotation_matrices))
-    probabilties_normalized = probabilities_raw / np.sum(probabilities_raw)
-    params[:, -1] = probabilties_normalized
+    # Seed numba's internal RNG per attempt so the per-point sample used for the
+    # acceptance decision is reproducible for this (base_seed, rank, attempt)
+    # key -- the same candidate always yields the same accept/reject verdict.
+    seed_numba(derive_seed(base_seed, rank, attempt_index))
 
     # Generate points in the fractal
     points, runaway_check_pass = generate_fractal_points(
@@ -120,7 +173,11 @@ def generate_single_category(config: Config) -> tuple[bool, np.array, bool, bool
 
 
 def generate_categories_batch(
-    config: Config, datagen_batch_size: int = 1
+    config: Config,
+    base_seed: int,
+    rank: int,
+    attempt_start: int,
+    datagen_batch_size: int = 1,
 ) -> tuple[bool, np.array, int, int, int]:
     """
     Run a batch of fractal category generation attempts.
@@ -129,6 +186,14 @@ def generate_categories_batch(
     ----------
     config : Config
         A Config object containing run parameters.
+    base_seed : int
+        The configured base seed.
+    rank : int
+        The MPI rank running this batch.
+    attempt_start : int
+        The per-rank attempt counter for the first attempt in this batch; each
+        attempt uses ``attempt_start + i`` so the candidate stream advances
+        monotonically and never replays across batches or runs.
     datagen_batch_size : int
         An int for the number of attempts to run before MPI sync between ranks.
 
@@ -151,14 +216,14 @@ def generate_categories_batch(
     failed_var_check_count = 0
     runaway_failure_count = 0
 
-    for _ in range(datagen_batch_size):
+    for i in range(datagen_batch_size):
         (
             attempt_valid,
             params,
             attempt_failed_nan_check,
             attempt_failed_var_check,
             runaway_failure,
-        ) = generate_single_category(config)
+        ) = generate_single_category(config, base_seed, rank, attempt_start + i)
         if attempt_valid:
             one_or_more_valid = True
             params_list.append(params)
@@ -173,6 +238,111 @@ def generate_categories_batch(
         failed_var_check_count,
         runaway_failure_count,
     )
+
+
+def parse_category_indices(fracts_write_dir: str) -> list[int]:
+    """
+    Return the sorted list of category indices already present on disk.
+
+    Only files named ``NNNNNN.csv`` (six digits) are counted, so unrelated
+    files and partial temporaries never perturb the numbering.
+    """
+    indices = []
+    for path in glob.glob(f"{fracts_write_dir}/*.csv"):
+        stem = os.path.splitext(os.path.basename(path))[0]
+        if len(stem) == 6 and stem.isdigit():
+            indices.append(int(stem))
+    return sorted(set(indices))
+
+
+def next_free_index(existing_indices) -> int:
+    """
+    Return the lowest non-negative index not already used.
+
+    Holes in the numbering are filled first (so ``{0, 1, 3}`` yields ``2``);
+    only once the range ``0..max`` is contiguous does this return ``max + 1``.
+    Deriving the index this way -- rather than from a bare file count -- keeps a
+    resumed run from colliding with an existing file when the numbering has gaps.
+    """
+    existing = {int(i) for i in existing_indices}
+    idx = 0
+    while idx in existing:
+        idx += 1
+    return idx
+
+
+def is_duplicate_params(params: np.array, existing_params: list) -> bool:
+    """Return True if ``params`` matches any already-accepted category exactly."""
+    for existing in existing_params:
+        if existing.shape == params.shape and np.array_equal(existing, params):
+            return True
+    return False
+
+
+def save_valid_category(
+    fracts_write_dir: str,
+    params: np.array,
+    existing_indices: list,
+    existing_params: list,
+) -> int | None:
+    """
+    Save one accepted candidate under the next free ``NNNNNN.csv`` index.
+
+    Duplicates of an already-accepted category are skipped (nothing written).
+    An existing file is never overwritten; a collision raises ``FileExistsError``
+    rather than clobbering another category's parameters. ``existing_indices``
+    and ``existing_params`` are updated in place to reflect a successful write.
+
+    Returns
+    -------
+    int or None
+        The allocated index, or ``None`` if the candidate duplicated an
+        existing category and was skipped.
+    """
+    if is_duplicate_params(params, existing_params):
+        return None
+
+    idx = next_free_index(existing_indices)
+    target = os.path.join(fracts_write_dir, "%06d.csv" % idx)
+    if os.path.exists(target):
+        raise FileExistsError(f"Refusing to overwrite existing category file: {target}")
+    np.savetxt(target, params, delimiter=",")
+    existing_indices.append(idx)
+    existing_params.append(params)
+    return idx
+
+
+def _attempt_state_path(fracts_write_dir: str, rank: int) -> str:
+    return os.path.join(fracts_write_dir, f".rng_attempt_rank{rank}")
+
+
+def read_attempt_counter(fracts_write_dir: str, rank: int) -> int:
+    """Read this rank's persisted attempt counter (0 if none/unreadable)."""
+    try:
+        with open(_attempt_state_path(fracts_write_dir, rank)) as handle:
+            return int(handle.read().strip())
+    except (FileNotFoundError, ValueError):
+        return 0
+
+
+def write_attempt_counter(fracts_write_dir: str, rank: int, attempt_index: int) -> None:
+    """
+    Persist this rank's attempt counter atomically (temp file + ``os.replace``).
+
+    The counter records how many candidates this rank has proposed so a resumed
+    run continues the candidate stream from where it left off instead of
+    replaying it. Writing after each synced batch keeps it crash-consistent: a
+    crash mid-batch at worst re-proposes that batch's candidates, and the
+    duplicate guard on save prevents any that were already accepted from being
+    written twice.
+    """
+    path = _attempt_state_path(fracts_write_dir, rank)
+    tmp = f"{path}.tmp{os.getpid()}"
+    with open(tmp, "w") as handle:
+        handle.write(str(int(attempt_index)))
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(tmp, path)
 
 
 def main(config: Config) -> None:
@@ -201,8 +371,7 @@ def main(config: Config) -> None:
     if datagen_batch_size <= 0:
         raise ValueError("datagen_batch_size must be positive")
 
-    # FIXME anything else to ensure determinism?
-    np.random.seed(config.seed + rank)
+    base_seed = int(config.seed)
 
     log.info("MPI size = %s", size)
 
@@ -221,8 +390,26 @@ def main(config: Config) -> None:
     # Wait until dir setup completes
     comm.Barrier()
 
+    # Each rank resumes its own candidate stream from a persisted counter, so an
+    # extended/resumed run keeps proposing new candidates instead of replaying
+    # the ones a fresh run produced.
+    attempt_index = read_attempt_counter(fracts_write_dir, rank)
+
+    # Parse existing category files (rank 0 owns saving/dedup). Free indices are
+    # derived from these parsed names -- filling holes, never overwriting.
+    existing_indices = parse_category_indices(fracts_write_dir)
+    existing_params = []
+    if rank == 0:
+        for idx in existing_indices:
+            existing_params.append(
+                np.loadtxt(
+                    os.path.join(fracts_write_dir, "%06d.csv" % idx),
+                    delimiter=",",
+                )
+            )
+
     # Calculate number of remaining fractal categories to generate
-    existing_categories = len(glob.glob(f"{fracts_write_dir}/*.csv"))
+    existing_categories = len(existing_indices)
     categories_remaining = config.n_categories - existing_categories
     if rank == 0:
         log.info(
@@ -242,14 +429,18 @@ def main(config: Config) -> None:
     while categories_remaining > 0:
         attempts += datagen_batch_size * size
 
-        # Each rank attempts to generate datagen_batch_size categories
+        # Each rank attempts to generate datagen_batch_size categories, advancing
+        # its persistent attempt counter across the batch.
         (
             valid,
             params_list,
             attempts_failed_nan_check,
             attempts_failed_var_check,
             attempts_runaway_failures,
-        ) = generate_categories_batch(config, datagen_batch_size)
+        ) = generate_categories_batch(
+            config, base_seed, rank, attempt_index, datagen_batch_size
+        )
+        attempt_index += datagen_batch_size
         nan_fail_count += attempts_failed_nan_check
         var_fail_count += attempts_failed_var_check
         runaway_fail_count += attempts_runaway_failures
@@ -279,22 +470,24 @@ def main(config: Config) -> None:
             for p in params_valid:
                 # Ensure we don't save more categories than needed
                 if categories_remaining > 0:
-                    # Save IFS params as new category
-                    class_str = "%06d" % (config.n_categories - categories_remaining)
-                    np.savetxt(
-                        "{}/{}.csv".format(fracts_write_dir, class_str),
-                        p,
-                        delimiter=",",
+                    # Save into the next free index, skipping duplicates and
+                    # never overwriting an existing category file.
+                    allocated = save_valid_category(
+                        fracts_write_dir, p, existing_indices, existing_params
                     )
 
-                    # Update categories_remaining
-                    categories_remaining -= 1
+                    # Only count a newly written (non-duplicate) category.
+                    if allocated is not None:
+                        categories_remaining -= 1
                 else:
                     log.info(
                         "Generated all fractal categories needed. Ignoring additional "
                         "valid categories."
                     )
                     break
+
+        # Persist each rank's attempt counter so resume continues the stream.
+        write_attempt_counter(fracts_write_dir, rank, attempt_index)
 
         # Broadcast updated categories_remaining to all ranks
         categories_remaining = comm.bcast(categories_remaining, root=0)
