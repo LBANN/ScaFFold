@@ -30,9 +30,134 @@ def require_positive_int(name: str, value: int) -> int:
 class Config:
     """
     A class for storing configuration settings for a specific run.
+
+    Unknown keys are rejected by default so typos and unsupported options
+    fail at load time instead of being silently ignored.
     """
 
-    def __init__(self, config_dict):
+    # Keys read by __init__ (required and optional).
+    KNOWN_KEYS = frozenset(
+        {
+            "base_run_dir",
+            "dataset_dir",
+            "fract_base_dir",
+            "job_name",
+            "library_root",
+            "n_categories",
+            "problem_scale",
+            "unet_bottleneck_dim",
+            "n_fracts_per_vol",
+            "n_instances_used_per_fractal",
+            "local_batch_size",
+            "dataloader_num_workers",
+            "epochs",
+            "optimizer",
+            "disable_scheduler",
+            "more_determinism",
+            "datagen_from_scratch",
+            "train_from_scratch",
+            "val_split",
+            "seed",
+            "dist",
+            "framework",
+            "starting_learning_rate",
+            "min_learning_rate",
+            "T_0",
+            "T_mult",
+            "variance_threshold",
+            "torch_amp",
+            "loss_freq",
+            "checkpoint_dir",
+            "normalize",
+            "group_norm_groups",
+            "warmup_batches",
+            "ce_weight_sample_fraction",
+            "dataset_reuse_enforce_commit_id",
+            "target_dice",
+            "checkpoint_interval",
+            "dc_num_shards",
+            "dc_shard_dims",
+            "async_save",
+            # Derived attributes Config itself emits; accepting them keeps a
+            # saved run config.yaml reloadable.
+            "scale",
+            "dc_total_shards",
+        }
+    )
+
+    # Keys injected by the CLI/benchmark layers around the core options.
+    # Accepted (and preserved on round-trip through a saved config.yaml)
+    # but not consumed by Config itself.
+    AUX_KEYS = frozenset(
+        {
+            "command",
+            "config",
+            "verbose",
+            "restart",
+            "run_dir",
+            "run_iter",
+            "benchmark_run_dir",
+            "unet_layers",
+            "vol_size",
+            "point_num",
+            "scheduler_metadata",
+            "machine_name",
+            "datagen_batch_size",
+        }
+    )
+
+    # Fields that hold scalars; a list here indicates an unexpanded parameter
+    # sweep leaking into a single run.
+    _SCALAR_KEYS = frozenset(
+        {
+            "n_categories",
+            "problem_scale",
+            "unet_bottleneck_dim",
+            "n_fracts_per_vol",
+            "n_instances_used_per_fractal",
+            "local_batch_size",
+            "dataloader_num_workers",
+            "epochs",
+            "optimizer",
+            "val_split",
+            "seed",
+            "starting_learning_rate",
+            "min_learning_rate",
+            "T_0",
+            "T_mult",
+            "variance_threshold",
+            "loss_freq",
+            "group_norm_groups",
+            "warmup_batches",
+            "ce_weight_sample_fraction",
+            "target_dice",
+            "checkpoint_interval",
+        }
+    )
+
+    @classmethod
+    def _validate_keys(cls, config_dict, strict, allow_sweeps):
+        allowed = cls.KNOWN_KEYS | cls.AUX_KEYS
+        unknown = sorted(set(config_dict) - allowed)
+        if unknown:
+            message = f"Unknown config key(s): {', '.join(unknown)}"
+            if strict:
+                raise ValueError(message)
+            print(f"WARNING: {message}")
+        if allow_sweeps:
+            return
+        lists = sorted(
+            k for k in cls._SCALAR_KEYS if isinstance(config_dict.get(k), list)
+        )
+        if lists:
+            raise ValueError(
+                f"Config key(s) {', '.join(lists)} hold list values but a "
+                "single run needs scalars. Parameter sweeps must be expanded "
+                "before constructing a run config."
+            )
+
+    def __init__(self, config_dict, strict=True, allow_sweeps=False):
+        self._validate_keys(config_dict, strict, allow_sweeps)
         self.library_root = str(ScaFFold.paths.scaffold_root).rstrip("/") + "/ScaFFold/"
         self.base_run_dir = str(Path(config_dict["base_run_dir"]).resolve())
         self.dataset_dir = str(
@@ -97,6 +222,7 @@ class Config:
         ]
         self.target_dice = config_dict["target_dice"]
         self.checkpoint_interval = config_dict["checkpoint_interval"]
+        self.async_save = bool(config_dict.get("async_save", False))
         self.dc_num_shards = config_dict["dc_num_shards"]
         self.dc_shard_dims = config_dict["dc_shard_dims"]
         self.dc_total_shards = math.prod(self.dc_num_shards)
@@ -109,11 +235,46 @@ class Config:
 
 
 class RunConfig(Config):
-    def __init__(self, config_dict):
-        super().__init__(config_dict)
+    def __init__(self, config_dict, strict=True):
+        super().__init__(config_dict, strict=strict)
 
         self.run_dir = config_dict["run_dir"]
         self.run_iter = config_dict["run_iter"]
+
+
+def load_config_files(file_paths):
+    """
+    Load a base config plus optional partial overrides.
+
+    The first file must be a complete config; each subsequent file is a
+    partial override whose keys replace the base values. Every override key
+    must be a recognized config key.
+
+    Returns:
+        dict: the merged configuration dictionary.
+    """
+    if not file_paths:
+        raise ValueError("At least one config file is required")
+
+    merged = None
+    allowed = Config.KNOWN_KEYS | Config.AUX_KEYS
+    for i, file_path in enumerate(file_paths):
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"Config file '{file_path}' not found")
+        with open(file_path, "r") as file:
+            config_dict = yaml.safe_load(file) or {}
+        if i == 0:
+            merged = dict(config_dict)
+            continue
+        unknown = sorted(set(config_dict) - allowed)
+        if unknown:
+            raise ValueError(
+                f"Unknown config key(s) in override file '{file_path}': "
+                f"{', '.join(unknown)}"
+            )
+        for key, value in config_dict.items():
+            merged[key] = value
+    return merged
 
 
 def load_config(file_path: str, config_type: str):
@@ -130,7 +291,9 @@ def load_config(file_path: str, config_type: str):
         config_dict = yaml.safe_load(file)
 
     if config_type == "sweep":
-        return Config(config_dict)
+        # Sweep configs may hold list-valued parameters that the benchmark
+        # driver expands into one run per combination.
+        return Config(config_dict, allow_sweeps=True)
     elif config_type == "run":
         return RunConfig(config_dict)
     else:

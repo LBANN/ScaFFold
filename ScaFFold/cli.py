@@ -101,13 +101,19 @@ def main():
             "Requires path to config file."
         ),
     )
-    # Specify config file
+    # Specify config file(s): the first is the complete base config, any
+    # additional -c/--config files are partial overrides applied in order.
     benchmark_parser.add_argument(
         "-c",
         "--config",
         type=str,
+        action="append",
         default=None,
-        help="Path to config file for running benchmark",
+        help=(
+            "Path to config file for running benchmark. May be given more "
+            "than once: the first file is the base config and later files "
+            "are partial overrides."
+        ),
         required=True,
     )
 
@@ -227,11 +233,21 @@ def main():
     if rank == 0:
         log.debug("args = %s", args)
 
-        bench_config = config_utils.load_config(Path(args.config), "sweep")
-        bench_config_dict = (
-            vars(bench_config) if not isinstance(bench_config, dict) else bench_config
+        # --config may be a single path (generate_fractals) or a list of
+        # paths (benchmark, action="append"): base config plus overrides.
+        config_paths = (
+            args.config if isinstance(args.config, list) else [args.config]
         )
+        merged_dict = config_utils.load_config_files(config_paths)
+        # Validate the merged result and derive dependent settings
+        # (list-valued sweep params are allowed here; the benchmark driver
+        # expands them per run).
+        bench_config = config_utils.Config(merged_dict, allow_sweeps=True)
+        bench_config_dict = vars(bench_config)
         cli_args = vars(args)
+        # Downstream consumers expect a single config path (e.g. to copy it
+        # into the run dir); keep the base config there.
+        cli_args["config"] = config_paths[0]
 
         # Combine configs: CLI args override config file values
         combined_config = bench_config_dict.copy()
