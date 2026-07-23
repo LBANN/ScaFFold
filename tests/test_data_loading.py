@@ -282,13 +282,216 @@ def test_v2_datasets_unaffected(tiny_dataset):
 
         raw_vol = np.load(vol_dir / f"{name}.npy", allow_pickle=False)
         raw_mask = np.load(mask_dir / f"{name}_mask.npy", allow_pickle=False)
-        expected_img = BasicDataset._prepare_optimized_image(raw_vol)
-        expected_mask = BasicDataset._prepare_optimized_mask(raw_mask)
+        expected_img = BasicDataset._prepare_optimized_image(raw_vol, materialize=True)
+        expected_mask = BasicDataset._prepare_optimized_mask(raw_mask, materialize=True)
 
         assert np.array_equal(item["image"].numpy(), expected_img)
         assert np.array_equal(item["mask"].numpy(), expected_mask)
         assert item["image"].dtype == torch.float32
-        assert item["mask"].dtype == torch.int64
+        assert item["mask"].dtype == torch.int16
 
     # mask_values is loaded verbatim for bookkeeping (dense ids, no remap).
     assert ds.mask_values == list(range(4))
+
+
+# ---------------------------------------------------------------------------
+# F43: id -> path resolved once at init; no per-item directory scans
+# ---------------------------------------------------------------------------
+
+
+def test_getitem_does_not_scan_directories(tiny_dataset, monkeypatch):
+    """Fetching a sample performs zero directory globs after construction.
+
+    The id -> path mapping is fully known at init time, so ``__getitem__`` must
+    resolve paths from a cached dict rather than re-scanning (and fnmatching)
+    the whole image/mask directory on every call.
+    """
+    root = tiny_dataset(n_categories=2, n_train=4, n_val=2, n=8)
+    ds = FractalDataset(
+        root / "volumes" / "training",
+        root / "masks" / "training",
+        data_dir=root / "train_unique_mask_vals",
+    )
+
+    calls = {"glob": 0}
+    real_glob = Path.glob
+
+    def counting_glob(self, pattern, *args, **kwargs):
+        calls["glob"] += 1
+        return real_glob(self, pattern, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "glob", counting_glob)
+
+    for i in range(len(ds)):
+        ds[i]
+
+    assert calls["glob"] == 0, (
+        f"__getitem__ performed {calls['glob']} directory glob(s); the id->path "
+        "map should be resolved once at init"
+    )
+
+
+def test_duplicate_stem_raises(tmp_path):
+    """Two files sharing a stem in a directory is a hard error at init."""
+    root = _build_v2_constant_dataset(tmp_path / "dup", n_volumes=3)
+    vol_dir = root / "volumes" / "training"
+    mask_dir = root / "masks" / "training"
+
+    # A second file with the same stem as the existing vol_00.npy but a
+    # different extension: the stem is then an ambiguous key for the id->path
+    # map.
+    (vol_dir / "vol_00.foo").write_bytes(b"\x93NUMPY dummy")
+
+    with pytest.raises(RuntimeError, match="vol_00"):
+        FractalDataset(vol_dir, mask_dir, data_dir=root / "train_unique_mask_vals")
+
+
+# ---------------------------------------------------------------------------
+# F13: narrow (int16) mask carrier, widened to long on the compute device
+# ---------------------------------------------------------------------------
+
+
+def test_mask_carrier_is_narrow_int16(tiny_dataset):
+    """The mask ships as int16, not int64: the device-side cast does the widen.
+
+    Widening to int64 in the worker quadruples pinned-host memory and the H2D
+    copy relative to the on-disk uint16; the trainer/evaluator already re-cast
+    to long on the device.
+    """
+    root = tiny_dataset(n_categories=5, n_train=2, n_val=1, n=8)
+    ds = FractalDataset(
+        root / "volumes" / "training",
+        root / "masks" / "training",
+        data_dir=root / "train_unique_mask_vals",
+    )
+
+    mask = ds[0]["mask"]
+    assert mask.dtype == torch.int16
+
+    # The device-side widening the trainer/evaluator perform reproduces the old
+    # int64 baseline exactly (the label values are unchanged, only the carrier).
+    raw_mask = np.load(root / "masks" / "training" / "0_mask.npy", allow_pickle=False)
+    baseline_long = torch.from_numpy(raw_mask.astype(np.int64)).contiguous()
+    assert torch.equal(mask.to(torch.long), baseline_long)
+
+
+# ---------------------------------------------------------------------------
+# F21: non-sharded volume prep is zero-copy (no redundant full-volume copy)
+# ---------------------------------------------------------------------------
+
+
+def test_nonsharded_prepare_is_zero_copy():
+    """In the non-sharded path the prepared array is not a fresh full copy.
+
+    ``np.load`` (mmap_mode=None) already returns a fresh, contiguous,
+    correctly-typed buffer, so preparation must reuse it (``np.asarray``
+    no-op) instead of duplicating the whole volume a second time.
+    """
+    img = np.ascontiguousarray(
+        np.random.rand(3, 8, 8, 8).astype(VOLUME_DTYPE), dtype=VOLUME_DTYPE
+    )
+    mask = np.ascontiguousarray(
+        np.random.randint(0, 6, (8, 8, 8)).astype(MASK_DTYPE), dtype=MASK_DTYPE
+    )
+
+    prepared_img = BasicDataset._prepare_optimized_image(img, materialize=False)
+    prepared_mask = BasicDataset._prepare_optimized_mask(mask, materialize=False)
+
+    # Already-materialized input: asarray returns the same object, no memcpy.
+    assert prepared_img is img
+    assert prepared_mask is mask
+
+    # The materializing path still returns an independent, bit-identical copy.
+    copied_img = BasicDataset._prepare_optimized_image(img, materialize=True)
+    assert copied_img is not img
+    assert np.array_equal(copied_img, img)
+
+
+def test_nonsharded_getitem_tensors_bit_identical(tiny_dataset):
+    """The zero-copy prep yields byte-identical image/mask tensors."""
+    root = tiny_dataset(n_categories=3, n_train=2, n_val=1, n=8)
+    vol_dir = root / "volumes" / "training"
+    mask_dir = root / "masks" / "training"
+    ds = FractalDataset(vol_dir, mask_dir, data_dir=root / "train_unique_mask_vals")
+
+    item = ds[0]
+    name = ds.ids[0]
+    raw_vol = np.load(vol_dir / f"{name}.npy", allow_pickle=False)
+    raw_mask = np.load(mask_dir / f"{name}_mask.npy", allow_pickle=False)
+    expected_img = np.ascontiguousarray(raw_vol, dtype=VOLUME_DTYPE)
+    expected_mask = np.ascontiguousarray(raw_mask, dtype=MASK_DTYPE)
+
+    assert np.array_equal(item["image"].numpy(), expected_img)
+    assert np.array_equal(item["mask"].numpy().astype(MASK_DTYPE), expected_mask)
+
+
+# ---------------------------------------------------------------------------
+# F24: mask-only accessor loads the mask without touching the image volume
+# ---------------------------------------------------------------------------
+
+
+def test_load_mask_only_matches_getitem_without_image(tiny_dataset, monkeypatch):
+    """``load_mask_only(i)`` equals ``ds[i]['mask']`` and loads no image."""
+    root = tiny_dataset(n_categories=3, n_train=3, n_val=1, n=8)
+    ds = FractalDataset(
+        root / "volumes" / "training",
+        root / "masks" / "training",
+        data_dir=root / "train_unique_mask_vals",
+    )
+
+    loaded = {"image": 0, "mask": 0}
+    real_load = BasicDataset._load_numpy_array
+
+    def counting_load(path, mmap_mode=None):
+        p = str(path)
+        if "/volumes/" in p:
+            loaded["image"] += 1
+        elif "/masks/" in p:
+            loaded["mask"] += 1
+        return real_load(path, mmap_mode=mmap_mode)
+
+    monkeypatch.setattr(BasicDataset, "_load_numpy_array", staticmethod(counting_load))
+
+    for i in range(len(ds)):
+        expected = ds[i]["mask"]
+        loaded["image"] = 0
+        loaded["mask"] = 0
+
+        mask_only = ds.load_mask_only(i)
+
+        assert loaded["image"] == 0, "load_mask_only must not read the image volume"
+        assert loaded["mask"] == 1
+        assert mask_only.dtype == torch.int16
+        assert torch.equal(mask_only, expected)
+        # Suitable for the class-frequency bincount the caller performs.
+        counts = torch.bincount(mask_only.reshape(-1).long(), minlength=4)
+        assert int(counts.sum()) == mask_only.numel()
+
+
+def test_load_mask_only_v1_legacy(tiny_v1_dataset, monkeypatch):
+    """``load_mask_only`` also works for legacy (v1) datasets, no image load."""
+    root = tiny_v1_dataset(n_categories=2, n_train=2, n_val=1, n=8)
+    ds = FractalDataset(
+        root / "volumes" / "training",
+        root / "masks" / "training",
+        data_dir=root / "train_unique_mask_vals",
+    )
+    assert ds.dataset_format_version == 1
+
+    loaded = {"image": 0}
+    real_load = BasicDataset._load_numpy_array
+
+    def counting_load(path, mmap_mode=None):
+        if "/volumes/" in str(path):
+            loaded["image"] += 1
+        return real_load(path, mmap_mode=mmap_mode)
+
+    monkeypatch.setattr(BasicDataset, "_load_numpy_array", staticmethod(counting_load))
+
+    expected = ds[0]["mask"]
+    loaded["image"] = 0
+    mask_only = ds.load_mask_only(0)
+
+    assert loaded["image"] == 0
+    assert mask_only.dtype == torch.int16
+    assert torch.equal(mask_only, expected)

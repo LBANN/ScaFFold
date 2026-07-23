@@ -126,15 +126,32 @@ class BasicDataset(Dataset):
         # ranks that share a data-replica index must resolve the same dataset
         # index to the same volume, or shard assembly stitches together halves
         # of different samples with no error.
-        self.ids = sorted(
-            splitext(file)[0]
+        image_files = [
+            file
             for file in listdir(images_dir)
             if isfile(join(images_dir, file)) and not file.startswith(".")
-        )
+        ]
+        self.ids = sorted(splitext(file)[0] for file in image_files)
         if not self.ids:
             raise RuntimeError(
                 f"No input file found in {images_dir}, make sure you put your images there"
             )
+
+        # Resolve every id to its full image/mask path once, up front. Sample
+        # fetches then index these maps in O(1) instead of scanning (and
+        # fnmatching) the whole directory on every call, which on a shared
+        # filesystem turns each fetch into a burst of metadata traffic.
+        self._image_paths = self._index_paths_by_stem(
+            self.images_dir, image_files, "image"
+        )
+        mask_files = [
+            entry.name
+            for entry in self.mask_dir.iterdir()
+            if entry.is_file() and not entry.name.startswith(".")
+        ]
+        self._mask_paths = self._index_paths_by_stem(
+            self.mask_dir, mask_files, "mask"
+        )
 
         # Belt-and-braces: when a process group is live, verify every rank built
         # the identical id list. Any residual divergence (e.g. inconsistent
@@ -148,6 +165,17 @@ class BasicDataset(Dataset):
         self.mask_values = self._load_mask_values(data_dir)
         customlog(f"Unique mask values: {self.mask_values}")
         customlog(f"Dataset format version: {self.dataset_format_version}")
+
+        # Masks are handed off in a signed 16-bit carrier (widened to long on
+        # the compute device), so every class id must fit that range. Legacy
+        # masks are remapped to 0..len(mask_values)-1; optimized masks store
+        # dense ids that stay within the same bound.
+        max_class_id = len(self.mask_values) - 1
+        if max_class_id > np.iinfo(np.int16).max:
+            raise ValueError(
+                f"{len(self.mask_values)} classes exceed the int16 mask carrier "
+                f"limit ({np.iinfo(np.int16).max})"
+            )
 
     def _load_mask_values(self, data_dir):
         """Return the label-remap table for this split.
@@ -212,6 +240,27 @@ class BasicDataset(Dataset):
         return len(self.ids)
 
     @staticmethod
+    def _index_paths_by_stem(directory, filenames, label):
+        """Map each file's extension-less name to its full path.
+
+        Raises if two files in ``directory`` share a stem, which would make the
+        stem an ambiguous key and silently pick one of them at fetch time.
+        """
+        paths = {}
+        for filename in filenames:
+            stem = splitext(filename)[0]
+            full_path = directory / filename
+            existing = paths.get(stem)
+            if existing is not None:
+                raise RuntimeError(
+                    f"Ambiguous {label} id '{stem}' in {directory}: matches both "
+                    f"{existing.name} and {filename}. Every id must map to exactly "
+                    "one file."
+                )
+            paths[stem] = full_path
+        return paths
+
+    @staticmethod
     def _load_numpy_array(path, mmap_mode=None):
         return np.load(path, allow_pickle=False, mmap_mode=mmap_mode)
 
@@ -249,12 +298,21 @@ class BasicDataset(Dataset):
         return remapped
 
     @staticmethod
-    def _prepare_optimized_image(img):
-        return np.array(img, dtype=VOLUME_DTYPE, copy=True, order="C")
+    def _prepare_optimized_image(img, materialize):
+        # ``materialize`` is set when the array is a memory-mapped slice that
+        # must be copied into RAM to detach it from the backing file. When the
+        # array is already a fresh, correctly-typed, contiguous buffer (the
+        # non-mmap load), asarray is a no-op and avoids duplicating the whole
+        # volume a second time in the DataLoader worker.
+        if materialize:
+            return np.array(img, dtype=VOLUME_DTYPE, copy=True, order="C")
+        return np.asarray(img, dtype=VOLUME_DTYPE, order="C")
 
     @staticmethod
-    def _prepare_optimized_mask(mask):
-        return np.array(mask, dtype=MASK_DTYPE, copy=True, order="C")
+    def _prepare_optimized_mask(mask, materialize):
+        if materialize:
+            return np.array(mask, dtype=MASK_DTYPE, copy=True, order="C")
+        return np.asarray(mask, dtype=MASK_DTYPE, order="C")
 
     def _slice_image_array(self, img):
         if self.spatial_shard_spec is None:
@@ -273,35 +331,67 @@ class BasicDataset(Dataset):
         axis_map = {2: 0, 3: 1, 4: 2}
         return self.spatial_shard_spec.slice_array(mask, axis_map, "mask")
 
+    def _image_path(self, name):
+        try:
+            return self._image_paths[name]
+        except KeyError:
+            raise KeyError(f"No image file found for the ID {name} in {self.images_dir}")
+
+    def _mask_path(self, name):
+        key = name + self.mask_suffix
+        try:
+            return self._mask_paths[key]
+        except KeyError:
+            raise KeyError(f"No mask file found for the ID {key} in {self.mask_dir}")
+
+    def _load_prepared_mask(self, name):
+        """Load, shard-slice, and label-prepare one mask as ``MASK_DTYPE``."""
+        materialize = self.spatial_shard_spec is not None
+        # Memmap lets each rank slice out just its local shard without eagerly
+        # reading the full sample into process memory first; the prepare step
+        # then copies that slice out of the backing file.
+        mmap_mode = "r" if materialize else None
+        mask = self._load_numpy_array(self._mask_path(name), mmap_mode=mmap_mode)
+        mask = self._slice_mask_array(mask)
+        if self.dataset_format_version >= DATASET_FORMAT_VERSION:
+            return self._prepare_optimized_mask(mask, materialize)
+        return self._prepare_legacy_mask(self.mask_values, mask)
+
+    @staticmethod
+    def _to_mask_carrier(mask):
+        # Ship the mask in a narrow signed 16-bit carrier rather than widening
+        # to int64 here: the consumer re-casts to long on the compute device,
+        # so a wider dtype only inflates pinned-host memory and the host-to-
+        # device copy. (Signed, because unsigned 16-bit has no CPU bincount.)
+        return torch.from_numpy(mask.astype(np.int16, copy=False)).contiguous()
+
+    def load_mask_only(self, idx):
+        """Return only the mask for ``idx`` as the narrow int16 carrier tensor.
+
+        Identical to the ``"mask"`` entry of :meth:`__getitem__` but without
+        touching the image volume, so callers that only need mask statistics
+        (e.g. class-frequency counts via ``torch.bincount(mask.reshape(-1)
+        .long(), ...)``) skip reading and preparing the discarded image.
+        """
+        return self._to_mask_carrier(self._load_prepared_mask(self.ids[idx]))
+
     def __getitem__(self, idx):
         name = self.ids[idx]
-        mask_file = list(self.mask_dir.glob(name + self.mask_suffix + ".*"))
-        img_file = list(self.images_dir.glob(name + ".*"))
-
-        assert len(img_file) == 1, (
-            f"Either no image or multiple images found for the ID {name}: {img_file}"
-        )
-        assert len(mask_file) == 1, (
-            f"Either no mask or multiple masks found for the ID {name}: {mask_file}"
-        )
-        mmap_mode = "r" if self.spatial_shard_spec is not None else None
-        # Memmap lets each rank slice out just its local shard without eagerly
-        # reading the full sample into process memory first.
-        mask = self._load_numpy_array(mask_file[0], mmap_mode=mmap_mode)
-        img = self._load_numpy_array(img_file[0], mmap_mode=mmap_mode)
-        mask = self._slice_mask_array(mask)
+        materialize = self.spatial_shard_spec is not None
+        mmap_mode = "r" if materialize else None
+        img = self._load_numpy_array(self._image_path(name), mmap_mode=mmap_mode)
         img = self._slice_image_array(img)
 
         if self.dataset_format_version >= DATASET_FORMAT_VERSION:
-            img = self._prepare_optimized_image(img)
-            mask = self._prepare_optimized_mask(mask)
+            img = self._prepare_optimized_image(img, materialize)
         else:
             img = self._prepare_legacy_image(img)
-            mask = self._prepare_legacy_mask(self.mask_values, mask)
+
+        mask = self._load_prepared_mask(name)
 
         return {
             "image": torch.from_numpy(img).contiguous().float(),
-            "mask": torch.from_numpy(mask).contiguous().long(),
+            "mask": self._to_mask_carrier(mask),
         }
 
 

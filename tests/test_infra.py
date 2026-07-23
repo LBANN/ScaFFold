@@ -85,11 +85,12 @@ def test_tiny_dataset_v2_loads(tiny_dataset):
     assert train.dataset_format_version == 2
 
     item = train[0]
-    # Channels-first volume, float; single-channel long mask.
+    # Channels-first volume, float; single-channel narrow-int mask carrier
+    # (widened to long on the compute device by the trainer/evaluator).
     assert tuple(item["image"].shape) == (3, 16, 16, 16)
     assert item["image"].dtype == torch.float32
     assert tuple(item["mask"].shape) == (16, 16, 16)
-    assert item["mask"].dtype == torch.int64
+    assert item["mask"].dtype == torch.int16
     assert int(item["mask"].max()) <= 2
 
     # The raw on-disk arrays match the format the loader/trainer expect.
