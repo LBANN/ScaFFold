@@ -258,7 +258,7 @@ def main(kwargs_dict: dict = {}):
         trainer.warmup()
         end_code_region("warmup")
         begin_code_region("train")
-        trainer.train()
+        trainer.train(profiler=prof if TORCH_PERF_LOCAL else None)
         end_code_region("train")
     if TORCH_PERF_LOCAL:
         hostname = socket.gethostname()

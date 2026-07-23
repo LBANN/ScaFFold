@@ -19,6 +19,23 @@ from torch import Tensor
 from ScaFFold.utils.perf_measure import annotate
 
 
+def labels_to_onehot(labels, num_classes):
+    """One-hot encode integer ``labels`` [B, D, H, W] as float32 [B, C, D, H, W].
+
+    Scatters directly into a float32 buffer instead of ``F.one_hot`` (which
+    always materializes an int64 tensor) followed by ``permute`` + ``.float()``.
+    That avoids the large int64 intermediate and the second gather-copy, and the
+    result is contiguous in [B, C, ...] channel-first layout. Targets need no
+    autograd, so the buffer is a plain tensor.
+    """
+    b, *spatial = labels.shape
+    out = torch.zeros(
+        (b, num_classes, *spatial), dtype=torch.float32, device=labels.device
+    )
+    out.scatter_(1, labels.unsqueeze(1), 1.0)
+    return out
+
+
 def dice_coeff(
     input: Tensor,
     target: Tensor,

@@ -179,7 +179,7 @@ def _run_worker_nondist(monkeypatch, tiny_config, tiny_dataset, drop_dc_keys):
 
     seen = {}
 
-    def fake_train(self):
+    def fake_train(self, profiler=None):
         seen["trainer"] = self
         # Write one epoch row so post-processing has data to score.
         with open(self.outfile_path, "a", newline="") as outfile:

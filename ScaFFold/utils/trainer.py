@@ -32,7 +32,7 @@ from tqdm import tqdm
 from ScaFFold.utils.checkpointing import CheckpointManager
 from ScaFFold.utils.data_loading import FractalDataset, SpatialShardSpec
 from ScaFFold.utils.data_types import AMP_DTYPE, VOLUME_TORCH_DTYPE
-from ScaFFold.utils.dice_score import compute_sharded_dice
+from ScaFFold.utils.dice_score import compute_sharded_dice, labels_to_onehot
 from ScaFFold.utils.distributed import get_local_rank, get_world_rank, get_world_size
 
 # Local
@@ -592,6 +592,11 @@ class PyTorchTrainer(BaseTrainer):
 
             # Calculate CE and Dice loss in single precision for numerical stability.
             with torch.autocast(**self._autocast_kwargs(enabled=False)):
+                # Upcast and log-softmax the logits once, then share the result:
+                # CE reuses it via NLL and the dice term recovers probabilities
+                # with exp(), avoiding a second full-volume upcast and a
+                # duplicate softmax over the same logits every step.
+                log_probs = F.log_softmax(local_preds.float(), dim=1)
                 loss_ce = compute_sharded_cross_entropy_loss(
                     local_preds,
                     local_labels,
@@ -599,13 +604,12 @@ class PyTorchTrainer(BaseTrainer):
                     self.config.dc_num_shards,
                     self.amp_device_type,
                     self.ce_class_weights,
+                    log_probs=log_probs,
                 )
 
-                local_preds_softmax = F.softmax(local_preds.float(), dim=1)
-                local_labels_one_hot = (
-                    F.one_hot(local_labels, num_classes=self.config.n_categories + 1)
-                    .permute(0, 4, 1, 2, 3)
-                    .float()
+                local_preds_softmax = log_probs.exp()
+                local_labels_one_hot = labels_to_onehot(
+                    local_labels, self.config.n_categories + 1
                 )
                 dice_scores = compute_sharded_dice(
                     local_preds_softmax,
@@ -642,7 +646,11 @@ class PyTorchTrainer(BaseTrainer):
             gather_and_print_mem(self.log, "after_optim_step")
         self.grad_scaler.update()
         self._last_step_applied = self._optimizer_step_applied(scale_before_update)
-        self.optimizer.zero_grad(set_to_none=False)
+        # set_to_none frees the grad buffers and lets the next backward write
+        # (instead of read-modify-write add) into fresh grads, skipping a
+        # full-gradient memset every step. No cross-batch grad accumulation
+        # relies on retained zeroed grads here.
+        self.optimizer.zero_grad(set_to_none=True)
         end_code_region("step_and_update")
 
         batch_size = images_dc.shape[0]
@@ -650,8 +658,8 @@ class PyTorchTrainer(BaseTrainer):
 
         # Free memory aggressively
         del images_dc, true_masks_dc, masks_pred_dc
-        del local_preds, local_labels, local_preds_softmax, local_labels_one_hot
-        del loss_ce, loss
+        del local_preds, local_labels, log_probs, local_preds_softmax
+        del local_labels_one_hot, loss_ce, loss
 
         if log_peak_mem and self.world_rank == 0 and self.device.type == "cuda":
             peak_alloc = torch.cuda.max_memory_allocated() / (1024**3)
@@ -660,7 +668,10 @@ class PyTorchTrainer(BaseTrainer):
                 f"[MEM-PEAK] Peak alloc: {peak_alloc:.2f} GiB | Peak reserved: {peak_reserved:.2f} GiB",
             )
 
-        return batch_size, detached_loss, batch_dice_score
+        # Detach the dice score (mirroring the loss): it is only read via
+        # .item(), so returning it attached would keep this batch's autograd
+        # graph alive through the epoch accumulator.
+        return batch_size, detached_loss, batch_dice_score.detach()
 
     def _sync_gather_minibatch_timer(self, minibatch_events):
         minibatch_events[-1][1].synchronize()
@@ -699,7 +710,7 @@ class PyTorchTrainer(BaseTrainer):
         # Match the main training path as closely as possible, but roll back all
         # mutable state so warmup does not affect convergence.
         self.model.train()
-        self.optimizer.zero_grad(set_to_none=False)
+        self.optimizer.zero_grad(set_to_none=True)
 
         try:
             for batch_idx, batch in enumerate(self.train_loader):
@@ -738,9 +749,13 @@ class PyTorchTrainer(BaseTrainer):
         torch.distributed.barrier()
         self.log.info(f"Done warmup. Took {int(time.time() - start_warmup)}s")
 
-    def train(self):
+    def train(self, profiler=None):
         """
-        Execute model training
+        Execute model training.
+
+        ``profiler`` is an optional active ``torch.profiler.profile`` context;
+        when supplied, its ``step()`` is called once per training batch so a
+        bounded profiling schedule can advance and stop recording on its own.
         """
 
         epoch = self.start_epoch
@@ -781,7 +796,7 @@ class PyTorchTrainer(BaseTrainer):
                 self.train_loader.sampler.set_epoch(epoch)
                 self.val_loader.sampler.set_epoch(epoch)
                 self.model.train()
-                self.optimizer.zero_grad(set_to_none=False)
+                self.optimizer.zero_grad(set_to_none=True)
 
                 estr = (
                     f"{epoch}"
@@ -812,10 +827,18 @@ class PyTorchTrainer(BaseTrainer):
                             )
                         begin_code_region("minibatch_time")
                         begin_code_region("run_training_batch")
+                        # Only gather memory stats on the very first batch of
+                        # the run. The gather issues world-wide collectives (at
+                        # debug verbosity) and resets the CUDA peak-memory
+                        # counters; doing it every batch would serialize all
+                        # ranks inside the timed region and skew minibatch/epoch
+                        # timings and the FOM. One sample is enough to report
+                        # steady-state peak memory.
+                        first_batch = epoch == self.start_epoch and batch_idx == 0
                         batch_size, batch_loss, batch_dice_score = (
                             self._run_training_batch(
                                 batch,
-                                gather_mem_stats=True,
+                                gather_mem_stats=first_batch,
                             )
                         )
                         # Weight the (spatial-mesh-reduced) per-batch dice by
@@ -841,6 +864,11 @@ class PyTorchTrainer(BaseTrainer):
 
                         if time_minibatch:
                             minibatch_end_event.record()
+
+                        # Advance the profiler schedule (no-op when not
+                        # profiling); lets a bounded window stop recording.
+                        if profiler is not None:
+                            profiler.step()
                     end_code_region("batch_loop")
 
                 self.total_optimizer_steps += epoch_optimizer_steps
