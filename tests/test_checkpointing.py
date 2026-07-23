@@ -26,14 +26,32 @@ they need neither a GPU nor a process group.
 
 from __future__ import annotations
 
+import re
 import time
+from pathlib import Path
 
 import pytest
 import torch
+import torch.distributed as dist
 
 import ScaFFold.utils.trainer as trainer_mod
 from ScaFFold.utils.checkpointing import CheckpointManager
 from ScaFFold.utils.trainer import PyTorchTrainer
+from tests.helpers import mpi_runner
+
+# Two-rank rank script that resumes from a checkpoint and reports, per rank, how
+# many times it read the checkpoint file from disk.
+RESUME_RANK_SCRIPT = (
+    Path(__file__).resolve().parent
+    / "helpers"
+    / "rank_scripts"
+    / "checkpoint_resume_2rank.py"
+)
+
+_requires_gloo = pytest.mark.skipif(
+    not (torch.distributed.is_available() and torch.distributed.is_gloo_available()),
+    reason="requires torch.distributed with the gloo backend",
+)
 
 # ---------------------------------------------------------------------------
 # helpers
@@ -339,3 +357,148 @@ def test_skipped_step_not_counted():
     if getattr(stub, "_last_step_applied", True):
         global_step += 1
     assert global_step == 5  # unchanged: the skipped step was not counted
+
+
+# ---------------------------------------------------------------------------
+# F72 -- on resume only rank 0 reads the checkpoint file; peers get the
+# deserialized state over the process group (no N-way filesystem read storm)
+# ---------------------------------------------------------------------------
+
+
+def test_resume_nonzero_rank_never_reads_disk(tmp_path, monkeypatch):
+    """A simulated non-zero rank restores state without ever touching disk.
+
+    Single-process stand-in for a 2-rank resume: a ``world_rank=1`` manager runs
+    the real ``load_from_checkpoint`` with ``dist`` collectives stubbed so rank 0
+    "broadcasts" the decision. The broadcast stub adapts to whatever rank 1
+    hands it, so the test is meaningful against both the fixed code (rank 1 sends
+    a ``None`` placeholder and receives the deserialized checkpoint) and the
+    pre-fix code (rank 1 sends a candidate list and receives a path list, then
+    loads it itself). The invariant: rank 1 must never call ``torch.load`` on a
+    checkpoint file.
+    """
+    # Rank 0's on-disk checkpoint, and the object it would broadcast.
+    mgr0, _ = _make_manager(tmp_path)
+    mgr0.save_checkpoint(epoch=5, val_loss_avg=0.5, extras={"train_mask_values": [3]})
+    good_ckpt = torch.load(
+        mgr0.last_ckpt_path, map_location="cpu", weights_only=False
+    )
+
+    # A peer rank restoring from the same directory.
+    mgr1, _ = _make_manager(tmp_path)
+    mgr1.world_rank = 1
+    mgr1.dist_enabled = True
+
+    def fake_broadcast(objs, src=0):
+        # Supply whatever rank 0 would have sent, matched to the payload shape
+        # the code under test broadcasts.
+        payload = objs[0]
+        if payload is None:
+            # Fixed code: rank 0 sends the (status, checkpoint) decision.
+            objs[0] = ("ok", good_ckpt)
+        elif isinstance(payload, list):
+            # Pre-fix code: rank 0 sends the candidate PATH list.
+            objs[0] = [mgr0.last_ckpt_path]
+
+    monkeypatch.setattr(dist, "broadcast_object_list", fake_broadcast)
+    monkeypatch.setattr(dist, "barrier", lambda *a, **k: None)
+
+    ckpt_loads = []
+    real_load = torch.load
+
+    def spy_load(path, *args, **kwargs):
+        ckpt_loads.append(str(path))
+        return real_load(path, *args, **kwargs)
+
+    monkeypatch.setattr(torch, "load", spy_load)
+
+    start_epoch = mgr1.load_from_checkpoint()
+
+    # The peer restored the broadcast state (resume at epoch 6) ...
+    assert start_epoch == 6
+    assert mgr1.restored_extras.get("train_mask_values") == [3]
+    # ... without ever reading the checkpoint file itself.
+    assert ckpt_loads == []
+
+
+@_requires_gloo
+def test_resume_only_rank0_reads_disk(tmp_path):
+    """Under 2 gloo ranks, only rank 0 reads the checkpoint file on resume.
+
+    A single good checkpoint (epoch 3) is written, then both ranks resume. Rank
+    0 loads once and broadcasts; the peer must receive the state over the
+    process group and perform zero checkpoint-file reads. Both ranks resume at
+    epoch 4.
+    """
+    ckpt_dir = tmp_path / "checkpoints"
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+
+    rc, out, err = mpi_runner.torchrun_gloo(
+        str(RESUME_RANK_SCRIPT),
+        n=2,
+        timeout=90,
+        env={"CKPT_DIR": str(ckpt_dir), "CKPT_MODE": "read_guard"},
+    )
+
+    done = set(re.findall(r"RANK (\d+) DONE", out))
+    assert rc == 0 and {"0", "1"} <= done, (
+        f"expected clean 2-rank completion, rc={rc}\n"
+        f"stdout:\n{out}\nstderr:\n{err[-3000:]}"
+    )
+
+    loads = {r: int(n) for r, n in re.findall(r"RANK (\d+) LOADS (\d+)", out)}
+    epochs = {r: int(n) for r, n in re.findall(r"RANK (\d+) START_EPOCH (\d+)", out)}
+    assert loads.get("0", 0) >= 1, f"rank 0 should read the checkpoint\nstdout:\n{out}"
+    assert loads.get("1", -1) == 0, (
+        f"non-zero rank must not read the checkpoint file from disk; got "
+        f"{loads.get('1')} read(s)\nstdout:\n{out}"
+    )
+    assert epochs.get("0") == 4 and epochs.get("1") == 4, (
+        f"both ranks must resume at epoch 4\nstdout:\n{out}"
+    )
+
+
+@_requires_gloo
+def test_resume_corruption_fallback_multirank(tmp_path):
+    """Corruption fallback survives the rank-0-load + broadcast change.
+
+    ``last`` (epoch 2) is truncated and ``best`` (epoch 1) is intact. Rank 0
+    must fall through the corrupt ``last`` -- renaming it ``*.corrupt`` -- and
+    load ``best``; the peer still performs zero reads. Both ranks resume at the
+    best's epoch (2).
+    """
+    ckpt_dir = tmp_path / "checkpoints"
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+
+    rc, out, err = mpi_runner.torchrun_gloo(
+        str(RESUME_RANK_SCRIPT),
+        n=2,
+        timeout=90,
+        env={"CKPT_DIR": str(ckpt_dir), "CKPT_MODE": "corrupt_fallback"},
+    )
+
+    done = set(re.findall(r"RANK (\d+) DONE", out))
+    assert rc == 0 and {"0", "1"} <= done, (
+        f"expected clean 2-rank completion, rc={rc}\n"
+        f"stdout:\n{out}\nstderr:\n{err[-3000:]}"
+    )
+
+    loads = {r: int(n) for r, n in re.findall(r"RANK (\d+) LOADS (\d+)", out)}
+    epochs = {r: int(n) for r, n in re.findall(r"RANK (\d+) START_EPOCH (\d+)", out)}
+    corrupt = dict(re.findall(r"RANK (\d+) CORRUPT_EXISTS (\d+)", out))
+    best = dict(re.findall(r"RANK (\d+) BEST_CONSULTED (\d+)", out))
+
+    # Rank 0 read (last attempt + best) and quarantined the corrupt last.
+    assert loads.get("0", 0) >= 1, f"rank 0 should read on fallback\nstdout:\n{out}"
+    assert best.get("0") == "1", f"rank 0 should consult best\nstdout:\n{out}"
+    assert corrupt.get("0") == "1", (
+        f"the corrupt last should be renamed aside\nstdout:\n{out}"
+    )
+    # The peer still never reads the file.
+    assert loads.get("1", -1) == 0, (
+        f"non-zero rank must not read on fallback either\nstdout:\n{out}"
+    )
+    # Both ranks agree on the best's resume epoch (epoch 1 -> start 2).
+    assert epochs.get("0") == 2 and epochs.get("1") == 2, (
+        f"both ranks must resume from best at epoch 2\nstdout:\n{out}"
+    )

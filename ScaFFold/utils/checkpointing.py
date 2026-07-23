@@ -177,18 +177,18 @@ class CheckpointManager:
         """
         self.wait_for_save()  # Safety: don't load while writing
 
-        # 1. Decision phase: rank 0 picks the ordered candidate list (prefer
-        # the most recent 'last', then fall back to 'best'), then broadcasts it
-        # so every rank loads the same file.
-        candidates = []
-        if self.world_rank == 0:
-            if self.last_ckpt_path.exists():
-                candidates.append(self.last_ckpt_path)
-            if self.best_ckpt_path.exists():
-                candidates.append(self.best_ckpt_path)
+        # 1. Rank 0 is the sole reader: it selects the newest readable
+        # checkpoint and deserializes it once, then broadcasts the loaded
+        # object to the other ranks. Because DDP replicates identical state
+        # across ranks, a single read + broadcast avoids an N-way concurrent
+        # read of one (multi-GB) file from the shared filesystem on restart --
+        # a restart I/O storm that serializes on the parallel FS. Peer ranks
+        # therefore never open the checkpoint files at all.
+        result = self._select_and_load() if self.world_rank == 0 else None
+        status, payload = self._broadcast_obj(result)
 
-        candidates = self._broadcast_obj(candidates)
-        if not candidates:
+        # 2. Every rank acts on the same decision rank 0 reached.
+        if status == "empty":
             if require_checkpoint:
                 # An explicit restart must resume real state; silently
                 # retraining from scratch would waste the allocation.
@@ -196,31 +196,17 @@ class CheckpointManager:
                     "Restart requested but no checkpoint was found. "
                     f"Expected {self.last_ckpt_path} or {self.best_ckpt_path}."
                 )
-            # No checkpoint yet (e.g. the first run with train_from_scratch
-            # disabled): start fresh.
+            # No checkpoint on disk anywhere (e.g. the first run with
+            # train_from_scratch disabled): start a fresh run.
             return 1
-
-        # 2. Load to CPU, falling back through the candidate list if a
-        # checkpoint is unreadable (e.g. a 'last' truncated by a mid-write
-        # kill). A corrupt file is renamed aside so it is not retried on the
-        # next restart; only raise if nothing loads.
-        checkpoint = None
-        for path in candidates:
-            self._log(f"Loading checkpoint from {path}")
-            try:
-                checkpoint = torch.load(path, map_location="cpu", weights_only=False)
-                break
-            except Exception as e:
-                self._log(f"Failed to load checkpoint {path}: {e}")
-                if self.world_rank == 0:
-                    self._quarantine_corrupt(path)
-                self._log("Falling back to the next available checkpoint.")
-
-        if checkpoint is None:
+        if status == "unreadable":
+            # Every candidate failed to deserialize on rank 0; fail identically
+            # on all ranks instead of leaving peers to hang or silently proceed.
             raise RuntimeError(
                 "No loadable checkpoint found; all candidates were unreadable: "
-                f"{[str(p) for p in candidates]}"
+                f"{payload}"
             )
+        checkpoint = payload
 
         # 3. Restore weights
         model_to_load = (
@@ -273,6 +259,41 @@ class CheckpointManager:
 
         self._barrier()
         return start_epoch
+
+    def _select_and_load(self):
+        """Pick and deserialize the newest readable checkpoint (rank 0 only).
+
+        Prefers the most recent 'last', then falls back to 'best'. A candidate
+        that fails to deserialize (e.g. a 'last' truncated by a mid-write kill)
+        is renamed aside with a ``.corrupt`` suffix so it is not retried on the
+        next restart, then the next candidate is tried.
+
+        Returns a ``(status, payload)`` decision that is safe to broadcast:
+
+        * ``("empty", None)``           -- no checkpoint files exist;
+        * ``("ok", checkpoint_dict)``   -- a candidate deserialized cleanly;
+        * ``("unreadable", [paths])``   -- every candidate was corrupt.
+        """
+        candidates = []
+        if self.last_ckpt_path.exists():
+            candidates.append(self.last_ckpt_path)
+        if self.best_ckpt_path.exists():
+            candidates.append(self.best_ckpt_path)
+
+        if not candidates:
+            return ("empty", None)
+
+        for path in candidates:
+            self._log(f"Loading checkpoint from {path}")
+            try:
+                checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+                return ("ok", checkpoint)
+            except Exception as e:
+                self._log(f"Failed to load checkpoint {path}: {e}")
+                self._quarantine_corrupt(path)
+                self._log("Falling back to the next available checkpoint.")
+
+        return ("unreadable", [str(p) for p in candidates])
 
     def save_checkpoint(
         self, epoch: int, val_loss_avg: float, extras: Optional[Dict[str, Any]] = None
