@@ -18,6 +18,7 @@
 """
 
 import glob
+import math
 import os
 import shutil
 import time
@@ -35,6 +36,35 @@ DEFAULT_NP_DTYPE = np.float64
 comm = None
 rank = None
 size = None
+
+
+def compute_round_attempts(
+    categories_remaining, size, datagen_batch_size, accept_rate
+):
+    """Per-rank attempt count for the next round.
+
+    A fixed ``datagen_batch_size`` per rank overshoots badly once few categories
+    remain: the final round can generate thousands of valid categories per rank
+    and discard all but the handful still needed. Size the round from what is
+    left and the acceptance rate observed so far -- roughly
+    ``remaining / (size * accept_rate)`` attempts spread over the ranks -- while
+    never exceeding ``datagen_batch_size`` and always running at least one
+    attempt per rank so progress (and acceptance-rate learning) continues.
+
+    ``accept_rate`` <= 0 (no data yet, or a round that accepted nothing) falls
+    back to the full batch so an unknown/hard regime is not starved.
+    """
+    if categories_remaining <= 0:
+        return 0
+    per_rank_cap = max(1, int(datagen_batch_size))
+    if accept_rate <= 0.0:
+        return per_rank_cap
+    # Global attempts expected to yield the remaining categories, split across
+    # ranks; ceil at both steps so a round is never planned short. A small
+    # safety margin (10%) reduces the chance of needing an extra round.
+    needed_attempts = math.ceil(1.1 * categories_remaining / accept_rate)
+    per_rank = math.ceil(needed_attempts / max(size, 1))
+    return max(1, min(per_rank_cap, per_rank))
 
 
 def propose_next_params(base_seed: int, rank: int, attempt_index: int) -> np.array:
@@ -423,14 +453,29 @@ def main(config: Config) -> None:
     rank_start_time = time.time()
 
     attempts = 0
+    accepted_total = 0
     nan_fail_count = 0
     var_fail_count = 0
     runaway_fail_count = 0
     while categories_remaining > 0:
-        attempts += datagen_batch_size * size
+        # Size this round from what is left and the acceptance rate seen so far,
+        # rather than always running the full batch. Rank 0 decides and
+        # broadcasts so every rank runs the same number of attempts and stays in
+        # lockstep for the gather/barrier below.
+        if rank == 0:
+            accept_rate = accepted_total / attempts if attempts > 0 else 0.0
+            round_attempts = compute_round_attempts(
+                categories_remaining, size, datagen_batch_size, accept_rate
+            )
+        else:
+            round_attempts = None
+        round_attempts = comm.bcast(round_attempts, root=0)
 
-        # Each rank attempts to generate datagen_batch_size categories, advancing
-        # its persistent attempt counter across the batch.
+        attempts += round_attempts * size
+
+        # Each rank runs round_attempts attempts, advancing its persistent
+        # attempt counter by exactly that many so the candidate stream stays
+        # monotonic and reproducible across resumes.
         (
             valid,
             params_list,
@@ -438,9 +483,9 @@ def main(config: Config) -> None:
             attempts_failed_var_check,
             attempts_runaway_failures,
         ) = generate_categories_batch(
-            config, base_seed, rank, attempt_index, datagen_batch_size
+            config, base_seed, rank, attempt_index, round_attempts
         )
-        attempt_index += datagen_batch_size
+        attempt_index += round_attempts
         nan_fail_count += attempts_failed_nan_check
         var_fail_count += attempts_failed_var_check
         runaway_fail_count += attempts_runaway_failures
@@ -452,6 +497,10 @@ def main(config: Config) -> None:
         # Process IFS params one at a time, writing each to a CSV
         if rank == 0:
             params_valid = [item for sublist in gathered_params for item in sublist]
+            # Track total accepted candidates (valid ones found, before dedup)
+            # so the next round can size itself from the observed acceptance
+            # rate = accepted / attempts.
+            accepted_total += len(params_valid)
             log.info(
                 "cat_remaining = %s | total attempts = %s | stats for rank 0: "
                 "invalid_value_fail_count = %s, var_fail_count = %s, "
