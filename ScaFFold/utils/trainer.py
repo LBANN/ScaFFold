@@ -399,11 +399,18 @@ class PyTorchTrainer(BaseTrainer):
             if "train_mask_values" in restored:
                 self.train_set.mask_values = restored["train_mask_values"]
 
-            # Continue the optimizer-step count from where the checkpoint left
-            # off; otherwise a resumed run restarts it at 0 and undercounts all
-            # pre-resume work in the reported step total.
+            # Continue the optimizer-step counts from where the checkpoint
+            # left off; otherwise a resumed run restarts them at 0 and
+            # undercounts all pre-resume work in the reported step totals.
             if "global_step" in restored:
                 self.global_step = restored["global_step"]
+                # total_optimizer_steps advances in lockstep with global_step
+                # (both count applied optimizer steps from the start of the
+                # run), so a checkpoint that predates the dedicated key still
+                # resumes the total correctly from global_step.
+                self.total_optimizer_steps = restored.get(
+                    "total_optimizer_steps", restored["global_step"]
+                )
 
             # If we loaded a checkpoint (start_epoch > 1), we must ensure the CSV
             # matches the state of that checkpoint.
@@ -1014,6 +1021,7 @@ class PyTorchTrainer(BaseTrainer):
                     extras = {
                         "train_mask_values": self.train_set.mask_values,
                         "global_step": self.global_step,
+                        "total_optimizer_steps": self.total_optimizer_steps,
                     }
                     self.checkpoint_manager.save_checkpoint(epoch, val_loss_avg, extras)
                     last_checkpoint_epoch = epoch
@@ -1044,6 +1052,7 @@ class PyTorchTrainer(BaseTrainer):
             extras = {
                 "train_mask_values": self.train_set.mask_values,
                 "global_step": self.global_step,
+                "total_optimizer_steps": self.total_optimizer_steps,
             }
             self.checkpoint_manager.save_checkpoint(
                 completed_epochs, val_loss_avg, extras

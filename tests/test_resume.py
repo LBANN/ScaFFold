@@ -154,10 +154,10 @@ def _stub_trainer(run_dir, *, train_from_scratch, log):
         train_from_scratch=train_from_scratch,
         run_dir=str(run_dir),
         checkpoint_interval=-1,
-        dist=False,
     )
     t.world_rank = 0
     t.global_step = 0
+    t.total_optimizer_steps = 0
     t.log = log
     t.train_set = SimpleNamespace(mask_values=None)
     t.outfile_path = str(run_dir) + "/train_stats.csv"
@@ -312,29 +312,59 @@ def test_explicit_restart_with_checkpoint_resumes(tmp_path):
 
 
 def test_step_counters_roundtrip(tmp_path):
-    """global_step is saved in the checkpoint extras and restored on resume.
+    """Step counters are saved in the checkpoint extras and restored on resume.
 
-    A fresh trainer starts the counter at 0; after resuming a checkpoint that
-    recorded a non-zero step count, it must continue from that value rather
+    A fresh trainer starts the counters at 0; after resuming a checkpoint that
+    recorded non-zero step counts, it must continue from those values rather
     than restart the accounting.
     """
     log = __import__("logging").getLogger("resume.steps")
     run = tmp_path / "run"
     run.mkdir()
 
-    # First run: advance the counter and checkpoint at epoch 2 with the exact
+    # First run: advance the counters and checkpoint at epoch 2 with the exact
     # extras train() now passes.
     t1 = _stub_trainer(run, train_from_scratch=False, log=log)
     t1.global_step = 37
+    t1.total_optimizer_steps = 37
     t1.checkpoint_manager.save_checkpoint(
         epoch=2,
         val_loss_avg=0.5,
-        extras={"train_mask_values": None, "global_step": t1.global_step},
+        extras={
+            "train_mask_values": None,
+            "global_step": t1.global_step,
+            "total_optimizer_steps": t1.total_optimizer_steps,
+        },
     )
 
-    # Fresh trainer/manager (counter re-initialised to 0) resuming the run.
+    # Fresh trainer/manager (counters re-initialised to 0) resuming the run.
     t2 = _stub_trainer(run, train_from_scratch=False, log=log)
     assert t2.global_step == 0
     t2.cleanup_or_resume()
     assert t2.start_epoch == 3
     assert t2.global_step == 37
+    assert t2.total_optimizer_steps == 37
+
+
+def test_total_steps_resume_predates_dedicated_key(tmp_path):
+    """A checkpoint recording only global_step still resumes the step total.
+
+    global_step and total_optimizer_steps advance in lockstep, so an older
+    checkpoint without the dedicated total key falls back to global_step
+    instead of resetting the total to 0.
+    """
+    log = __import__("logging").getLogger("resume.steps.legacy")
+    run = tmp_path / "run"
+    run.mkdir()
+
+    t1 = _stub_trainer(run, train_from_scratch=False, log=log)
+    t1.checkpoint_manager.save_checkpoint(
+        epoch=2,
+        val_loss_avg=0.5,
+        extras={"train_mask_values": None, "global_step": 21},
+    )
+
+    t2 = _stub_trainer(run, train_from_scratch=False, log=log)
+    t2.cleanup_or_resume()
+    assert t2.global_step == 21
+    assert t2.total_optimizer_steps == 21
