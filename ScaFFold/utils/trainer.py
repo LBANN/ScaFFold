@@ -77,6 +77,7 @@ class BaseTrainer:
         self.criterion = None
         self.ce_class_weights = None
         self.global_step = 0
+        self.total_optimizer_steps = 0
         self.start_epoch = -1
         self.ps = getattr(self.config, "_parallel_strategy", None)
         self.spatial_mesh = None  # Spatial mesh for use w/ DistConv
@@ -333,6 +334,8 @@ class PyTorchTrainer(BaseTrainer):
             "train_dice",
             "val_dice",
             "epoch_duration",
+            "optimizer_steps",
+            "total_optimizer_steps",
         ]
         if self.world_rank == 0 and self.start_epoch == 1:
             with open(self.outfile_path, "a", newline="") as outfile:
@@ -631,6 +634,7 @@ class PyTorchTrainer(BaseTrainer):
                 epoch_start_time = time.time()
                 train_dice_total = 0
                 epoch_loss = 0  # Accumulator for per-batch losses
+                epoch_optimizer_steps = 0
                 minibatch_time_s = None
                 minibatch_events = []
 
@@ -681,6 +685,7 @@ class PyTorchTrainer(BaseTrainer):
                         begin_code_region("update_loss")
                         pbar.update(batch_size)
                         self.global_step += 1
+                        epoch_optimizer_steps += 1
                         # Stay on GPU
                         epoch_loss += batch_loss
                         end_code_region("update_loss")
@@ -692,6 +697,7 @@ class PyTorchTrainer(BaseTrainer):
 
                 # Calculate overall loss as average of per-batch loss
                 overall_loss = epoch_loss.item() / len(self.train_loader)
+                self.total_optimizer_steps += epoch_optimizer_steps
 
                 #
                 # Evaluate model on validation set, update LR if necessary
@@ -741,7 +747,7 @@ class PyTorchTrainer(BaseTrainer):
                 #
                 train_dice = float(train_dice_total.item() / len(self.train_loader))
                 self.log.info(
-                    f" epoch {epoch} | train_loss={overall_loss:.6f} | val_loss={val_loss_avg:.6f} | train_dice_score {train_dice:.6f} | val_dice_score {val_score:.6f} | lr {self._current_learning_rate():.8f}"
+                    f" epoch {epoch} | train_loss={overall_loss:.6f} | val_loss={val_loss_avg:.6f} | train_dice_score {train_dice:.6f} | val_dice_score {val_score:.6f} | lr {self._current_learning_rate():.8f} | optimizer_steps {epoch_optimizer_steps} | total_optimizer_steps {self.total_optimizer_steps}"
                 )
                 self.log.debug(f" writing to csv at {self.outfile_path}")
                 if self.world_rank == 0:
@@ -756,6 +762,8 @@ class PyTorchTrainer(BaseTrainer):
                                 str(train_dice),
                                 str(val_score),
                                 str(epoch_duration),
+                                str(epoch_optimizer_steps),
+                                str(self.total_optimizer_steps),
                             ]
                         )
                         + "\n"
@@ -763,11 +771,15 @@ class PyTorchTrainer(BaseTrainer):
                     outfile.flush()
                     self.log.info(
                         "Epoch %s completed in %.6f seconds. Total train time so "
-                        "far: %.6f seconds. Median of minibatch times: %.6f seconds.",
+                        "far: %.6f seconds. Median of minibatch times: %.6f "
+                        "seconds. Optimizer steps this epoch: %s. Total "
+                        "optimizer steps: %s.",
                         epoch,
                         epoch_duration,
                         time.time() - start,
                         minibatch_time_s,
+                        epoch_optimizer_steps,
+                        self.total_optimizer_steps,
                     )
 
                 #
@@ -803,3 +815,4 @@ class PyTorchTrainer(BaseTrainer):
                     f"Median of epoch minibatch time medians: {minibatch_time_s:.6f} seconds."
                 )
         adiak_value("final_epochs", completed_epochs)
+        adiak_value("total_optimizer_steps", self.total_optimizer_steps)

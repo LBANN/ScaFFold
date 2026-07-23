@@ -259,21 +259,29 @@ def main(kwargs_dict: dict = {}):
         outfile_path = trainer.outfile_path
         train_data = np.genfromtxt(outfile_path, dtype=float, delimiter=",", names=True)
         total_train_time = train_data["epoch_duration"].sum()
-        fom = 1.0 / total_train_time
-        adiak_value("FOM", fom)
-        log.info(
-            f"FOM = {fom} (1 / total_train_time={total_train_time:.6f} seconds). "
-            f"This FOM is specific to problem_scale={config.problem_scale}, "
-            f"target_dice={config.target_dice}, seed={config.seed}."
-        )
+        if "total_optimizer_steps" in train_data.dtype.names:
+            optimizer_steps = np.atleast_1d(train_data["total_optimizer_steps"])
+            total_optimizer_steps = int(optimizer_steps[-1])
+        elif "optimizer_steps" in train_data.dtype.names:
+            total_optimizer_steps = int(
+                np.atleast_1d(train_data["optimizer_steps"]).sum()
+            )
+        else:
+            total_optimizer_steps = int(getattr(trainer, "total_optimizer_steps", 0))
+        adiak_value("total_optimizer_steps", total_optimizer_steps)
         epochs = np.atleast_1d(train_data["epoch"])
         total_epochs = int(epochs[-1])
         if config.epochs == -1:
-            extra_msg = f"Trained to >= {config.target_dice} validation dice score in {total_train_time:.2f} seconds, {total_epochs} epochs."
-        else:
-            extra_msg = (
-                f"Completed in {total_train_time:.2f} seconds, {total_epochs} epochs."
+            fom = 1.0 / total_train_time
+            adiak_value("FOM", fom)
+            log.info(
+                f"FOM = {fom} (1 / total_train_time={total_train_time:.6f} seconds). "
+                f"This FOM is specific to problem_scale={config.problem_scale}, "
+                f"target_dice={config.target_dice}, seed={config.seed}."
             )
+            extra_msg = f"Trained to >= {config.target_dice} validation dice score in {total_train_time:.2f} seconds, {total_epochs} epochs, {total_optimizer_steps} optimizer steps."
+        else:
+            extra_msg = f"Completed in {total_train_time:.2f} seconds, {total_epochs} epochs, {total_optimizer_steps} optimizer steps."
 
         log.info(
             f"Benchmark run at scale {config.problem_scale} complete. \n{extra_msg}"
