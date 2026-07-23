@@ -30,7 +30,14 @@ from ScaFFold.datagen import volumegen
 from ScaFFold.utils.utils import setup_mpi_logger
 
 META_FILENAME = "meta.yaml"
-DATASET_FORMAT_VERSION = 2
+# Bumped from 2 to 3 when instance point clouds moved from float64 to float32:
+# the storage layout is unchanged, but float32 voxel binning shifts a handful of
+# boundary voxels, so a float64-era dataset must not be reused as if it were
+# float32. This version stamps new datasets, gates reuse below, and feeds the
+# config_id hash, so an older dataset is neither matched nor scanned. The loader
+# in data_loading.py keeps its own (lower) minimum-layout version and still reads
+# v3 through the modern dense path.
+DATASET_FORMAT_VERSION = 3
 INCLUDE_KEYS = [
     "dataset_format_version",
     "n_categories",

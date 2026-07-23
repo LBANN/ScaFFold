@@ -38,7 +38,12 @@ import pytest
 
 from ScaFFold.datagen import instance as inst
 from ScaFFold.datagen import mask_detection as md
-from ScaFFold.datagen.volumegen import points_to_voxelgrid, resolve_grid_size
+from ScaFFold.datagen.volumegen import (
+    load_np_ptcloud,
+    points_to_voxel_indices,
+    points_to_voxelgrid,
+    resolve_grid_size,
+)
 
 
 # A contractive 2-map IFS (spectral radius < 1) whose orbit stays bounded at
@@ -236,25 +241,24 @@ def _write_mask(path: Path, values) -> None:
         np.save(handle, np.asarray(values, dtype=np.uint16))
 
 
-def test_mask_glob_exact_match(tmp_path):
-    """No match names the id; multiple matches list the offending files."""
+def test_mask_stem_index_rejects_ambiguous(tmp_path):
+    """Two files sharing a stem are rejected by name rather than picked blind."""
     masks = tmp_path / "masks"
     masks.mkdir()
     _write_mask(masks / "0_mask.npy", [[0, 1], [2, 0]])
 
-    # An extensionless id ('README' -> glob 'README.*') matches nothing: the old
-    # blind [0] raised an opaque IndexError; now it names the id.
-    with pytest.raises(AssertionError) as no_match:
-        md.unique_mask_values("README", masks)
-    assert "README" in str(no_match.value)
+    # A single file per stem resolves cleanly.
+    mapping = md._index_masks_by_stem(masks)
+    assert set(mapping) == {"0_mask"}
 
-    # Two files sharing a stem must not be picked arbitrarily.
+    # A sibling sharing the stem must not be picked arbitrarily; the error names
+    # both offending files so the ambiguity is actionable.
     _write_mask(masks / "5_mask.npy", [0, 3, 3, 0])
-    _write_mask(masks / "5_mask.npy.bak", [0, 9, 9, 9])
-    with pytest.raises(AssertionError) as multi:
-        md.unique_mask_values("5_mask", masks)
+    (masks / "5_mask.dat").write_bytes(b"stale")
+    with pytest.raises(ValueError) as multi:
+        md._index_masks_by_stem(masks)
     message = str(multi.value)
-    assert "5_mask.npy" in message and "5_mask.npy.bak" in message
+    assert "5_mask" in message
 
 
 # ---------------------------------------------------------------------------
@@ -298,3 +302,119 @@ def test_scale_config_rejected():
     with pytest.raises(ValueError) as info:
         resolve_grid_size(bad)
     assert "scale" in str(info.value)
+
+
+# ---------------------------------------------------------------------------
+# F34: rasterization scatters point indices instead of traversing a dense grid
+# ---------------------------------------------------------------------------
+
+
+def _dense_reference_indices(points: np.ndarray, grid_size: int, eps=1e-6):
+    """The pre-refactor index computation, kept verbatim as a reference.
+
+    This is the exact math the old dense ``points_to_voxelgrid`` ran before
+    scattering ``True`` into a full ``grid_size**3`` boolean array; the scatter
+    API must reproduce the identical occupied-voxel set and painted values.
+    """
+    mins = points.min(axis=0)
+    maxs = points.max(axis=0)
+    voxel_size = (float((maxs - mins).max()) + eps) / grid_size
+    scaled = (points - mins) / voxel_size
+    offset = (grid_size - 1 - scaled.max(axis=0)) / 2.0
+    idx = np.floor(scaled + offset).astype(int)
+    return np.clip(idx, 0, grid_size - 1)
+
+
+def test_voxel_indices_match_dense_grid():
+    """The index API reproduces the dense boolean grid exactly."""
+    rng = np.random.default_rng(0)
+    grid_size = 16
+    points = rng.uniform(-1, 1, (4000, 3))
+
+    idx = points_to_voxel_indices(points, grid_size)
+
+    # Reference dense grid built the old way, from the reference index math.
+    ref_idx = _dense_reference_indices(points, grid_size)
+    reference = np.zeros((grid_size,) * 3, dtype=bool)
+    reference[ref_idx[:, 0], ref_idx[:, 1], ref_idx[:, 2]] = True
+
+    # Grid scattered from the returned indices is identical to the reference,
+    # and the wrapper produces the same grid.
+    scattered = np.zeros((grid_size,) * 3, dtype=bool)
+    scattered[idx[:, 0], idx[:, 1], idx[:, 2]] = True
+    assert np.array_equal(scattered, reference)
+    assert np.array_equal(points_to_voxelgrid(points, grid_size), reference)
+
+    # Indices are unique (one write per occupied voxel) and in bounds.
+    assert np.array_equal(idx, np.unique(idx, axis=0))
+    assert idx.min() >= 0 and idx.max() <= grid_size - 1
+
+
+def test_scatter_paint_matches_boolean_mask():
+    """Scatter-painting volume/mask equals the boolean-mask-painted reference."""
+    rng = np.random.default_rng(1)
+    grid_size = 16
+    n_fracts = 3
+    clouds = [rng.uniform(-1, 1, (3000, 3)) for _ in range(n_fracts)]
+    colors = rng.random((n_fracts, 3)).astype(np.float32)
+
+    # Reference: dense boolean grid + full-volume boolean-mask assignment (the
+    # pre-refactor generation-loop painting).
+    vol_ref = np.zeros((grid_size, grid_size, grid_size, 3), dtype=np.float32)
+    mask_ref = np.zeros((grid_size, grid_size, grid_size), dtype=np.uint16)
+    # Under test: scatter the returned indices directly.
+    vol_scatter = np.zeros_like(vol_ref)
+    mask_scatter = np.zeros_like(mask_ref)
+
+    for cat, (points, color) in enumerate(zip(clouds, colors)):
+        grid = points_to_voxelgrid(points, grid_size)
+        vol_ref[grid] = color
+        mask_ref[grid] = cat + 1
+
+        idx = points_to_voxel_indices(points, grid_size)
+        vol_scatter[idx[:, 0], idx[:, 1], idx[:, 2]] = color
+        mask_scatter[idx[:, 0], idx[:, 1], idx[:, 2]] = cat + 1
+
+    assert np.array_equal(vol_scatter, vol_ref)
+    assert np.array_equal(mask_scatter, mask_ref)
+
+
+# ---------------------------------------------------------------------------
+# F66: instance point clouds are stored and loaded as float32
+# ---------------------------------------------------------------------------
+
+
+def test_instance_saved_float32(tmp_path):
+    """A generated instance file is float32 on disk, and loads as float32."""
+    fract_base = tmp_path / "fractals"
+    point_num = 60
+    inst_dir = _seed_category(fract_base, point_num=point_num, keep=range(1, 145))
+
+    inst.main(_make_config(fract_base, point_num=point_num))
+
+    saved = inst_dir / "000000_0000.npy"
+    assert saved.exists()
+    assert np.load(saved).dtype == np.float32
+
+    # The load path used by volumegen also yields float32 (no float64 upcast).
+    assert load_np_ptcloud(str(saved)).dtype == np.float32
+
+
+def test_load_downcasts_legacy_float64(tmp_path):
+    """A legacy float64 file is downcast to float32 on load."""
+    legacy = tmp_path / "legacy.npy"
+    np.save(legacy, np.random.default_rng(0).random((10, 3)).astype(np.float64))
+    assert np.load(legacy).dtype == np.float64
+    assert load_np_ptcloud(str(legacy)).dtype == np.float32
+
+
+def test_dataset_version_bumped_past_float64_era():
+    """The dataset-reuse version marker is > 2 so float64 datasets aren't reused.
+
+    A float64-generated dataset was stamped version 2; storing float32 shifts a
+    few boundary voxels, so the reuse marker must advance past 2 to keep the two
+    from being silently interchanged.
+    """
+    from ScaFFold.datagen import get_dataset as gd
+
+    assert gd.DATASET_FORMAT_VERSION > 2

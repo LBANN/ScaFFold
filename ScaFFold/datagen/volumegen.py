@@ -23,24 +23,34 @@ import numpy as np
 from mpi4py import MPI
 
 from ScaFFold.utils.config_utils import Config
-from ScaFFold.utils.data_types import DEFAULT_NP_DTYPE, MASK_DTYPE, VOLUME_DTYPE
+from ScaFFold.utils.data_types import MASK_DTYPE, VOLUME_DTYPE
 from ScaFFold.utils.utils import setup_mpi_logger
 
 
 def load_np_ptcloud(path: str) -> np.ndarray:
     """
-    Read a .npy file and return an (N,3) array of dtype float64.
+    Read a .npy point cloud and return an (N, 3) float32 array.
+
+    Coordinates are normalized to roughly [-1, 1] and only ever binned into
+    integer voxel indices, so float32 carries ample precision while halving the
+    read bandwidth this incurs on every rank. A legacy float64 file is downcast
+    here so voxelization is dtype-consistent with freshly generated instances.
     """
     pts = np.load(path)
-    return pts.astype(DEFAULT_NP_DTYPE, copy=False)
+    return pts.astype(np.float32, copy=False)
 
 
-def points_to_voxelgrid(
+def points_to_voxel_indices(
     points: np.ndarray, grid_size: int, eps: float = 1e-6
 ) -> np.ndarray:
     """
-    Convert an (N,3) float64 point cloud directly into a boolean voxel grid
-    of shape (grid_size, grid_size, grid_size).
+    Map an (N, 3) point cloud to the integer voxel indices it occupies.
+
+    Returns a (K, 3) int array of the unique voxel coordinates on a
+    ``grid_size**3`` grid. Scattering these straight into a volume/mask
+    (``arr[idx[:, 0], idx[:, 1], idx[:, 2]] = value``) paints exactly the
+    occupied voxels in O(K), avoiding a dense ``grid_size**3`` allocation and a
+    full-volume boolean-mask traversal per cloud.
 
     Normalization is isotropic: all three axes are divided by the single
     largest extent and the result is centered in the grid, so a fractal's
@@ -54,11 +64,11 @@ def points_to_voxelgrid(
     """
     if not np.isfinite(points).all():
         raise ValueError(
-            "points_to_voxelgrid received non-finite coordinates "
+            "points_to_voxel_indices received non-finite coordinates "
             "(NaN or inf); refusing to rasterize corrupt point cloud"
         )
 
-    # 1) Axis-aligned bounding box in float64
+    # 1) Axis-aligned bounding box.
     mins = points.min(axis=0)
     maxs = points.max(axis=0)
 
@@ -79,10 +89,24 @@ def points_to_voxelgrid(
     # 5) Clip to valid range (guards float rounding at the boundaries).
     idx = np.clip(idx, 0, grid_size - 1)
 
-    # 6) Scatter into a boolean grid
+    # 6) Collapse coincident points to their shared voxel: the occupied set is
+    #    what gets painted, so one index (and one write) per voxel suffices.
+    return np.unique(idx, axis=0)
+
+
+def points_to_voxelgrid(
+    points: np.ndarray, grid_size: int, eps: float = 1e-6
+) -> np.ndarray:
+    """
+    Convert an (N, 3) point cloud into a boolean voxel grid of shape
+    (grid_size, grid_size, grid_size).
+
+    Thin wrapper over :func:`points_to_voxel_indices` for callers that want a
+    dense occupancy grid; the generation loop scatters the indices directly.
+    """
+    idx = points_to_voxel_indices(points, grid_size, eps)
     grid = np.zeros((grid_size, grid_size, grid_size), dtype=bool)
     grid[idx[:, 0], idx[:, 1], idx[:, 2]] = True
-
     return grid
 
 
@@ -261,14 +285,18 @@ def main(config: Dict):
                         )
 
                     points = load_np_ptcloud(point_cloud_path)
-                    mask3d = points_to_voxelgrid(points, grid_size)
+                    voxel_idx = points_to_voxel_indices(points, grid_size)
 
-                    assert mask3d.shape == volume.shape[:3], (
-                        f"mask3d {mask3d.shape} != volume spatial dims {volume.shape[:3]}"
+                    assert voxel_idx.shape[1] == volume.ndim - 1, (
+                        f"voxel index width {voxel_idx.shape[1]} != volume spatial "
+                        f"dims {volume.ndim - 1}"
                     )
 
-                    volume[mask3d] = fractal_color
-                    mask[mask3d] = curr_category + 1
+                    # Scatter only the occupied voxels: O(points) writes instead
+                    # of two full-volume boolean-mask traversals per fractal.
+                    rows, cols, depths = voxel_idx[:, 0], voxel_idx[:, 1], voxel_idx[:, 2]
+                    volume[rows, cols, depths] = fractal_color
+                    mask[rows, cols, depths] = curr_category + 1
 
                 # Determine destination folder
                 subdir = "validation" if global_vol_idx in val_indices else "training"

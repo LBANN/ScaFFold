@@ -35,6 +35,12 @@ from ScaFFold.utils.utils import setup_mpi_logger
 
 DEFAULT_NP_DTYPE = np.float64
 
+# Point clouds are normalized to roughly [-1, 1] and only ever binned into
+# integer voxel indices, so float32 preserves the rasterized result while
+# halving on-disk size and read/write bandwidth. The IFS parameter and weight
+# CSVs keep DEFAULT_NP_DTYPE (float64) so generation arithmetic is unchanged.
+POINTCLOUD_SAVE_DTYPE = np.float32
+
 logger = logging.getLogger(__name__)
 
 # Temp files written during an atomic save carry this prefix so the six-digit
@@ -361,8 +367,10 @@ def main(config: Config):
             config.seed,
         )
 
-        # Force point_data to be contiguous
-        points_contiguous = np.ascontiguousarray(points, dtype=DEFAULT_NP_DTYPE)
+        # Force point_data to be contiguous and store as float32 (see
+        # POINTCLOUD_SAVE_DTYPE): ample precision for voxel binning at half the
+        # disk and bandwidth cost.
+        points_contiguous = np.ascontiguousarray(points, dtype=POINTCLOUD_SAVE_DTYPE)
 
         # Construct the output path
         out_dir = Path(instance_write_dir) / f"{category:06d}"
