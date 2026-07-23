@@ -224,10 +224,10 @@ class BaseTrainer:
             # zero samples (fewer validation samples than data-parallel
             # replicas). The metric reduction sums dice and sample counts across
             # the data-parallel group, so an empty rank simply contributes zero
-            # and the global mean stays correct. Only the non-distributed /
-            # single-replica case -- where an empty loader means there is no
-            # validation data at all -- is a real error.
-            if self.config.dist and self.data_num_replicas > 1:
+            # and the global mean stays correct. Only the single-replica case
+            # -- where an empty loader means there is no validation data at
+            # all -- is a real error.
+            if self.data_num_replicas > 1:
                 self.log.warning(
                     "Validation DataLoader has zero batches on this rank "
                     f"(n_val={self.n_val}, data_num_replicas={self.data_num_replicas}); "

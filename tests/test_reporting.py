@@ -127,9 +127,9 @@ class TestDiceFigure:
         # Find which savefig calls correspond to Dice and Loss
         dice_fig = next((s for s in saved if s["file"] == "val_dice.png"), None)
         assert dice_fig is not None, "val_dice.png figure was not created"
-        assert np.allclose(
-            dice_fig["ydata"], val_dice_col
-        ), "val_dice.png does not contain the Dice curve"
+        assert np.allclose(dice_fig["ydata"], val_dice_col), (
+            "val_dice.png does not contain the Dice curve"
+        )
 
 
 class TestMaskPanelLabels:
@@ -244,8 +244,6 @@ class TestTorchProfiler:
 
         # The fix should have an independent if statement for torch profiler
         # after the Caliper try/except block
-        assert "elif" not in code or (
-            code.count("if") > code.count("elif")
-        ), "Logic should use if, not elif chains for independent profiler checks"
-
-
+        assert "elif" not in code or (code.count("if") > code.count("elif")), (
+            "Logic should use if, not elif chains for independent profiler checks"
+        )

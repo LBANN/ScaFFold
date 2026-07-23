@@ -14,10 +14,9 @@
 
 """Shared fixtures for the ScaFFold test suite.
 
-Everything here is designed to run against the *current* (partially buggy)
-code at the smallest workable scale (16^3 volumes, 1 U-Net layer, CPU,
-``dist=0``) so per-batch tests can build real objects without a GPU, an MPI
-launcher, or the datagen pipeline.
+Everything here is designed to run at the smallest workable scale (16^3
+volumes, 1 U-Net layer, CPU, no parallel strategy) so per-batch tests can
+build real objects without a GPU, an MPI launcher, or the datagen pipeline.
 
 Key facts baked into these fixtures (verified empirically against the code):
 
@@ -63,6 +62,26 @@ if str(REPO_ROOT) not in sys.path:
 
 
 # ---------------------------------------------------------------------------
+# singleton launcher environment
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def singleton_launcher_env(monkeypatch):
+    """Provide a one-rank launcher environment for every test.
+
+    ScaFFold always runs as a distributed job; the supported singleton case is
+    a one-rank launch, where the launcher exports rank/size variables. The
+    trainer and worker read them with ``required=True``, so single-process
+    tests need them present. Tests that exercise launcher detection delete
+    them explicitly.
+    """
+    monkeypatch.setenv("RANK", os.environ.get("RANK", "0"))
+    monkeypatch.setenv("WORLD_SIZE", os.environ.get("WORLD_SIZE", "1"))
+    monkeypatch.setenv("LOCAL_RANK", os.environ.get("LOCAL_RANK", "0"))
+
+
+# ---------------------------------------------------------------------------
 # tiny_config
 # ---------------------------------------------------------------------------
 
@@ -100,7 +119,6 @@ _BASE_CONFIG = {
     "more_determinism": 0,
     "datagen_from_scratch": 0,
     "train_from_scratch": 1,
-    "dist": 0,
     "torch_amp": 0,
     "framework": "torch",
     "checkpoint_dir": "checkpoints",
@@ -196,7 +214,9 @@ def _write_split(
     for i in range(count):
         if legacy:
             volume = rng.random((n, n, n, 3), dtype=np.float32)
-            mask = rng.choice(np.asarray(legacy_values, dtype=np.uint16), size=(n, n, n))
+            mask = rng.choice(
+                np.asarray(legacy_values, dtype=np.uint16), size=(n, n, n)
+            )
             mask = mask.astype(np.uint16)
         else:
             volume = rng.random((3, n, n, n), dtype=np.float32)
@@ -379,12 +399,40 @@ def run_dir(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# one-rank gloo process group
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def gloo_group_1rank():
+    """Initialize (if needed) a one-rank gloo process group for the test.
+
+    The trainer path is unconditionally distributed (CE-weight estimation,
+    metric reductions, and checkpoint broadcasts all issue collectives), so
+    even single-process trainer tests need an initialized default group. If a
+    group already exists it is reused and left alone; otherwise one is created
+    and destroyed when the test ends.
+    """
+    import torch.distributed as dist
+
+    created = False
+    if not dist.is_initialized():
+        os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
+        os.environ.setdefault("MASTER_PORT", "29511")
+        dist.init_process_group(backend="gloo", rank=0, world_size=1)
+        created = True
+    yield
+    if created and dist.is_initialized():
+        dist.destroy_process_group()
+
+
+# ---------------------------------------------------------------------------
 # tiny_trainer
 # ---------------------------------------------------------------------------
 
 
 @pytest.fixture
-def tiny_trainer(tiny_config, tiny_dataset, tmp_path):
+def tiny_trainer(tiny_config, tiny_dataset, tmp_path, gloo_group_1rank):
     """Factory building a real ``PyTorchTrainer`` on CPU with ``ps=None``.
 
     Usage::
@@ -393,8 +441,8 @@ def tiny_trainer(tiny_config, tiny_dataset, tmp_path):
         trainer = tiny_trainer(config_overrides={"target_dice": 0.0})
 
     The trainer is constructed against a fresh ``tiny_dataset`` (v2) and a real
-    1-layer U-Net. ``dist=0`` and ``ps=None`` (a real ``ParallelStrategy`` needs
-    a process group, which single-process CPU tests avoid).
+    1-layer U-Net, with ``ps=None`` (a real ``ParallelStrategy`` needs a
+    process group, which single-process CPU tests avoid).
 
     KNOWN CONSTRAINT: the forward path (``_run_training_batch``) is hardwired
     through DistConv and cannot run with ``ps=None``
@@ -429,7 +477,6 @@ def tiny_trainer(tiny_config, tiny_dataset, tmp_path):
             "dataset_dir": str(dataset_root),
             "n_categories": n_categories,
             "ce_weight_sample_fraction": 1.0,
-            "dist": 0,
             "torch_amp": 0,
             "dataloader_num_workers": 0,
         }

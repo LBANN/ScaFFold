@@ -119,7 +119,9 @@ def _make_batch(pred_labels, true_labels, n_classes):
     ``image`` is the one-hot encoding of the *predicted* labels (the stub net
     turns it into logits); ``mask`` holds the ground-truth labels.
     """
-    images = torch.stack([_one_hot_logits(p.unsqueeze(0), n_classes)[0] for p in pred_labels])
+    images = torch.stack(
+        [_one_hot_logits(p.unsqueeze(0), n_classes)[0] for p in pred_labels]
+    )
     masks = torch.stack(list(true_labels))
     return {"image": images, "mask": masks}
 
@@ -205,8 +207,12 @@ def test_dice_monotone_in_confidence(eval_env):
     batch = _make_batch([pred_labels], [true_labels], n_classes)
     expected = _foreground_hard_dice(pred_labels, true_labels, n_classes)
 
-    score_low = _val_score(_run(evaluate, ps, _ScaledLogits(2.0), [batch], n_categories))
-    score_high = _val_score(_run(evaluate, ps, _ScaledLogits(20.0), [batch], n_categories))
+    score_low = _val_score(
+        _run(evaluate, ps, _ScaledLogits(2.0), [batch], n_categories)
+    )
+    score_high = _val_score(
+        _run(evaluate, ps, _ScaledLogits(20.0), [batch], n_categories)
+    )
 
     assert score_low == pytest.approx(score_high, abs=1e-6)
     assert score_low == pytest.approx(expected, abs=1e-5)
@@ -273,8 +279,10 @@ def test_val_loss_sample_weighted(eval_env):
 
     def scaled_batch(indices):
         images = torch.stack(
-            [_one_hot_logits(specs[i][0].unsqueeze(0), n_classes)[0] * specs[i][2]
-             for i in indices]
+            [
+                _one_hot_logits(specs[i][0].unsqueeze(0), n_classes)[0] * specs[i][2]
+                for i in indices
+            ]
         )
         masks = torch.stack([specs[i][1] for i in indices])
         return {"image": images, "mask": masks}

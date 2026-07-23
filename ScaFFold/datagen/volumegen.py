@@ -254,7 +254,9 @@ def main(config: Dict):
                     dtype=VOLUME_DTYPE,
                 )
                 mask = np.full(
-                    (config.vol_size, config.vol_size, config.vol_size), 0, dtype=MASK_DTYPE
+                    (config.vol_size, config.vol_size, config.vol_size),
+                    0,
+                    dtype=MASK_DTYPE,
                 )
 
                 global_vol_idx = curr_vol[0]
@@ -294,7 +296,11 @@ def main(config: Dict):
 
                     # Scatter only the occupied voxels: O(points) writes instead
                     # of two full-volume boolean-mask traversals per fractal.
-                    rows, cols, depths = voxel_idx[:, 0], voxel_idx[:, 1], voxel_idx[:, 2]
+                    rows, cols, depths = (
+                        voxel_idx[:, 0],
+                        voxel_idx[:, 1],
+                        voxel_idx[:, 2],
+                    )
                     volume[rows, cols, depths] = fractal_color
                     mask[rows, cols, depths] = curr_category + 1
 
@@ -311,7 +317,9 @@ def main(config: Dict):
                 with open(vol_file, "wb") as f:
                     np.save(f, volume_to_save)
 
-                mask_file = os.path.join(mask_path, subdir, f"{global_vol_idx}_mask.npy")
+                mask_file = os.path.join(
+                    mask_path, subdir, f"{global_vol_idx}_mask.npy"
+                )
                 with open(mask_file, "wb") as f:
                     np.save(f, mask_to_save)
 

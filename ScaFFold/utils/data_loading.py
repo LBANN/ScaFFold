@@ -149,9 +149,7 @@ class BasicDataset(Dataset):
             for entry in self.mask_dir.iterdir()
             if entry.is_file() and not entry.name.startswith(".")
         ]
-        self._mask_paths = self._index_paths_by_stem(
-            self.mask_dir, mask_files, "mask"
-        )
+        self._mask_paths = self._index_paths_by_stem(self.mask_dir, mask_files, "mask")
 
         # Belt-and-braces: when a process group is live, verify every rank built
         # the identical id list. Any residual divergence (e.g. inconsistent
@@ -200,9 +198,7 @@ class BasicDataset(Dataset):
                 with open(pickle_path, "rb") as handle:
                     values = pickle.load(handle)["mask_values"]
             except (OSError, KeyError, pickle.UnpicklingError) as exc:
-                customlog(
-                    f"Ignoring unreadable mask-values file {pickle_path}: {exc}"
-                )
+                customlog(f"Ignoring unreadable mask-values file {pickle_path}: {exc}")
                 continue
             union.update(np.asarray(values).reshape(-1).tolist())
 
@@ -335,7 +331,9 @@ class BasicDataset(Dataset):
         try:
             return self._image_paths[name]
         except KeyError:
-            raise KeyError(f"No image file found for the ID {name} in {self.images_dir}")
+            raise KeyError(
+                f"No image file found for the ID {name} in {self.images_dir}"
+            )
 
     def _mask_path(self, name):
         key = name + self.mask_suffix

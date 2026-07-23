@@ -62,9 +62,7 @@ def test_ce_log_probs_path_matches_cross_entropy():
         fused = compute_sharded_cross_entropy_loss(
             preds, labels, None, (1,), "cpu", w, log_probs=log_probs
         )
-        plain = compute_sharded_cross_entropy_loss(
-            preds, labels, None, (1,), "cpu", w
-        )
+        plain = compute_sharded_cross_entropy_loss(preds, labels, None, (1,), "cpu", w)
         assert torch.allclose(fused, ref, atol=1e-6)
         assert torch.allclose(plain, ref, atol=1e-6)
 
@@ -92,9 +90,7 @@ def test_ce_uses_single_spatial_collective(monkeypatch):
 
     calls["n"] = 0
     weights = torch.rand(4) + 0.5
-    losses.compute_sharded_cross_entropy_loss(
-        preds, labels, None, (1,), "cpu", weights
-    )
+    losses.compute_sharded_cross_entropy_loss(preds, labels, None, (1,), "cpu", weights)
     assert calls["n"] == 1
 
 
@@ -167,9 +163,7 @@ def test_evaluate_defers_item_sync_to_end():
     # accumulates device tensors. Check the code (comments stripped) before
     # "net.train()" has no per-batch host sync.
     loop_region = src.split("net.train()")[0]
-    code_lines = [
-        line.split("#", 1)[0] for line in loop_region.splitlines()
-    ]
+    code_lines = [line.split("#", 1)[0] for line in loop_region.splitlines()]
     code = "\n".join(code_lines)
     assert ".item()" not in code
 

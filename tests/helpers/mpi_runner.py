@@ -82,14 +82,11 @@ def _faulthandler_preamble(timeout: int) -> str:
 def _wrap_script(script: str, timeout: int) -> str:
     """Return source that installs the faulthandler preamble then runs ``script``."""
     script_path = Path(script).resolve()
-    return (
-        _faulthandler_preamble(timeout)
-        + textwrap.dedent(
-            f"""\
+    return _faulthandler_preamble(timeout) + textwrap.dedent(
+        f"""\
             import runpy as _runpy
             _runpy.run_path({str(script_path)!r}, run_name="__main__")
             """
-        )
     )
 
 
@@ -225,9 +222,7 @@ def torchrun_gloo(
     # torchrun takes a script path (not ``-c``), so materialize the wrapped
     # source to a temp file for the duration of the run.
     tmp_dir = child_env.get("CLAUDE_CODE_TMPDIR") or tempfile.gettempdir()
-    fd, wrapper_path = tempfile.mkstemp(
-        suffix="_torchrun_wrapper.py", dir=tmp_dir
-    )
+    fd, wrapper_path = tempfile.mkstemp(suffix="_torchrun_wrapper.py", dir=tmp_dir)
     try:
         with os.fdopen(fd, "w") as handle:
             handle.write(wrapped)

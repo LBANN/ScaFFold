@@ -50,7 +50,6 @@ def test_tiny_config_builds(tiny_config):
     assert config.unet_layers == 1
     assert config.n_categories == 2
     assert config.local_batch_size == 1
-    assert config.dist is False  # dist=0 -> bool(False)
 
     # Extra attributes the trainer/worker read that Config.__init__ omits.
     assert config._parallel_strategy is None
@@ -154,8 +153,7 @@ def test_tiny_trainer_cleanup_and_train(tiny_trainer):
     exercises the full setup / teardown control flow (and CSV bootstrap)
     WITHOUT hitting the DistConv forward path, which cannot run with ``ps=None``
     (``DCTensor.from_shard(x, None)`` dereferences ``None.shard_dim`` and
-    segfaults -- a genuine product limitation on CPU/``dist=0``, tracked
-    separately from Batch 0).
+    segfaults -- a known DistConv limitation).
     """
     trainer = tiny_trainer(config_overrides={"target_dice": 0.0, "epochs": 1})
 

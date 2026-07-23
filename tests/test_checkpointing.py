@@ -210,9 +210,9 @@ def test_async_best_decision_not_racy(tmp_path, monkeypatch):
     # Slow the background writer so any probe would read a half-written file.
     real_write = CheckpointManager._write_to_disk
 
-    def slow_write(state_dict, last_path, best_path, is_best):
+    def slow_write(state_dict, last_path, best_path, is_best, log=None):
         time.sleep(0.3)
-        return real_write(state_dict, last_path, best_path, is_best)
+        return real_write(state_dict, last_path, best_path, is_best, log)
 
     monkeypatch.setattr(CheckpointManager, "_write_to_disk", staticmethod(slow_write))
 
@@ -239,9 +239,7 @@ def test_async_best_decision_not_racy(tmp_path, monkeypatch):
     assert best_loads == []
 
     monkeypatch.setattr(torch, "load", real_load)
-    final_best = torch.load(
-        mgr.best_ckpt_path, map_location="cpu", weights_only=False
-    )
+    final_best = torch.load(mgr.best_ckpt_path, map_location="cpu", weights_only=False)
     assert final_best["epoch"] == 3
     assert final_best["val_loss_avg"] == pytest.approx(0.2)
 
@@ -380,9 +378,7 @@ def test_resume_nonzero_rank_never_reads_disk(tmp_path, monkeypatch):
     # Rank 0's on-disk checkpoint, and the object it would broadcast.
     mgr0, _ = _make_manager(tmp_path)
     mgr0.save_checkpoint(epoch=5, val_loss_avg=0.5, extras={"train_mask_values": [3]})
-    good_ckpt = torch.load(
-        mgr0.last_ckpt_path, map_location="cpu", weights_only=False
-    )
+    good_ckpt = torch.load(mgr0.last_ckpt_path, map_location="cpu", weights_only=False)
 
     # A peer rank restoring from the same directory.
     mgr1, _ = _make_manager(tmp_path)

@@ -52,6 +52,8 @@ if __name__ == "__main__":
         # 3D mask or similar
         ax.voxels(data, edgecolor="k")
     else:
-        raise ValueError(f"Expected 3D or 4D array, got {data.ndim}D with shape {data.shape}")
+        raise ValueError(
+            f"Expected 3D or 4D array, got {data.ndim}D with shape {data.shape}"
+        )
 
     plt.show()

@@ -132,7 +132,7 @@ def _get_env_setup(env: Mapping[str, str] | None = None) -> str:
             f"if [ -f {activate} ]; then",
             f"    source {activate} || true",
             "else",
-            f"    echo \"WARNING: virtualenv activate script not found at {venv_path}/bin/activate\" >&2",
+            f'    echo "WARNING: virtualenv activate script not found at {venv_path}/bin/activate" >&2',
             "fi",
         ]
     else:
@@ -258,9 +258,7 @@ def _sniff_launch_shape(env: Mapping[str, str]) -> tuple[int | None, int, int]:
     return nodes, (total_tasks or 1), world_size
 
 
-def create_restart_script(
-    run_dir: str | Path, world_size: int | None = None
-) -> Path:
+def create_restart_script(run_dir: str | Path, world_size: int | None = None) -> Path:
     """Create ``run_dir/restart.sh`` for resuming this run.
 
     The launch shape (single-process vs. multi-rank) is derived from ground

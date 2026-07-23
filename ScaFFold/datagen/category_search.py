@@ -38,9 +38,7 @@ rank = None
 size = None
 
 
-def compute_round_attempts(
-    categories_remaining, size, datagen_batch_size, accept_rate
-):
+def compute_round_attempts(categories_remaining, size, datagen_batch_size, accept_rate):
     """Per-rank attempt count for the next round.
 
     A fixed ``datagen_batch_size`` per rank overshoots badly once few categories

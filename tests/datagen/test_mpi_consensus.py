@@ -179,7 +179,7 @@ def test_reuse_decision_is_broadcast_not_scanned_per_rank(tmp_path, monkeypatch)
     # reusable dataset where rank 0's scan will find it.
     comm = FakeComm(rank=0, size=2)
     monkeypatch.setattr(gd, "MPI", FakeMPI(comm))
-    monkeypatch.setattr(gd, "_git_commit_short", lambda: "abc123")
+    monkeypatch.setattr(gd, "_git_commit_short", lambda log: "abc123")
 
     # First call: rank 0 scans, finds nothing, would try to generate. Instead
     # we pre-seed a reusable dataset so the decision is 'reuse'.
@@ -214,7 +214,7 @@ def test_non_root_follows_broadcast_reuse_decision(tmp_path, monkeypatch):
     broadcast_decision = ("reuse", str(tmp_path / "datasets" / "cid" / "chosen"))
     comm = FakeComm(rank=1, size=2, bcast_returns=[broadcast_decision])
     monkeypatch.setattr(gd, "MPI", FakeMPI(comm))
-    monkeypatch.setattr(gd, "_git_commit_short", lambda: "abc123")
+    monkeypatch.setattr(gd, "_git_commit_short", lambda log: "abc123")
 
     result = gd.get_dataset(config)
 
@@ -269,7 +269,7 @@ def test_generation_failure_gathers_on_every_rank_and_raises(tmp_path, monkeypat
     # Root's generate decision is computed in-function; make its scan find
     # nothing and its staging mkdir land inside tmp_path.
     monkeypatch.setattr(gd, "MPI", FakeMPI(comm))
-    monkeypatch.setattr(gd, "_git_commit_short", lambda: "abc123")
+    monkeypatch.setattr(gd, "_git_commit_short", lambda log: "abc123")
 
     def boom(_config):
         raise RuntimeError("volumegen exploded")
@@ -304,7 +304,7 @@ def test_non_root_raises_on_failure_instead_of_returning(tmp_path, monkeypatch):
         rank=1, size=2, dest=dest, allreduce_result=0, allgather_peers=["rank 0: boom"]
     )
     monkeypatch.setattr(gd, "MPI", FakeMPI(comm))
-    monkeypatch.setattr(gd, "_git_commit_short", lambda: "abc123")
+    monkeypatch.setattr(gd, "_git_commit_short", lambda log: "abc123")
     monkeypatch.setattr(volumegen, "main", lambda _config: None)
 
     with pytest.raises(RuntimeError) as excinfo:
@@ -328,7 +328,7 @@ def test_generation_success_finalizes_and_returns(tmp_path, monkeypatch):
 
     comm = FakeComm(rank=0, size=2, allreduce_result=1)
     monkeypatch.setattr(gd, "MPI", FakeMPI(comm))
-    monkeypatch.setattr(gd, "_git_commit_short", lambda: "abc123")
+    monkeypatch.setattr(gd, "_git_commit_short", lambda log: "abc123")
     monkeypatch.setattr(volumegen, "main", lambda _config: None)
 
     result = gd.get_dataset(config)

@@ -141,7 +141,7 @@ def test_up_pad_guarded_when_diffs_zero():
     up = Up(in_channels=128, out_channels=64, group_norm_groups=8, trilinear=False)
     up.eval()
     x1 = torch.randn(1, 128, 16, 16, 16)  # pre-upsample (16x16x16)
-    x2 = torch.randn(1, 64, 32, 32, 32)   # skip (32x32x32) -- exact 2x match
+    x2 = torch.randn(1, 64, 32, 32, 32)  # skip (32x32x32) -- exact 2x match
 
     # Spy on F.pad to count calls
     pad_call_count = 0
@@ -166,12 +166,14 @@ def test_up_pad_guarded_when_diffs_zero():
         x_cat = torch.cat([x2, x1_padded_ref], dim=1)
         out_ref = up.conv(x_cat)
 
-    assert torch.equal(out_exact, out_ref), "Output should match explicit zero-pad reference"
+    assert torch.equal(out_exact, out_ref), (
+        "Output should match explicit zero-pad reference"
+    )
 
     # Case 2: nonzero diff -- guard should still allow pad to run
     pad_call_count = 0
     x1_smaller = torch.randn(1, 128, 15, 15, 15)  # 15x15x15, will upsample to 30x30x30
-    x2_larger = torch.randn(1, 64, 32, 32, 32)    # 32x32x32 -- nonzero diff
+    x2_larger = torch.randn(1, 64, 32, 32, 32)  # 32x32x32 -- nonzero diff
 
     with patch("torch.nn.functional.pad", side_effect=counting_pad):
         with torch.no_grad():
@@ -180,9 +182,9 @@ def test_up_pad_guarded_when_diffs_zero():
     nonzero_match_pad_calls = pad_call_count
 
     # When there's a diff, F.pad must be called
-    assert (
-        nonzero_match_pad_calls > 0
-    ), "F.pad should be called when spatial diffs are nonzero"
+    assert nonzero_match_pad_calls > 0, (
+        "F.pad should be called when spatial diffs are nonzero"
+    )
 
     # Now the key test: if the guard is in place, exact matches should skip pad;
     # if not, both will call pad. We expect exact to be 0 (fixed) but report

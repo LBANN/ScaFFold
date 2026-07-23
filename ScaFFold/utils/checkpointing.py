@@ -422,7 +422,10 @@ class CheckpointManager:
             if is_best:
                 cls._atomic_save(state_dict, best_path)
         except Exception:
-            log.error("Saving checkpoint failed:\n%s", traceback.format_exc())
+            if log is not None:
+                log.error("Saving checkpoint failed:\n%s", traceback.format_exc())
+            else:
+                traceback.print_exc()
             raise
 
     def _transfer_dict_to_cpu(self, obj):

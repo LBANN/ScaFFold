@@ -184,9 +184,7 @@ def evaluate(
                 # predictions also make the empty/empty guard in
                 # compute_sharded_dice reachable (a correctly-predicted absent
                 # class scores 1, not ~0).
-                mask_pred_hard = labels_to_onehot(
-                    local_preds.argmax(dim=1), n_classes
-                )
+                mask_pred_hard = labels_to_onehot(local_preds.argmax(dim=1), n_classes)
                 dice_score_hard = compute_sharded_dice(
                     mask_pred_hard, mask_true_onehot, spatial_mesh
                 )

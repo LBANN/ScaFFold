@@ -14,15 +14,19 @@
 
 """Worker and distributed-initialization tests.
 
-Covers the non-distributed (dist=0) worker path, DDP device selection under
+Covers the one-rank ("singleton") worker path, DDP device selection under
 per-rank GPU masking, launcher environment detection, and the ordering of
 device binding relative to process-group initialization.
 """
+
+import logging
 
 import torch
 
 import ScaFFold.utils.distributed as distributed_mod
 import ScaFFold.worker as worker_mod
+
+_TEST_LOG = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Launcher environment detection
@@ -104,7 +108,7 @@ def _record_initialize_dist(monkeypatch):
     monkeypatch.setattr(
         torch.distributed, "barrier", lambda *a, **kw: calls.append("barrier")
     )
-    distributed_mod.initialize_dist(rendezvous="env")
+    distributed_mod.initialize_dist(_TEST_LOG, rendezvous="env")
     return calls
 
 
@@ -144,32 +148,53 @@ def test_ddp_wrap_uses_get_device(monkeypatch):
     device = torch.device("cuda:0")
     model = torch.nn.Linear(2, 2)
     worker_mod.wrap_model_ddp(model, device, ps=None)
-    assert recorded["device_ids"] == [device]
-    assert recorded["output_device"] == device
+    assert recorded["device_ids"] == [0]
+    assert recorded["output_device"] == 0
+
+
+def test_ddp_wrap_cpu_uses_none(monkeypatch):
+    """On CPU (gloo) DDP requires device_ids/output_device of None."""
+    recorded = {}
+
+    def fake_ddp(model, parallel_strategy=None, **kwargs):
+        recorded.update(kwargs)
+        return model
+
+    monkeypatch.setattr(worker_mod, "DistConvDDP", fake_ddp)
+    worker_mod.wrap_model_ddp(torch.nn.Linear(2, 2), torch.device("cpu"), ps=None)
+    assert recorded["device_ids"] is None
+    assert recorded["output_device"] is None
 
 
 # ---------------------------------------------------------------------------
-# Non-distributed (dist=0) worker path
+# One-rank (singleton) worker path
 # ---------------------------------------------------------------------------
 
 
-def _run_worker_nondist(monkeypatch, tiny_config, tiny_dataset, drop_dc_keys):
-    """Run worker.main with dist=0 on CPU; return (config kwargs, trainer)."""
+def test_worker_singleton_smoke(monkeypatch, tiny_config, tiny_dataset):
+    """worker.main completes end to end as a one-rank gloo job on CPU.
+
+    ScaFFold always runs distributed; the supported singleton case is a
+    one-rank launch. The worker initializes the (gloo) process group itself,
+    builds a real unsharded ParallelStrategy, and tears the group down before
+    rank-0 post-processing.
+    """
+    monkeypatch.setenv("MASTER_ADDR", "127.0.0.1")
+    monkeypatch.setenv("MASTER_PORT", "29513")
+    # Force the CPU path so initialize_dist selects gloo: this test must not
+    # depend on a working GPU/NCCL stack.
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+
     cfg = tiny_config()
     kwargs = dict(vars(cfg))
     kwargs.update(
         {
-            "dist": 0,
             "verbose": 0,
-            "_parallel_strategy": None,
             "vol_size": cfg.vol_size,
             "point_num": cfg.point_num,
         }
     )
-    if drop_dc_keys:
-        kwargs.pop("dc_num_shards", None)
-        kwargs.pop("dc_shard_dims", None)
-        kwargs.pop("dc_total_shards", None)
+    kwargs.pop("_parallel_strategy", None)
 
     dataset_path = tiny_dataset()
     monkeypatch.setattr(
@@ -183,34 +208,21 @@ def _run_worker_nondist(monkeypatch, tiny_config, tiny_dataset, drop_dc_keys):
         seen["trainer"] = self
         # Write one epoch row so post-processing has data to score.
         with open(self.outfile_path, "a", newline="") as outfile:
-            outfile.write("1,1.0,1.0,1.0,1.0,0.5,0.96,10.0\n")
+            outfile.write("1,1.0,1.0,1.0,1.0,0.5,0.96,10.0,4,4\n")
 
     monkeypatch.setattr(worker_mod.PyTorchTrainer, "train", fake_train)
     result = worker_mod.main(kwargs_dict=kwargs)
-    return result, seen.get("trainer")
+    trainer = seen.get("trainer")
 
-
-def test_worker_nondist_smoke(monkeypatch, tiny_config, tiny_dataset):
-    """worker.main completes end to end with dist=0 on CPU."""
-    result, trainer = _run_worker_nondist(
-        monkeypatch, tiny_config, tiny_dataset, drop_dc_keys=False
-    )
     assert result == 0
     assert trainer is not None
-    # The model was moved to the selected device outside the DDP block.
+    # The model was moved to the selected device.
     param_device = next(trainer.model.parameters()).device
     assert param_device == torch.device("cpu")
-    # ps=None semantics: single shard, world-size-scaled global batch.
-    assert trainer.ps is None
-    assert trainer.spatial_mesh is None
+    # A real (unsharded) parallel strategy is always constructed.
+    assert trainer.ps is not None
+    assert trainer.spatial_mesh is not None
+    # world_size 1, one shard: the global batch equals the per-rank batch.
     assert trainer.config.global_batch_size == trainer.config.local_batch_size
-
-
-def test_dc_num_shards_default(monkeypatch, tiny_config, tiny_dataset):
-    """A config without shard settings falls back to unsharded defaults."""
-    result, trainer = _run_worker_nondist(
-        monkeypatch, tiny_config, tiny_dataset, drop_dc_keys=True
-    )
-    assert result == 0
-    assert trainer.config.dc_num_shards == [1, 1, 1]
-    assert trainer.config.dc_shard_dims == [2, 3, 4]
+    # The worker destroyed the process group before rank-0 post-processing.
+    assert not torch.distributed.is_initialized()

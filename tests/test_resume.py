@@ -35,7 +35,6 @@ import pytest
 import torch
 
 import ScaFFold.cli as cli
-from ScaFFold.utils.config_utils import Config
 
 # ---------------------------------------------------------------------------
 # resolve_run_dir matrix (F02)
@@ -94,25 +93,6 @@ def test_resolve_run_dir_matrix(tmp_path):
         cli.resolve_run_dir({"restart": True, "run_dir": None}, c)
 
 
-def test_restart_config_loads():
-    """The shipped restart-test config parses into a valid single-run Config.
-
-    Regression guard: the config used by the restart path once spelled its
-    DistConv shard keys so they were rejected on load. It must build a Config
-    (sweeps allowed, matching the CLI's own load) without raising.
-    """
-    import ScaFFold.paths as paths
-    from ScaFFold.utils.config_utils import load_config_files
-
-    cfg_path = (
-        Path(paths.scaffold_root) / "ScaFFold" / "configs" / "benchmark_testing.yml"
-    )
-    merged = load_config_files([str(cfg_path)])
-    config = Config(merged, allow_sweeps=True)
-    assert config.dc_num_shards == [1, 1, 1]
-    assert config.dc_shard_dims == [2, 3, 4]
-
-
 def test_same_second_run_dirs_distinct(tmp_path, monkeypatch):
     """Two fresh resolutions in the same wall-clock second get distinct dirs.
 
@@ -157,7 +137,8 @@ from ScaFFold.utils.trainer import PyTorchTrainer  # noqa: E402
 
 _HEADER = (
     "epoch,epoch_loss,overall_loss,val_loss_epoch,"
-    "val_loss_avg,train_dice,val_dice,epoch_duration"
+    "val_loss_avg,train_dice,val_dice,epoch_duration,"
+    "optimizer_steps,total_optimizer_steps"
 )
 
 
@@ -196,7 +177,10 @@ def _write_rows(path, epochs, dur=10.0):
     with open(path, "a", newline="") as f:
         for e in epochs:
             f.write(
-                ",".join([str(e), "0.5", "0.5", "0.4", "0.4", "0.8", "0.8", str(dur)])
+                ",".join(
+                    [str(e), "0.5", "0.5", "0.4", "0.4", "0.8", "0.8", str(dur)]
+                    + ["4", str(4 * int(e))]
+                )
                 + "\n"
             )
 

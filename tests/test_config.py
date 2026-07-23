@@ -193,7 +193,6 @@ def _run_benchmark(monkeypatch, tmp_path, config_updates):
             "command": "benchmark",
             "restart": False,
             "verbose": 0,
-            "dist": 0,
             "config": cfg_file,
             "benchmark_run_dir": str(tmp_path / "run"),
         }
@@ -232,5 +231,3 @@ def test_list_in_scalar_field_fails_fast():
     bad["local_batch_size"] = [1, 2]
     with pytest.raises(ValueError, match="local_batch_size"):
         config_utils.Config(bad)
-
-
