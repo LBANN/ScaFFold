@@ -205,6 +205,56 @@ def test_ids_hash_guard_raises_on_divergence(tmp_path):
     )
 
 
+@pytest.mark.parametrize("backend,expect_gpu", [("nccl", True), ("gloo", False)])
+def test_ids_guard_digest_device_follows_backend(
+    tmp_path, monkeypatch, backend, expect_gpu
+):
+    """The guard's digest tensor lives where the backend can gather it.
+
+    NCCL moves only GPU tensors -- all_gather of a CPU digest fails with
+    ``No backend type associated with device type cpu`` -- while gloo's
+    all_gather supports only CPU tensors. The guard must therefore move the
+    digest to the current CUDA device exactly when the process-group backend
+    is NCCL, and leave it on the CPU for gloo even on GPU-equipped nodes.
+    """
+    root = _build_v2_constant_dataset(tmp_path / "ds", n_volumes=3)
+
+    monkeypatch.setattr(dl.dist, "is_available", lambda: True)
+    monkeypatch.setattr(dl.dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(dl.dist, "get_backend", lambda: backend)
+    monkeypatch.setattr(dl.dist, "get_world_size", lambda: 1)
+    monkeypatch.setattr(dl.dist, "get_rank", lambda: 0)
+
+    gather_calls = []
+
+    def fake_all_gather(gathered, local):
+        gather_calls.append(local)
+        for out in gathered:
+            out.copy_(local)
+
+    monkeypatch.setattr(dl.dist, "all_gather", fake_all_gather)
+
+    # Stand-in for Tensor.cuda that records the move without touching a real
+    # GPU, so the test runs on CPU-only hosts.
+    cuda_moves = []
+
+    def fake_cuda(self, *args, **kwargs):
+        cuda_moves.append(True)
+        return self
+
+    monkeypatch.setattr(torch.Tensor, "cuda", fake_cuda)
+
+    ds = FractalDataset(
+        root / "volumes" / "training",
+        root / "masks" / "training",
+        data_dir=root / "train_unique_mask_vals",
+    )
+
+    assert len(ds) == 3
+    assert len(gather_calls) == 1  # the guard ran exactly once
+    assert (len(cuda_moves) == 1) == expect_gpu
+
+
 # ---------------------------------------------------------------------------
 # F42: legacy label remapping must use one global (union) table
 # ---------------------------------------------------------------------------

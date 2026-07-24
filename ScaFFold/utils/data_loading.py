@@ -212,14 +212,20 @@ class BasicDataset(Dataset):
         """Raise if ranks disagree on ``self.ids`` while a process group is up.
 
         A no-op when torch.distributed is unavailable or uninitialized (CPU unit
-        tests and the ``dist=0`` path), so it costs exactly one small collective
-        only in genuinely distributed runs.
+        tests), so it costs exactly one small collective only in genuinely
+        distributed runs.
         """
         if not (dist.is_available() and dist.is_initialized()):
             return
 
         digest = hashlib.sha256("\n".join(self.ids).encode("utf-8")).digest()
         local = torch.frombuffer(bytearray(digest), dtype=torch.uint8)
+        # The digest must live on a device the process group can move: NCCL
+        # only handles GPU tensors, gloo's all_gather only CPU ones. Key off
+        # the backend rather than CUDA availability so a gloo group on a
+        # GPU-equipped node still takes the CPU path.
+        if dist.get_backend() == dist.Backend.NCCL:
+            local = local.cuda()
         gathered = [torch.empty_like(local) for _ in range(dist.get_world_size())]
         dist.all_gather(gathered, local)
 
