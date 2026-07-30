@@ -318,6 +318,55 @@ def test_v1_label_mapping_global(tmp_path):
     assert np.unique(val_lbl[raw_mask == 6]).tolist() == [6]
 
 
+def test_v1_composite_labels_union_keeps_rows(tmp_path):
+    """Composite (RGB) legacy labels union as whole rows, not flattened scalars.
+
+    Flattening ``(255, 0, 0)`` into the scalars ``{0, 255}`` would leave the
+    remap comparing single channel values against full RGB voxels, so every
+    colored voxel silently falls back to class 0. Each label row must survive
+    intact in the global table for the 4-D remap branch to match it.
+    """
+    black, green, red = (0, 0, 0), (0, 255, 0), (255, 0, 0)
+    raw_mask = np.zeros((4, 4, 4, 3), dtype=np.uint8)
+    raw_mask[0, :2] = green
+    raw_mask[1, 2:] = red
+    volume = np.random.rand(4, 4, 4, 3).astype(np.float32)
+
+    train_vals = [list(black), list(green), list(red)]
+    val_vals = [list(black), list(green)]  # red missing from val's own list
+
+    root = _build_v1_split_dataset(
+        tmp_path / "v1rgb", raw_mask, volume, train_vals, val_vals
+    )
+
+    train_set = FractalDataset(
+        root / "volumes" / "training",
+        root / "masks" / "training",
+        data_dir=root / "train_unique_mask_vals",
+    )
+    val_set = FractalDataset(
+        root / "volumes" / "validation",
+        root / "masks" / "validation",
+        data_dir=root / "val_unique_mask_vals",
+    )
+
+    # Both splits share the global union table of intact label rows.
+    expected_table = [black, green, red]  # sorted union of both pickles
+    assert train_set.mask_values == expected_table
+    assert val_set.mask_values == expected_table
+
+    train_lbl = train_set[0]["mask"].numpy()
+    val_lbl = val_set[0]["mask"].numpy()
+    for color, cls in ((black, 0), (green, 1), (red, 2)):
+        sel = (raw_mask == color).all(-1)
+        assert np.unique(train_lbl[sel]).tolist() == [cls], (
+            f"label {color} did not remap to class {cls} in train"
+        )
+        assert np.unique(val_lbl[sel]).tolist() == [cls], (
+            f"label {color} did not remap to class {cls} in val"
+        )
+
+
 def test_v2_datasets_unaffected(tiny_dataset):
     """v2 datasets load byte-identically to a direct np.load + prepare."""
     root = tiny_dataset(n_categories=3, n_train=3, n_val=2, n=16)

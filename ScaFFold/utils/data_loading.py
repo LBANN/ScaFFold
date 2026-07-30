@@ -200,7 +200,17 @@ class BasicDataset(Dataset):
             except (OSError, KeyError, pickle.UnpicklingError) as exc:
                 customlog(f"Ignoring unreadable mask-values file {pickle_path}: {exc}")
                 continue
-            union.update(np.asarray(values).reshape(-1).tolist())
+            values_arr = np.asarray(values)
+            if values_arr.ndim <= 1:
+                union.update(values_arr.reshape(-1).tolist())
+            else:
+                # Composite labels (e.g. RGB rows) must stay whole: the legacy
+                # remap compares each entry against the mask's channel axis, so
+                # flattening rows into scalars would corrupt the table.
+                union.update(
+                    tuple(row)
+                    for row in values_arr.reshape(values_arr.shape[0], -1).tolist()
+                )
 
         if not union:
             # No sibling pickles discovered; fall back to this split's own list.
