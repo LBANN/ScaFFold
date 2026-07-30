@@ -19,13 +19,13 @@ import os
 import shlex
 import stat
 import sys
+from collections.abc import Mapping
 from pathlib import Path
-from typing import List, Literal, Union
+from typing import List, Union
 
-import torch
-
-# We now primarily rely on torchrun-hpc, but might still detect scheduler for sizing
-Sched = Literal["flux", "slurm", "local"]
+# Profiling toggles that must be reproduced on restart -- but only when they
+# were active in the generating run. Names mirror ScaFFold.utils.perf_measure.
+_PROFILING_ENV_VARS = ("PROFILE_TORCH", "CALI_CONFIG")
 
 
 def _rewrite_config_and_add_restart(cli_args: List[str]) -> List[str]:
@@ -89,33 +89,68 @@ def _bash_array(var_name: str, argv: List[str], var_subs: dict[str, str]) -> str
     return f"{var_name}=( " + " ".join(parts) + " )"
 
 
-def _get_env_setup() -> str:
-    """Return the bash block that sets up the environment based on your stable configuration."""
-    # Dynamically determine the current virtualenv path to reuse the active one
-    venv_path = sys.prefix
+def _detect_venv() -> str | None:
+    """Return the path to the active virtualenv, or None if not in one.
 
-    return f"""
-# --- Begin Environment Setup ---
-# Load Modules
-if command -v module &> /dev/null; then
-    ml cce/21.0.0 cray-mpich/9.1.0 rocm/7.1.1 rccl/fast-env-slows-mpi
-fi
+    Prefers VIRTUAL_ENV (set by ``activate``); falls back to sys.prefix only
+    when it differs from the base interpreter prefix (i.e. a venv is active).
+    """
+    venv = os.environ.get("VIRTUAL_ENV")
+    if venv:
+        return venv
+    base_prefix = getattr(sys, "base_prefix", sys.prefix)
+    if sys.prefix != base_prefix:
+        return sys.prefix
+    return None
 
-# Activate Virtual Environment
-# (Using the one active when this script was generated)
-if [ -f "{venv_path}/bin/activate" ]; then
-    source "{venv_path}/bin/activate"
-else
-    echo "WARNING: Could not find venv activate script at {venv_path}/bin/activate"
-fi
 
-# Environment variables
-export SPINDLE_FLUXOPT=off
-export LD_PRELOAD=/opt/rocm-7.1.1/llvm/lib/libomp.so
+def _get_env_setup(env: Mapping[str, str] | None = None) -> str:
+    """Return a bash block that reproduces only the generating run's environment.
 
-export PROFILE_TORCH=ON
-# --- End Environment Setup ---
-"""
+    Site-specific module loads and library paths are intentionally NOT emitted:
+    the user's shell environment (modules, LD_PRELOAD, etc.) is responsible for
+    those, and hardcoding one site's values makes the script abort or misbehave
+    elsewhere. We only:
+
+      * re-activate the virtualenv that was active when this script was
+        generated, if one can be detected (non-fatal if the path is gone); and
+      * re-export the profiling toggles (PROFILE_TORCH / CALI_CONFIG) that were
+        set in the generating process, so a restarted run reproduces the
+        original run's profiling behavior instead of silently flipping it on.
+    """
+    if env is None:
+        env = os.environ
+
+    lines = ["", "# --- Begin Environment Setup ---"]
+
+    venv_path = _detect_venv()
+    if venv_path is not None:
+        activate = shlex.quote(f"{venv_path}/bin/activate")
+        lines += [
+            "# Re-activate the virtualenv that was active when this script was",
+            "# generated. Non-fatal if it no longer exists on this machine.",
+            f"if [ -f {activate} ]; then",
+            f"    source {activate} || true",
+            "else",
+            f'    echo "WARNING: virtualenv activate script not found at {venv_path}/bin/activate" >&2',
+            "fi",
+        ]
+    else:
+        lines += [
+            "# No virtualenv was active when this script was generated; the",
+            "# caller's shell environment is responsible for the Python setup",
+            "# (module loads, activation, LD_PRELOAD, etc.).",
+        ]
+
+    # Re-export profiling toggles only if the generating run had them set, so
+    # the restart reproduces (rather than perturbs) the original run.
+    for name in _PROFILING_ENV_VARS:
+        if name in env:
+            lines.append(f"export {name}={shlex.quote(env[name])}")
+
+    lines.append("# --- End Environment Setup ---")
+    lines.append("")
+    return "\n".join(lines)
 
 
 def _render_torchrun_hpc_restart(
@@ -190,9 +225,50 @@ exec "${{PY[@]}}"
 """
 
 
-def create_restart_script(run_dir: str | Path) -> Path:
+def _sniff_launch_shape(env: Mapping[str, str]) -> tuple[int | None, int, int]:
+    """Infer (nodes, total_tasks, world_size) from the launch environment.
+
+    Reads, in priority order:
+      1. Flux (FLUX_JOB_SIZE is total tasks, FLUX_JOB_NNODES is node count),
+      2. Slurm (SLURM_NTASKS / SLURM_NPROCS total tasks, SLURM_*NODES nodes),
+      3. generic launcher hints for total rank count: torchrun's WORLD_SIZE,
+         Open MPI's OMPI_COMM_WORLD_SIZE, and PMI's PMI_SIZE.
+
+    ``nodes`` is None when the environment does not report a node count.
+    ``world_size`` is the best available total-rank estimate (>= 1).
     """
-    Create run_dir/restart.sh using torchrun-hpc.
+    nodes: int | None = None
+    total_tasks: int | None = None
+
+    if env.get("FLUX_JOB_ID"):
+        nodes = int(env.get("FLUX_JOB_NNODES", 1))
+        total_tasks = int(env.get("FLUX_JOB_SIZE", 1))
+    elif env.get("SLURM_JOB_ID") or env.get("SLURM_JOBID"):
+        nodes = int(env.get("SLURM_JOB_NUM_NODES") or env.get("SLURM_NNODES") or 1)
+        total_tasks = int(env.get("SLURM_NTASKS") or env.get("SLURM_NPROCS") or 1)
+    else:
+        # No scheduler: fall back to generic launcher hints for the rank count.
+        for key in ("WORLD_SIZE", "OMPI_COMM_WORLD_SIZE", "PMI_SIZE"):
+            val = env.get(key)
+            if val:
+                total_tasks = int(val)
+                break
+
+    world_size = total_tasks if total_tasks else 1
+    return nodes, (total_tasks or 1), world_size
+
+
+def create_restart_script(run_dir: str | Path, world_size: int | None = None) -> Path:
+    """Create ``run_dir/restart.sh`` for resuming this run.
+
+    The launch shape (single-process vs. multi-rank) is derived from ground
+    truth available at generation time. Callers that already know the true rank
+    count (e.g. from ``MPI.COMM_WORLD.Get_size()``) should pass ``world_size``;
+    it takes precedence over environment sniffing. When it is not given, the
+    count is inferred from the scheduler / launcher environment (Flux, Slurm,
+    torchrun, Open MPI, PMI). The multi-rank torchrun-hpc template is emitted
+    whenever the resulting world size is greater than one; the local
+    single-process template is used only for a world size of one.
     """
     run_dir = Path(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -202,29 +278,21 @@ def create_restart_script(run_dir: str | Path) -> Path:
 
     # Detect Environment
     env = os.environ
-    env_setup = _get_env_setup()
+    env_setup = _get_env_setup(env)
 
-    # Detect current job scale
-    nodes = None
-    total_tasks = None
+    # Detect current job scale from the launch environment.
+    nodes, total_tasks, env_world_size = _sniff_launch_shape(env)
 
-    # Try Flux (FLUX_JOB_SIZE is TOTAL tasks)
-    if env.get("FLUX_JOB_ID"):
-        nodes = int(env.get("FLUX_JOB_NNODES", 1))
-        total_tasks = int(env.get("FLUX_JOB_SIZE", 1))
-    # Try Slurm (SLURM_NTASKS is TOTAL tasks)
-    elif env.get("SLURM_JOB_ID") or env.get("SLURM_JOBID"):
-        nodes = int(env.get("SLURM_JOB_NUM_NODES") or env.get("SLURM_NNODES") or 1)
-        total_tasks = int(env.get("SLURM_NTASKS") or env.get("SLURM_NPROCS") or 1)
+    # An explicit world_size (from the caller's communicator) is ground truth
+    # and overrides whatever the environment reported.
+    if world_size is not None:
+        effective_world_size = int(world_size)
+        # Keep total_tasks consistent so tasks-per-node math below is correct.
+        total_tasks = effective_world_size
+    else:
+        effective_world_size = env_world_size
 
-    # Determine if we should use torchrun-hpc
-    is_hpc_env = (
-        (env.get("FLUX_JOB_ID") is not None)
-        or (env.get("SLURM_JOB_ID") is not None)
-        or (env.get("SLURM_JOBID") is not None)
-    )
-
-    use_torchrun = is_hpc_env or torch.distributed.is_initialized()
+    use_torchrun = effective_world_size > 1
 
     if use_torchrun:
         py_cmd = [sys.argv[0]] + cli_args
@@ -239,12 +307,10 @@ def create_restart_script(run_dir: str | Path) -> Path:
     )
 
     if use_torchrun:
-        # Calculate tasks per node for torchrun (-n arg)
-        tasks_per_node = 1
-        if nodes and total_tasks:
-            tasks_per_node = total_tasks // nodes
+        # Calculate tasks per node for torchrun (-n arg).
         if nodes is None:
             nodes = 1
+        tasks_per_node = max(1, total_tasks // nodes)
 
         script = _render_torchrun_hpc_restart(
             py_array_decl, nodes, tasks_per_node, env_setup

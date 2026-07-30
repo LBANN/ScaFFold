@@ -30,7 +30,10 @@ if CALI_PERF_ENV_VAR in os.environ:
     except Exception as e:
         print("User requested Caliper annotations, but could not import Caliper")
         print(f"Exception: {e}")
-elif (
+
+# The torch profiler is gated purely on its own environment variable: Caliper
+# and the torch profiler may both be enabled at once.
+if (
     TORCH_PERF_ENV_VAR in os.environ
     and os.environ.get(TORCH_PERF_ENV_VAR).lower() != "off"
 ):
@@ -90,17 +93,45 @@ def adiak_fini():
         return
 
 
+def _profiler_env_int(name, default):
+    try:
+        return max(0, int(os.environ.get(name, default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _profiler_env_flag(name):
+    return os.environ.get(name, "").lower() in ("1", "true", "on", "yes")
+
+
 def get_torch_context(ranks_per_node, rank):
     if TORCH_PERF_ENABLED:
         TORCH_PERF_LOCAL = TORCH_PERF_ENABLED and (rank % ranks_per_node == 0)
-        prof_ctx = (
-            torchprofile(
-                activities=[ProfilerActivity.CUDA, ProfilerActivity.CPU],
-                record_shapes=True,
-                with_stack=True,
-            )
-            if TORCH_PERF_LOCAL
-            else nullcontext()
+        if not TORCH_PERF_LOCAL:
+            return nullcontext(), False
+
+        from torch.profiler import schedule as torch_profiler_schedule
+
+        # Record only a bounded window of steps instead of the whole multi-epoch
+        # run: the profiler accumulates every event in host memory until export,
+        # so an unscheduled long run grows without bound and emits an unusable
+        # trace. The window (skip `wait`, prime `warmup`, capture `active`, once)
+        # is tunable via the environment. Callers must drive it with
+        # ``prof.step()`` once per training step for the schedule to advance.
+        wait = _profiler_env_int("PROFILE_TORCH_WAIT", 1)
+        warmup = _profiler_env_int("PROFILE_TORCH_WARMUP", 1)
+        active = _profiler_env_int("PROFILE_TORCH_ACTIVE", 3) or 1
+
+        # record_shapes and with_stack are the two most expensive options (they
+        # skew the very timings being measured), so they are opt-in rather than
+        # always on.
+        prof_ctx = torchprofile(
+            activities=[ProfilerActivity.CUDA, ProfilerActivity.CPU],
+            schedule=torch_profiler_schedule(
+                wait=wait, warmup=warmup, active=active, repeat=1
+            ),
+            record_shapes=_profiler_env_flag("PROFILE_TORCH_RECORD_SHAPES"),
+            with_stack=_profiler_env_flag("PROFILE_TORCH_WITH_STACK"),
         )
         return prof_ctx, TORCH_PERF_LOCAL
     return nullcontext(), False

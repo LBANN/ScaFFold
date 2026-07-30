@@ -15,7 +15,6 @@
 import argparse
 import logging
 import pickle
-from functools import partial
 from multiprocessing import Pool
 from os import listdir
 from os.path import isfile, join, splitext
@@ -45,37 +44,57 @@ def get_args():
     return args
 
 
-def unique_mask_values(idx, directory):
-    mask_file = list(directory.glob(idx + ".*"))[0]
+def unique_mask_values(mask_file):
+    # The caller resolves the id -> path mapping once from a single directory
+    # listing, so the worker just reads the file it is handed rather than
+    # re-globbing the whole directory per id (which is O(N) metadata traffic
+    # per id, O(N^2) overall on a shared filesystem).
     with open(mask_file, "rb") as f:
         mask = np.load(f)
-    f.close()
-    # print(f'mask_detection.py: file {mask_file}, unique = {np.unique(mask)}')
 
     return np.unique(mask)
+
+
+def _index_masks_by_stem(directory):
+    """Map each file stem to its single mask path from one directory listing.
+
+    Requires exactly one file per stem: a stem with two files (a stale sibling
+    sharing the stem, e.g. ``000000.npy`` and ``000000.npz``) is ambiguous and
+    would let the scan pick an arbitrary one, missing labels present in the file
+    the training loader actually reads. Raise a clear error naming the stem
+    instead.
+    """
+    stem_to_path = {}
+    for name in listdir(directory):
+        if name.startswith(".") or not isfile(join(directory, name)):
+            continue
+        stem = splitext(name)[0]
+        if stem in stem_to_path:
+            raise ValueError(
+                f"Multiple files share the id {stem!r} in {directory}: "
+                f"{stem_to_path[stem].name} and {name}"
+            )
+        stem_to_path[stem] = Path(directory) / name
+    return stem_to_path
 
 
 def main():
     args = get_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     images_dir = Path(args.input)
-    ids = [
-        splitext(file)[0]
-        for file in listdir(images_dir)
-        if isfile(join(images_dir, file)) and not file.startswith(".")
-    ]
-    # print(f'mask_detection.py: ({len(ids)}) ids={ids}')
-    if not ids:
+    stem_to_path = _index_masks_by_stem(images_dir)
+    if not stem_to_path:
         raise RuntimeError(
             f"No input file found in {images_dir}, make sure you put your images there"
         )
 
-    logging.info(f"Scanning {len(ids)} masks")
+    mask_paths = [stem_to_path[stem] for stem in sorted(stem_to_path)]
+    logging.info(f"Scanning {len(mask_paths)} masks")
     with Pool() as p:
         unique = list(
             tqdm(
-                p.imap(partial(unique_mask_values, directory=images_dir), ids),
-                total=len(ids),
+                p.imap(unique_mask_values, mask_paths),
+                total=len(mask_paths),
             )
         )
 

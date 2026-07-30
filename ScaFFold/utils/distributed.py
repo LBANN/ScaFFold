@@ -27,6 +27,19 @@ def get_num_gpus() -> int:
     return torch.cuda.device_count()
 
 
+def _mpi_comm_world():
+    """Return MPI.COMM_WORLD, importing mpi4py lazily.
+
+    Returns None if mpi4py is unavailable, so env-only callers keep working.
+    """
+    try:
+        from mpi4py import MPI
+
+        return MPI.COMM_WORLD
+    except ImportError:
+        return None
+
+
 def get_local_rank(required: bool = False) -> int:
     """Return the local MPI rank."""
     if "LOCAL_RANK" in os.environ:
@@ -35,6 +48,10 @@ def get_local_rank(required: bool = False) -> int:
         return int(os.environ["MV2_COMM_WORLD_LOCAL_RANK"])
     if "OMPI_COMM_WORLD_LOCAL_RANK" in os.environ:
         return int(os.environ["OMPI_COMM_WORLD_LOCAL_RANK"])
+    if "PMI_LOCAL_RANK" in os.environ:
+        return int(os.environ["PMI_LOCAL_RANK"])
+    if "PALS_LOCAL_RANKID" in os.environ:
+        return int(os.environ["PALS_LOCAL_RANKID"])
     if "SLURM_LOCALID" in os.environ:
         return int(os.environ["SLURM_LOCALID"])
     if "FLUX_TASK_LOCAL_ID" in os.environ:
@@ -63,14 +80,23 @@ def get_local_size(required: bool = False) -> int:
 
 def get_world_rank(required: bool = False) -> int:
     """Return the global MPI rank."""
+    if "RANK" in os.environ:
+        return int(os.environ["RANK"])
     if "MV2_COMM_WORLD_RANK" in os.environ:
         return int(os.environ["MV2_COMM_WORLD_RANK"])
     if "OMPI_COMM_WORLD_RANK" in os.environ:
         return int(os.environ["OMPI_COMM_WORLD_RANK"])
+    if "PMI_RANK" in os.environ:
+        return int(os.environ["PMI_RANK"])
+    if "PALS_RANKID" in os.environ:
+        return int(os.environ["PALS_RANKID"])
     if "SLURM_PROCID" in os.environ:
         return int(os.environ["SLURM_PROCID"])
     if "FLUX_TASK_RANK" in os.environ:
         return int(os.environ["FLUX_TASK_RANK"])
+    comm = _mpi_comm_world()
+    if comm is not None:
+        return comm.Get_rank()
     if required:
         raise RuntimeError("Could not get world rank")
     return 0
@@ -78,14 +104,23 @@ def get_world_rank(required: bool = False) -> int:
 
 def get_world_size(required: bool = False) -> int:
     """Return the number of MPI ranks."""
+    if "WORLD_SIZE" in os.environ:
+        return int(os.environ["WORLD_SIZE"])
     if "MV2_COMM_WORLD_SIZE" in os.environ:
         return int(os.environ["MV2_COMM_WORLD_SIZE"])
     if "OMPI_COMM_WORLD_SIZE" in os.environ:
         return int(os.environ["OMPI_COMM_WORLD_SIZE"])
+    if "PMI_SIZE" in os.environ:
+        return int(os.environ["PMI_SIZE"])
+    if "PALS_NRANKS" in os.environ:
+        return int(os.environ["PALS_NRANKS"])
     if "SLURM_NTASKS" in os.environ:
         return int(os.environ["SLURM_NTASKS"])
     if "FLUX_JOB_SIZE" in os.environ:
         return int(os.environ["FLUX_JOB_SIZE"])
+    comm = _mpi_comm_world()
+    if comm is not None:
+        return comm.Get_size()
     if required:
         raise RuntimeError("Could not get world size")
     return 1
@@ -180,12 +215,23 @@ def initialize_dist(
         get_world_size(),
     )
 
-    # Initialize
+    # Bind this process to its compute device BEFORE the first collective.
+    # NCCL binds communicators to whatever device is current when it first
+    # runs; without an explicit set_device it guesses (rank % num_gpus),
+    # which breaks non-block rank placements and can hang on duplicate GPUs.
+    device = get_device()
+
+    # Initialize. NCCL requires GPUs; fall back to gloo on CPU-only hosts.
+    backend = "nccl" if torch.cuda.is_available() else "gloo"
+    init_kwargs = {}
+    if device.type == "cuda":
+        init_kwargs["device_id"] = device
     torch.distributed.init_process_group(
-        backend="nccl",
+        backend=backend,
         init_method=init_method,
         rank=get_world_rank(),
         world_size=get_world_size(),
+        **init_kwargs,
     )
 
     torch.distributed.barrier()

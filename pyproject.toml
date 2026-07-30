@@ -29,6 +29,15 @@ select = ["F", "E", "I"]      # include "I" to enable import rules (isort), "F" 
 fixable = ["I"]               # allow Ruff to reorder imports
 ignore = ["E501"]             # this is handled by ruff format
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+  "mpi: needs mpi4py + a multi-rank MPI launcher (mpirun/mpiexec/srun/flux); auto-skipped when none is available",
+  "gpu: needs CUDA device(s); auto-skipped when torch.cuda.is_available() is False",
+  "slow: > ~30 s",
+]
+timeout = 120          # global hang guard; deadlock tests may override lower
+
 [project]
 name = "ScaFFold"
 version = "0.1.0"
@@ -53,11 +62,16 @@ dependencies = [
   "psutil>=5.9.0",
   "distconv @ git+https://github.com/LBANN/DistConv.git@084b20a",
 ]
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 
 [project.optional-dependencies]
 profiling = [
   "pybind11>=3.0.0"
+]
+test = [
+  "pytest>=8",
+  "pytest-timeout>=2.3",
+  "psutil",
 ]
 cuda = [
     "torch==2.10.0+cu129",

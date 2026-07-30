@@ -70,9 +70,19 @@ def _compute_ce_class_weights(
     sample_indices = _sample_ce_weight_indices(n_train, sample_fraction)
     sampled_class_counts = torch.zeros(num_classes, dtype=torch.long)
 
+    # Only the mask histogram is needed here, so load masks alone when the
+    # dataset supports it rather than paying to read and preprocess the full
+    # image volume for each sampled index. bincount needs an integer tensor, so
+    # widen the (narrow) mask carrier to long first.
+    load_mask_only = getattr(train_set, "load_mask_only", None)
     for sample_idx in sample_indices:
-        mask = train_set[sample_idx]["mask"]
-        sampled_class_counts += torch.bincount(mask.reshape(-1), minlength=num_classes)
+        if callable(load_mask_only):
+            mask = load_mask_only(sample_idx)
+        else:
+            mask = train_set[sample_idx]["mask"]
+        sampled_class_counts += torch.bincount(
+            mask.reshape(-1).long(), minlength=num_classes
+        )
 
     # The dataset may already return only this rank's local spatial shard,
     # so combine per-rank counts before deriving the global CE weights.
@@ -111,6 +121,7 @@ def compute_sharded_cross_entropy_loss(
     _num_shards,
     device_type,
     class_weights=None,
+    log_probs=None,
 ):
     """
     Compute the CE loss for a spatially sharded volume.
@@ -119,47 +130,63 @@ def compute_sharded_cross_entropy_loss(
     `reduction="mean"` result directly. Instead we:
     1. compute the local CE numerator with `reduction="sum"`,
     2. build the correct global denominator,
-    3. all-reduce across the spatial mesh, and
+    3. all-reduce numerator and denominator together across the spatial mesh
+       in a single collective, and
     4. divide to recover the same value we would get from a non-sharded tensor.
 
     When `class_weights` is provided, PyTorch's CE "mean" divides by the sum of
     the target weights, not the raw voxel count, so we reproduce that behavior
     explicitly here.
+
+    ``log_probs`` is an optional precomputed ``log_softmax(local_preds)`` in
+    full precision. When supplied it is reused directly (via NLL) instead of
+    upcasting ``local_preds`` and recomputing log-softmax internally, so the
+    caller can share one upcast/softmax between the CE and dice terms.
     """
 
     autocast_device = device_type if device_type != "mps" else "cpu"
     with torch.autocast(autocast_device, enabled=False):
         # Accumulate CE in full precision. Using reduction="sum" gives us the
         # numerator of the final global mean; if class weights are present,
-        # PyTorch applies the target-class weight to each voxel here.
-        local_ce_sum = F.cross_entropy(
-            local_preds.float(),
-            local_labels,
-            weight=class_weights,
-            reduction="sum",
-        )
+        # PyTorch applies the target-class weight to each voxel here. When the
+        # caller already computed log-softmax, NLL over it is identical to
+        # cross-entropy over the raw logits but avoids a second full upcast.
+        if log_probs is not None:
+            local_ce_sum = F.nll_loss(
+                log_probs,
+                local_labels,
+                weight=class_weights,
+                reduction="sum",
+            )
+        else:
+            local_ce_sum = F.cross_entropy(
+                local_preds.float(),
+                local_labels,
+                weight=class_weights,
+                reduction="sum",
+            )
 
         if class_weights is None:
             # Sum the actual local voxel counts across spatial shards. We use
             # an all-reduced count instead of numel()*num_shards because shard
             # sizes can differ at chunk boundaries.
-            local_voxel_count = local_ce_sum.new_tensor(float(local_labels.numel()))
-            global_normalizer = SpatialAllReduce.apply(local_voxel_count, spatial_mesh)
+            local_normalizer = local_ce_sum.new_tensor(float(local_labels.numel()))
         else:
             # Weighted CE divides by sum(weight[target_i]) over all voxels.
-            # Build that denominator from the local label histogram, then
-            # all-reduce it across the spatial mesh.
+            # Build that denominator from the local label histogram.
             local_class_counts = torch.bincount(
                 local_labels.reshape(-1), minlength=class_weights.numel()
             ).to(dtype=local_ce_sum.dtype)
-            local_weight_sum = torch.dot(
+            local_normalizer = torch.dot(
                 local_class_counts, class_weights.to(dtype=local_ce_sum.dtype)
             )
-            global_normalizer = SpatialAllReduce.apply(local_weight_sum, spatial_mesh)
 
-    # Sum the local CE numerators from each spatial shard to get the global CE
-    # numerator, then divide by the matching global denominator.
-    global_ce_sum = SpatialAllReduce.apply(local_ce_sum, spatial_mesh)
+    # Reduce the CE numerator and its denominator across the spatial shards in
+    # one collective (they share the same mesh) rather than two, halving the
+    # per-step latency-bound all-reduce count for this term.
+    packed = torch.stack([local_ce_sum, local_normalizer])
+    global_packed = SpatialAllReduce.apply(packed, spatial_mesh)
+    global_ce_sum, global_normalizer = global_packed[0], global_packed[1]
     # Clamp to avoid a divide-by-zero in degenerate cases.
     return global_ce_sum / global_normalizer.clamp_min(
         torch.finfo(global_ce_sum.dtype).eps

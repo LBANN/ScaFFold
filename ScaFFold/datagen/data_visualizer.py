@@ -37,5 +37,23 @@ if __name__ == "__main__":
         data = np.load(f)
     f.close()
     ax = plt.figure().add_subplot(projection="3d")
-    ax.voxels(data, edgecolor="k")
+
+    # Handle both 3D and 4D arrays
+    if data.ndim == 4:
+        # Channels-first (C, D, H, W) -> transpose to (D, H, W, C)
+        if data.shape[0] == 3:
+            data = data.transpose((1, 2, 3, 0))
+            # Compute occupancy: a voxel is occupied if any channel is nonzero
+            occupancy = data.any(axis=-1)
+            ax.voxels(occupancy, facecolors=data)
+        else:
+            raise ValueError(f"4D array must have shape (3, D, H, W), got {data.shape}")
+    elif data.ndim == 3:
+        # 3D mask or similar
+        ax.voxels(data, edgecolor="k")
+    else:
+        raise ValueError(
+            f"Expected 3D or 4D array, got {data.ndim}D with shape {data.shape}"
+        )
+
     plt.show()

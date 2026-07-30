@@ -27,6 +27,80 @@ from ScaFFold.utils.create_restart_script import create_restart_script
 from ScaFFold.utils.utils import setup_mpi_logger
 
 
+def _make_fresh_run_dir(base_run_dir, timestamp):
+    """Create a fresh timestamped run directory without clobbering an existing one.
+
+    The bare timestamped name is attempted first. If it already exists -- two
+    jobs launched under the same base directory within the same wall-clock
+    second name their directories identically -- a numeric suffix is appended
+    and incremented until an unused name is found. ``mkdir(exist_ok=False)`` is
+    atomic, so each name is claimed by exactly one creator and neither job
+    overwrites the other's config or stats.
+
+    Returns the created directory as a ``Path``.
+    """
+    candidate = base_run_dir / timestamp
+    suffix = 0
+    while True:
+        try:
+            candidate.mkdir(parents=True, exist_ok=False)
+            return candidate
+        except FileExistsError:
+            suffix += 1
+            candidate = base_run_dir / f"{timestamp}-{suffix}"
+
+
+def resolve_run_dir(args_dict, combined_config):
+    """Decide the benchmark run directory and whether this launch resumes a run.
+
+    The semantics are fixed and unambiguous:
+
+    * ``--run-dir DIR`` (with or without ``--restart``): resume in that exact
+      directory. ``train_from_scratch`` is forced off and ``restart`` on so the
+      downstream benchmark driver takes its restart path.
+    * ``--restart`` without ``--run-dir``: rejected with a clear error. The run
+      directory to resume must be named explicitly; the most recent directory
+      is never guessed.
+    * neither flag: create a fresh timestamped directory under ``base_run_dir``,
+      retrying with a numeric suffix on a same-second name collision.
+
+    ``combined_config['benchmark_run_dir']`` is set in every path so the driver
+    can always read it. Returns ``(benchmark_run_dir: Path, restarting: bool)``.
+    """
+    restart_flag = bool(args_dict.get("restart"))
+    run_dir_arg = args_dict.get("run_dir")
+
+    if run_dir_arg is not None:
+        benchmark_run_dir = Path(run_dir_arg)
+        # An explicit run dir is expected to already exist; tolerate a missing
+        # one but never treat a pre-existing dir as an error here.
+        benchmark_run_dir.mkdir(parents=True, exist_ok=True)
+        restarting = True
+    elif restart_flag:
+        raise ValueError(
+            "--restart requires --run-dir: pass the directory of the run to "
+            "resume (e.g. '--restart --run-dir <path>'). The most recent run "
+            "directory is not resolved automatically."
+        )
+    else:
+        base_run_dir = Path(combined_config["base_run_dir"])
+        timestamp = datetime.now().strftime(
+            f"{combined_config.get('job_name')}_%Y%m%d-%H%M%S"
+        )
+        benchmark_run_dir = _make_fresh_run_dir(base_run_dir, timestamp)
+        log = setup_mpi_logger(__file__, args_dict.get("verbose", 0))
+        log.info(
+            "benchmark_run_dir created at path %s", Path.resolve(benchmark_run_dir)
+        )
+        restarting = False
+
+    combined_config["benchmark_run_dir"] = str(benchmark_run_dir)
+    if restarting:
+        combined_config["train_from_scratch"] = False
+        combined_config["restart"] = True
+    return benchmark_run_dir, restarting
+
+
 def main():
     """
     Command line interface for ScaFFold.
@@ -101,13 +175,19 @@ def main():
             "Requires path to config file."
         ),
     )
-    # Specify config file
+    # Specify config file(s): the first is the complete base config, any
+    # additional -c/--config files are partial overrides applied in order.
     benchmark_parser.add_argument(
         "-c",
         "--config",
         type=str,
+        action="append",
         default=None,
-        help="Path to config file for running benchmark",
+        help=(
+            "Path to config file for running benchmark. May be given more "
+            "than once: the first file is the base config and later files "
+            "are partial overrides."
+        ),
         required=True,
     )
 
@@ -224,14 +304,36 @@ def main():
     log = setup_mpi_logger(__file__, args.verbose)
     combined_config = None
 
+    # Reject an incoherent resume request on every rank, before the rank-0
+    # config work and its collective barrier, so the job fails fast and
+    # uniformly instead of leaving the non-zero ranks blocked in a barrier
+    # while rank 0 aborts.
+    if (
+        args.command == "benchmark"
+        and getattr(args, "restart", False)
+        and getattr(args, "run_dir", None) is None
+    ):
+        parser.error(
+            "--restart requires --run-dir: pass the directory of the run to "
+            "resume (e.g. '--restart --run-dir <path>')."
+        )
+
     if rank == 0:
         log.debug("args = %s", args)
 
-        bench_config = config_utils.load_config(Path(args.config), "sweep")
-        bench_config_dict = (
-            vars(bench_config) if not isinstance(bench_config, dict) else bench_config
-        )
+        # --config may be a single path (generate_fractals) or a list of
+        # paths (benchmark, action="append"): base config plus overrides.
+        config_paths = args.config if isinstance(args.config, list) else [args.config]
+        merged_dict = config_utils.load_config_files(config_paths)
+        # Validate the merged result and derive dependent settings
+        # (list-valued sweep params are allowed here; the benchmark driver
+        # expands them per run).
+        bench_config = config_utils.Config(merged_dict, allow_sweeps=True)
+        bench_config_dict = vars(bench_config)
         cli_args = vars(args)
+        # Downstream consumers expect a single config path (e.g. to copy it
+        # into the run dir); keep the base config there.
+        cli_args["config"] = config_paths[0]
 
         # Combine configs: CLI args override config file values
         combined_config = bench_config_dict.copy()
@@ -276,31 +378,12 @@ def main():
         combined_config["vol_size"] = pow(2, combined_config["problem_scale"])
         combined_config["point_num"] = int(combined_config["vol_size"] ** 3 / 256)
 
-        # Handle Restart / Resume logic
-        if hasattr(args, "restart") and args.restart:
-            log.info("Restart flag detected: forcing train_from_scratch = False")
-            combined_config["train_from_scratch"] = False
-            combined_config["restart"] = True
-
-        # If user manually supplied --run-dir (via restart script), use it.
-        if hasattr(args, "run_dir") and args.run_dir is not None:
-            log.info("Resuming in existing directory: %s", args.run_dir)
-            benchmark_run_dir = Path(args.run_dir)
-            # Ensure we don't accidentally wipe checkpoints even if --restart wasn't explicitly passed
-            combined_config["train_from_scratch"] = False
-        else:
-            base_run_dir = Path(combined_config["base_run_dir"])
-            timestamp = datetime.now().strftime(
-                f"{combined_config.get('job_name')}_%Y%m%d-%H%M%S"
-            )
-            benchmark_run_dir = base_run_dir / timestamp
-            log.info(
-                "benchmark_run_dir created at path %s",
-                Path.resolve(benchmark_run_dir),
-            )
-
-            combined_config["benchmark_run_dir"] = str(benchmark_run_dir)
-        benchmark_run_dir.mkdir(parents=True, exist_ok=True)
+        # Resolve the run directory and whether this launch resumes a run.
+        # This sets combined_config["benchmark_run_dir"] on every path and,
+        # when resuming, forces train_from_scratch off / restart on.
+        benchmark_run_dir, restarting = resolve_run_dir(vars(args), combined_config)
+        if restarting:
+            log.info("Resuming in existing directory: %s", benchmark_run_dir)
 
         # Add scheduler metadata and machine name to config.yaml
         combined_config["scheduler_metadata"] = collect_scheduler_metadata()

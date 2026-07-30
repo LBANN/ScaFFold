@@ -12,7 +12,6 @@
 #
 # SPDX-License-Identifier: (Apache-2.0)
 
-import math
 import os
 import pickle
 import random
@@ -24,44 +23,110 @@ import numpy as np
 from mpi4py import MPI
 
 from ScaFFold.utils.config_utils import Config
-from ScaFFold.utils.data_types import DEFAULT_NP_DTYPE, MASK_DTYPE, VOLUME_DTYPE
+from ScaFFold.utils.data_types import MASK_DTYPE, VOLUME_DTYPE
 from ScaFFold.utils.utils import setup_mpi_logger
 
 
 def load_np_ptcloud(path: str) -> np.ndarray:
     """
-    Read a .npy file and return an (N,3) array of dtype float64.
+    Read a .npy point cloud and return an (N, 3) float32 array.
+
+    Coordinates are normalized to roughly [-1, 1] and only ever binned into
+    integer voxel indices, so float32 carries ample precision while halving the
+    read bandwidth this incurs on every rank. A legacy float64 file is downcast
+    here so voxelization is dtype-consistent with freshly generated instances.
     """
     pts = np.load(path)
-    return pts.astype(DEFAULT_NP_DTYPE, copy=False)
+    return pts.astype(np.float32, copy=False)
+
+
+def points_to_voxel_indices(
+    points: np.ndarray, grid_size: int, eps: float = 1e-6
+) -> np.ndarray:
+    """
+    Map an (N, 3) point cloud to the integer voxel indices it occupies.
+
+    Returns a (K, 3) int array of the unique voxel coordinates on a
+    ``grid_size**3`` grid. Scattering these straight into a volume/mask
+    (``arr[idx[:, 0], idx[:, 1], idx[:, 2]] = value``) paints exactly the
+    occupied voxels in O(K), avoiding a dense ``grid_size**3`` allocation and a
+    full-volume boolean-mask traversal per cloud.
+
+    Normalization is isotropic: all three axes are divided by the single
+    largest extent and the result is centered in the grid, so a fractal's
+    aspect ratio and relative size are preserved instead of every cloud being
+    stretched to fill the cube on every axis.
+
+    Non-finite input (NaN/inf coordinates, e.g. from a diverging IFS) is
+    rejected: casting such coordinates to integer indices would otherwise yield
+    platform-dependent garbage that ``np.clip`` silently forces in-bounds and
+    scatters into the mask as a legitimate label.
+    """
+    if not np.isfinite(points).all():
+        raise ValueError(
+            "points_to_voxel_indices received non-finite coordinates "
+            "(NaN or inf); refusing to rasterize corrupt point cloud"
+        )
+
+    # 1) Axis-aligned bounding box.
+    mins = points.min(axis=0)
+    maxs = points.max(axis=0)
+
+    # 2) A single isotropic voxel size from the largest extent, so aspect ratio
+    #    and relative scale survive rasterization.
+    max_extent = float((maxs - mins).max())
+    voxel_size = (max_extent + eps) / grid_size
+
+    # 3) Map points into index space using the shared scale.
+    scaled = (points - mins) / voxel_size
+
+    # 4) Center the occupied region: the largest axis fills the grid while the
+    #    shorter axes are offset so their span sits in the middle.
+    span = scaled.max(axis=0)
+    offset = (grid_size - 1 - span) / 2.0
+    idx = np.floor(scaled + offset).astype(int)
+
+    # 5) Clip to valid range (guards float rounding at the boundaries).
+    idx = np.clip(idx, 0, grid_size - 1)
+
+    # 6) Collapse coincident points to their shared voxel: the occupied set is
+    #    what gets painted, so one index (and one write) per voxel suffices.
+    return np.unique(idx, axis=0)
 
 
 def points_to_voxelgrid(
     points: np.ndarray, grid_size: int, eps: float = 1e-6
 ) -> np.ndarray:
     """
-    Convert an (N,3) float64 point cloud directly into a boolean voxel grid
-    of shape (grid_size, grid_size, grid_size).
+    Convert an (N, 3) point cloud into a boolean voxel grid of shape
+    (grid_size, grid_size, grid_size).
+
+    Thin wrapper over :func:`points_to_voxel_indices` for callers that want a
+    dense occupancy grid; the generation loop scatters the indices directly.
     """
-    # 1) Axis‐aligned bounding box in float64
-    mins = points.min(axis=0)
-    maxs = points.max(axis=0)
-
-    # 2) Voxel size per dimension (float64)
-    voxel_size = (maxs - mins + eps) / grid_size
-
-    # 3) Map points into [0,grid_size) indices
-    scaled = (points - mins) / voxel_size
-    idx = np.floor(scaled).astype(int)
-
-    # 4) Clip to valid range
-    idx = np.clip(idx, 0, grid_size - 1)
-
-    # 5) Scatter into a boolean grid
+    idx = points_to_voxel_indices(points, grid_size, eps)
     grid = np.zeros((grid_size, grid_size, grid_size), dtype=bool)
     grid[idx[:, 0], idx[:, 1], idx[:, 2]] = True
-
     return grid
+
+
+def resolve_grid_size(config) -> int:
+    """
+    Return the voxel-grid edge length, which must equal ``config.vol_size``.
+
+    The volume and mask are allocated at ``vol_size``; the grid must match or
+    the per-volume shape check fails. ``config.scale`` is not a working knob
+    (it is fixed at 1 upstream), so any other value is a configuration error
+    rather than a silently mismatched grid, and is rejected here with a clear
+    message instead of tripping an opaque shape assertion deep in the loop.
+    """
+    scale = getattr(config, "scale", 1)
+    if scale != 1:
+        raise ValueError(
+            f"config.scale must be 1 (got {scale}); scaled sub-volume "
+            "rasterization is not supported"
+        )
+    return int(config.vol_size)
 
 
 def main(config: Dict):
@@ -152,105 +217,136 @@ def main(config: Dict):
     start_idx = rank * stride
     end_idx = min(((rank + 1) * stride), num_volumes)
 
-    if start_idx >= end_idx:
-        log.debug("Rank %s given no volumes to generate", rank)
+    # Per-rank generation status. A rank that fails records the message here and
+    # keeps executing the collective sequence below so every rank stays in step;
+    # the failure is then propagated to all ranks via an allreduce.
+    ok = True
+    err = ""
 
-    else:
-        volumes_contents_subset = volumes_contents[start_idx:end_idx]
-        log.debug(
-            "Rank %s responsible for volumes %s through %s",
-            rank,
-            volumes_contents_subset[0][0],
-            volumes_contents_subset[-1][0],
-        )
+    try:
+        if start_idx >= end_idx:
+            log.debug("Rank %s given no volumes to generate", rank)
 
-        np.random.seed(config.seed)
-        fractal_colors = np.random.rand(config.n_categories, 3)
-
-        grid_size = math.floor(config.vol_size * config.scale)
-        fract_base_dir = str(config.fract_base_dir)
-
-        # Generation loop
-        start_time = time.time()
-        for i, curr_vol in enumerate(volumes_contents_subset):
-            if i % 10 == 0:
-                log.debug("Rank %s processing local volume %s", rank, i)
-
-            volume = np.full(
-                (config.vol_size, config.vol_size, config.vol_size, 3),
-                0,
-                dtype=VOLUME_DTYPE,
-            )
-            mask = np.full(
-                (config.vol_size, config.vol_size, config.vol_size), 0, dtype=MASK_DTYPE
+        else:
+            volumes_contents_subset = volumes_contents[start_idx:end_idx]
+            log.debug(
+                "Rank %s responsible for volumes %s through %s",
+                rank,
+                volumes_contents_subset[0][0],
+                volumes_contents_subset[-1][0],
             )
 
-            global_vol_idx = curr_vol[0]
-            vol_seed = config.seed + int(global_vol_idx)
-            random.seed(vol_seed)
-            np.random.seed(vol_seed)
+            np.random.seed(config.seed)
+            fractal_colors = np.random.rand(config.n_categories, 3)
 
-            for curr_fract in range(n_fracts_per_vol):
-                curr_category = curr_vol[1 + 2 * curr_fract]
-                curr_instance = curr_vol[1 + 2 * curr_fract + 1]
-                fractal_color = fractal_colors[curr_category]
+            grid_size = resolve_grid_size(config)
+            fract_base_dir = str(config.fract_base_dir)
 
-                instances_dir = (
-                    f"var{config.variance_threshold}/instances/np{config.point_num}"
+            # Generation loop
+            start_time = time.time()
+            for i, curr_vol in enumerate(volumes_contents_subset):
+                if i % 10 == 0:
+                    log.debug("Rank %s processing local volume %s", rank, i)
+
+                volume = np.full(
+                    (config.vol_size, config.vol_size, config.vol_size, 3),
+                    0,
+                    dtype=VOLUME_DTYPE,
+                )
+                mask = np.full(
+                    (config.vol_size, config.vol_size, config.vol_size),
+                    0,
+                    dtype=MASK_DTYPE,
                 )
 
-                point_cloud_path = os.path.join(
-                    fract_base_dir,
-                    instances_dir,
-                    f"{curr_category:06d}",
-                    f"{curr_category:06d}_{curr_instance:04d}.npy",
-                )
+                global_vol_idx = curr_vol[0]
+                vol_seed = config.seed + int(global_vol_idx)
+                random.seed(vol_seed)
+                np.random.seed(vol_seed)
 
-                if not os.path.exists(point_cloud_path):
-                    raise FileNotFoundError(
-                        f"File {point_cloud_path} does not exist. "
-                        "Ensure you have run 'scaffold generate_fractals ...'"
+                for curr_fract in range(n_fracts_per_vol):
+                    curr_category = curr_vol[1 + 2 * curr_fract]
+                    curr_instance = curr_vol[1 + 2 * curr_fract + 1]
+                    fractal_color = fractal_colors[curr_category]
+
+                    instances_dir = (
+                        f"var{config.variance_threshold}/instances/np{config.point_num}"
                     )
 
-                points = load_np_ptcloud(point_cloud_path)
-                mask3d = points_to_voxelgrid(points, grid_size)
+                    point_cloud_path = os.path.join(
+                        fract_base_dir,
+                        instances_dir,
+                        f"{curr_category:06d}",
+                        f"{curr_category:06d}_{curr_instance:04d}.npy",
+                    )
 
-                assert mask3d.shape == volume.shape[:3], (
-                    f"mask3d {mask3d.shape} != volume spatial dims {volume.shape[:3]}"
+                    if not os.path.exists(point_cloud_path):
+                        raise FileNotFoundError(
+                            f"File {point_cloud_path} does not exist. "
+                            "Ensure you have run 'scaffold generate_fractals ...'"
+                        )
+
+                    points = load_np_ptcloud(point_cloud_path)
+                    voxel_idx = points_to_voxel_indices(points, grid_size)
+
+                    assert voxel_idx.shape[1] == volume.ndim - 1, (
+                        f"voxel index width {voxel_idx.shape[1]} != volume spatial "
+                        f"dims {volume.ndim - 1}"
+                    )
+
+                    # Scatter only the occupied voxels: O(points) writes instead
+                    # of two full-volume boolean-mask traversals per fractal.
+                    rows, cols, depths = (
+                        voxel_idx[:, 0],
+                        voxel_idx[:, 1],
+                        voxel_idx[:, 2],
+                    )
+                    volume[rows, cols, depths] = fractal_color
+                    mask[rows, cols, depths] = curr_category + 1
+
+                # Determine destination folder
+                subdir = "validation" if global_vol_idx in val_indices else "training"
+                # Tensors must logically be channels-first, later we will change striding/storage to channels-last on GPU (metadata will always stay channels-first).
+                volume_channels_first = volume.transpose((3, 0, 1, 2))
+                volume_to_save = np.ascontiguousarray(
+                    volume_channels_first, dtype=VOLUME_DTYPE
                 )
+                mask_to_save = np.ascontiguousarray(mask, dtype=MASK_DTYPE)
 
-                volume[mask3d] = fractal_color
-                mask[mask3d] = curr_category + 1
+                vol_file = os.path.join(vol_path, subdir, f"{global_vol_idx}.npy")
+                with open(vol_file, "wb") as f:
+                    np.save(f, volume_to_save)
 
-            # Determine destination folder
-            subdir = "validation" if global_vol_idx in val_indices else "training"
-            # Tensors must logically be channels-first, later we will change striding/storage to channels-last on GPU (metadata will always stay channels-first).
-            volume_channels_first = volume.transpose((3, 0, 1, 2))
-            volume_to_save = np.ascontiguousarray(
-                volume_channels_first, dtype=VOLUME_DTYPE
-            )
-            mask_to_save = np.ascontiguousarray(mask, dtype=MASK_DTYPE)
+                mask_file = os.path.join(
+                    mask_path, subdir, f"{global_vol_idx}_mask.npy"
+                )
+                with open(mask_file, "wb") as f:
+                    np.save(f, mask_to_save)
 
-            vol_file = os.path.join(vol_path, subdir, f"{global_vol_idx}.npy")
-            with open(vol_file, "wb") as f:
-                np.save(f, volume_to_save)
+            end_time = time.time()
+            total_time = end_time - start_time
+            if rank == 0:
+                log.info(
+                    "Rank 0 generated %s volumes in %.2f seconds | %.2f volumes per second",
+                    len(volumes_contents_subset),
+                    total_time,
+                    len(volumes_contents_subset) / total_time,
+                )
+    except (Exception, SystemExit) as e:
+        # Capture the failure locally instead of letting it unwind past the
+        # collective below, which would desynchronize the ranks.
+        ok = False
+        err = f"rank {rank}: {type(e).__name__}: {e}"
 
-            mask_file = os.path.join(mask_path, subdir, f"{global_vol_idx}_mask.npy")
-            with open(mask_file, "wb") as f:
-                np.save(f, mask_to_save)
-
-        end_time = time.time()
-        total_time = end_time - start_time
-        if rank == 0:
-            log.info(
-                "Rank 0 generated %s volumes in %.2f seconds | %.2f volumes per second",
-                len(volumes_contents_subset),
-                total_time,
-                len(volumes_contents_subset) / total_time,
-            )
-
-    # Barrier to ensure all ranks are finished writing
-    comm.Barrier()
+    # Consensus on the generation status. This replaces a bare Barrier: every
+    # rank always executes exactly this collective (regardless of success or
+    # failure), so a failing rank can never leave a peer hung in a mismatched
+    # collective. If any rank failed, all ranks raise here.
+    all_ok = comm.allreduce(1 if ok else 0, op=MPI.MIN) == 1
+    errs = comm.allgather(err)
+    if not all_ok:
+        msgs = "; ".join(e for e in errs if e)
+        raise RuntimeError(f"volume generation failed: {msgs or 'unknown error'}")
 
     if rank == 0:
         log.info("All ranks done. Proceeding to split.")

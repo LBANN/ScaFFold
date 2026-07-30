@@ -50,11 +50,18 @@ class UNet(nn.Module):
         group_norm_groups=8,
     ):
         super(UNet, self).__init__()
+        if layers < 1:
+            raise ValueError(
+                f"UNet requires layers >= 1, got layers={layers}. "
+                "layers is derived as problem_scale - unet_bottleneck_dim, so "
+                "problem_scale must be strictly greater than unet_bottleneck_dim."
+            )
         self.n_channels = n_channels
         self.n_classes = n_classes
         self.trilinear = trilinear
         self.layers = layers
         self.group_norm_groups = group_norm_groups
+        self.checkpointing = False
         factor = 2 if trilinear else 1
 
         self.down_list = nn.ModuleList([])
@@ -118,12 +125,24 @@ class UNet(nn.Module):
     return logits
     """
 
+    def _run_block(self, block, *inputs):
+        # Invoke a block either directly or through activation checkpointing.
+        # The checkpointed call passes the block and its inputs positionally,
+        # identical to the direct call, so the flag toggles memory behavior
+        # without changing results. Gradients only flow through the recomputed
+        # graph when at least one input requires grad (use_reentrant=False).
+        if self.checkpointing:
+            return torch.utils.checkpoint.checkpoint(
+                block, *inputs, use_reentrant=False
+            )
+        return block(*inputs)
+
     @_unet_annotate
     def forward(self, x):
         results = []
-        results.append(self.down_list[0](x))
+        results.append(self._run_block(self.down_list[0], x))
         for i in range(1, self.layers + 1):
-            results.append(self.down_list[i](results[i - 1]))
+            results.append(self._run_block(self.down_list[i], results[i - 1]))
 
         results.reverse()
 
@@ -131,28 +150,13 @@ class UNet(nn.Module):
         output = results[0]
         # Iterates up the list of up layers, passing it the previous ouput and concatenating with result at corresponding backward index
         for i in range(len(self.up_list) - 1):
-            output = self.up_list[i](output, results[i + 1])
+            output = self._run_block(self.up_list[i], output, results[i + 1])
 
-        return self.up_list[-1](output)
-
-    """
-    Unrolled 4 layer model
-
-    self.inc = torch.utils.checkpoint(self.inc)
-    self.down1 = torch.utils.checkpoint(self.down1)
-    self.down2 = torch.utils.checkpoint(self.down2)
-    self.down3 = torch.utils.checkpoint(self.down3)
-    self.down4 = torch.utils.checkpoint(self.down4)
-    self.up1 = torch.utils.checkpoint(self.up1)
-    self.up2 = torch.utils.checkpoint(self.up2)
-    self.up3 = torch.utils.checkpoint(self.up3)
-    self.up4 = torch.utils.checkpoint(self.up4)
-    self.outc = torch.utils.checkpoint(self.outc)
-    """
+        return self._run_block(self.up_list[-1], output)
 
     def use_checkpointing(self):
-        for i in range(len(self.down_list)):
-            self.down_list[i] = torch.utils.checkpoint(self.down_list[i])
-
-        for i in range(len(self.up_list)):
-            self.up_list[i] = torch.utils.checkpoint(self.up_list[i])
+        # Enable activation checkpointing: each block is recomputed during the
+        # backward pass instead of storing its activations, trading compute for
+        # memory. The flag is consumed by forward via _run_block; the forward
+        # output is unchanged whether it is on or off.
+        self.checkpointing = True

@@ -31,10 +31,10 @@ def generate_fractal_points(params: np.array, numpoints: int):
       - Column 12: normalized probability for transformation 0 (transformation 1's probability is 1 - p).
 
     Note that, due to finite floating point precision, the fractal point generation
-    process sometimes exhibits runaway values. Numba jit compilation does not play well
-    with error handling, so we omit the runaway scaling check that the `_slow` version of
-    this function has. A fractal point cloud which had runaway scaling will fail the other
-    quality checks, so we're safe to omit this runaway scaling error handling.
+    process sometimes exhibits runaway values. Rather than raising (numba jit compilation
+    does not play well with exception handling), the generation loop tracks whether any
+    coordinate exceeds a large finite bound and reports the result via `runaway_check_pass`
+    so callers can reject the attempt.
 
     Parameters
     ----------
@@ -51,6 +51,12 @@ def generate_fractal_points(params: np.array, numpoints: int):
         A bool: False if runaway values were found when generating fractal points; True otherwise.
     """
 
+    # Guard against a non-positive request: allocating and then writing the
+    # origin would index past the end of the zero-length buffers.
+    if numpoints <= 0:
+        empty = np.empty((0, 3), dtype=params.dtype)
+        return empty, True
+
     # Get probability for transformation 0
     p0 = params[0, 12]
 
@@ -63,6 +69,9 @@ def generate_fractal_points(params: np.array, numpoints: int):
     x_arr[0] = 0.0
     y_arr[0] = 0.0
     z_arr[0] = 0.0
+
+    # Coordinates whose magnitude exceeds this bound are treated as runaway.
+    runaway_bound = 1e10
 
     # Iteratively calculate fractal points
     runaway_check_pass = True
@@ -96,6 +105,16 @@ def generate_fractal_points(params: np.array, numpoints: int):
             + z_prev * params[t, 8]
             + params[t, 11]
         )
+
+        # Flag runaway growth. A NaN comparison is always False, so any
+        # non-finite coordinate produced downstream is caught by the caller's
+        # value checks; this bound catches divergence before it overflows.
+        if (
+            abs(x_arr[n]) > runaway_bound
+            or abs(y_arr[n]) > runaway_bound
+            or abs(z_arr[n]) > runaway_bound
+        ):
+            runaway_check_pass = False
 
     # Group XYZ coords into single array
     points = np.empty((numpoints, 3), dtype=params.dtype)
