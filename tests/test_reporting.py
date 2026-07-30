@@ -224,26 +224,49 @@ class TestVisualizerVolume:
 class TestTorchProfiler:
     """F68: Torch profiler enabled independently of Caliper even when CALI_CONFIG set."""
 
-    def test_torch_profiler_independent_of_caliper(self):
-        """Test that the logic branches properly: if Caliper set but fails, check torch next."""
-        # This test verifies the logic structure in perf_measure.py.
-        # The bug is that an elif chain prevents torch profiler from being checked
-        # when Caliper is set but fails. The fix is to use independent if statements.
+    def test_torch_profiler_independent_of_caliper(self, monkeypatch):
+        """Both profilers come up together when both are requested.
 
-        # Simulate module evaluation logic with the current (buggy) code:
-        # if CALI_CONFIG: try import cali except: pass   (falls through)
-        # elif TORCH_PERF: try import torch               (SKIPPED because of elif)
+        Caliper is faked in ``sys.modules`` so its import succeeds, then
+        ``perf_measure`` is re-evaluated with both env vars set: the torch
+        profiler must still enable rather than being skipped because Caliper
+        won an earlier branch. The module is reloaded again afterwards so its
+        real (env-driven) state is restored for other tests.
+        """
+        import importlib
+        import sys
+        from types import ModuleType
 
-        # After fix:
-        # if CALI_CONFIG: try import cali except: pass
-        # if not _CALI_PERF_ENABLED and TORCH_PERF: try import torch
+        import ScaFFold.utils.perf_measure as perf_measure
 
-        # We can verify this by inspecting the module's logic structure
-        with open("/usr/WS1/dryden1/ScaFFold/ScaFFold/utils/perf_measure.py") as f:
-            code = f.read()
+        fake_pyadiak = ModuleType("pyadiak")
+        fake_annotations = ModuleType("pyadiak.annotations")
+        fake_annotations.init = lambda comm: None
+        fake_annotations.value = lambda name, val: None
+        fake_annotations.fini = lambda: None
+        fake_pyadiak.annotations = fake_annotations
 
-        # The fix should have an independent if statement for torch profiler
-        # after the Caliper try/except block
-        assert "elif" not in code or (code.count("if") > code.count("elif")), (
-            "Logic should use if, not elif chains for independent profiler checks"
-        )
+        fake_pycaliper = ModuleType("pycaliper")
+        fake_pycaliper.annotate_function = lambda name=None: lambda func: func
+        fake_instrumentation = ModuleType("pycaliper.instrumentation")
+        fake_instrumentation.begin_region = lambda name: None
+        fake_instrumentation.end_region = lambda name: None
+        fake_pycaliper.instrumentation = fake_instrumentation
+
+        try:
+            with monkeypatch.context() as m:
+                m.setitem(sys.modules, "pyadiak", fake_pyadiak)
+                m.setitem(sys.modules, "pyadiak.annotations", fake_annotations)
+                m.setitem(sys.modules, "pycaliper", fake_pycaliper)
+                m.setitem(
+                    sys.modules, "pycaliper.instrumentation", fake_instrumentation
+                )
+                m.setenv("CALI_CONFIG", "runtime-report")
+                m.setenv("PROFILE_TORCH", "on")
+                importlib.reload(perf_measure)
+                assert perf_measure._CALI_PERF_ENABLED, "Caliper should be enabled"
+                assert perf_measure.TORCH_PERF_ENABLED, (
+                    "torch profiler must enable independently of Caliper"
+                )
+        finally:
+            importlib.reload(perf_measure)

@@ -31,10 +31,10 @@ if CALI_PERF_ENV_VAR in os.environ:
         print("User requested Caliper annotations, but could not import Caliper")
         print(f"Exception: {e}")
 
-# Check torch profiler independently, even if Caliper is set
+# The torch profiler is gated purely on its own environment variable: Caliper
+# and the torch profiler may both be enabled at once.
 if (
-    not _CALI_PERF_ENABLED
-    and TORCH_PERF_ENV_VAR in os.environ
+    TORCH_PERF_ENV_VAR in os.environ
     and os.environ.get(TORCH_PERF_ENV_VAR).lower() != "off"
 ):
     try:
