@@ -62,7 +62,7 @@ dependencies = [
   "psutil>=5.9.0",
   "distconv @ git+https://github.com/LBANN/DistConv.git@084b20a",
 ]
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 
 [project.optional-dependencies]
 profiling = [
