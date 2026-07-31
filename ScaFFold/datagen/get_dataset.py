@@ -16,9 +16,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 import time
+import uuid
 from argparse import Namespace
 from pathlib import Path
 from typing import Any, Dict
@@ -30,6 +32,11 @@ from ScaFFold.datagen import volumegen
 from ScaFFold.utils.utils import setup_mpi_logger
 
 META_FILENAME = "meta.yaml"
+# Datasets are generated into a staging directory carrying this prefix and only
+# renamed into their final ``<timestamp>__<commit>`` name once complete, so a
+# reader never observes a half-written dataset. The prefix is also what the
+# reuse scan skips and what the orphan cleanup collects.
+TMP_PREFIX = ".tmp_"
 # Bumped from 2 to 3 when instance point clouds moved from float64 to float32:
 # the storage layout is unchanged, but float32 voxel binning shifts a handful of
 # boundary voxels, so a float64-era dataset must not be reused as if it were
@@ -123,15 +130,44 @@ def _decide_reuse_or_generate(
     staging and final paths for a new generation. Making this decision in one
     place and broadcasting it prevents ranks from diverging when their views of
     the shared filesystem differ.
+
+    The scan is deliberately forgiving: a candidate whose metadata is missing,
+    unreadable, or malformed is warned about and skipped rather than allowed to
+    raise. This function runs inside a window where every peer is already
+    waiting in the decision broadcast, so a crash here is a job-wide hang; a
+    poison directory (exactly what a killed job leaves behind) must never be
+    able to cause one.
     """
     candidates = sorted(
         (p for p in base.iterdir() if p.is_dir()), key=lambda p: p.name, reverse=True
     )
     for dataset_path in candidates:
+        # Staging dirs are not datasets: a job killed between the meta write and
+        # the rename leaves a complete meta.yaml inside one, and reusing it hands
+        # back a partially generated (and cleanup-eligible) directory.
+        if dataset_path.name.startswith(TMP_PREFIX):
+            continue
         meta_path = dataset_path / META_FILENAME
         if not meta_path.exists():
             continue
-        meta = yaml.safe_load(meta_path.read_text())
+        try:
+            meta = yaml.safe_load(meta_path.read_text())
+        except Exception as exc:
+            log.warning(
+                "Skipping dataset candidate %s: unreadable %s (%s: %s)",
+                dataset_path,
+                META_FILENAME,
+                type(exc).__name__,
+                exc,
+            )
+            continue
+        if not isinstance(meta, dict):
+            log.warning(
+                "Skipping dataset candidate %s: %s is empty or malformed",
+                dataset_path,
+                META_FILENAME,
+            )
+            continue
         if meta.get("config_id") != config_id:
             continue
         if meta.get("dataset_format_version", 1) != DATASET_FORMAT_VERSION:
@@ -145,7 +181,11 @@ def _decide_reuse_or_generate(
     log.info("No valid existing dataset found at %s. Generating new dataset.", base)
     ts = time.strftime("%Y%m%d-%H%M%S")
     dest = base / f"{ts}__{commit}"
-    tmp = base / f".tmp_{ts}"
+    # The staging name must be unique per job: a bare 1-second-granularity
+    # timestamp let two same-config jobs starting in the same second collide on
+    # ``mkdir(exist_ok=False)``, killing one of them mid-consensus. Adding the
+    # pid and a random suffix makes the name unique even across nodes.
+    tmp = base / f"{TMP_PREFIX}{ts}_{os.getpid()}_{uuid.uuid4().hex[:8]}"
     tmp.mkdir(parents=True, exist_ok=False)
     return ("generate", str(tmp), str(dest))
 
@@ -188,13 +228,27 @@ def get_dataset(
     # same branch. Scanning the shared filesystem independently per rank lets
     # divergent views (stale metadata caches, a racing job's rename) strand some
     # ranks in the generation collectives while others return early.
+    # Everything rank 0 does here happens while the peers are already blocked in
+    # the broadcast below, so a rank-0 exception would strand the whole job.
+    # Any failure is therefore turned into an error sentinel that travels
+    # through the same broadcast and makes every rank raise the same error.
     if rank == 0:
-        decision = _decide_reuse_or_generate(
-            base, config_id, commit, require_commit, log
-        )
+        try:
+            decision = _decide_reuse_or_generate(
+                base, config_id, commit, require_commit, log
+            )
+        except (Exception, SystemExit) as e:
+            decision = (
+                "error",
+                f"rank 0 failed to select a dataset under {base}: "
+                f"{type(e).__name__}: {e}",
+            )
     else:
         decision = None
     decision = comm.bcast(decision, root=0)
+
+    if decision[0] == "error":
+        raise RuntimeError(f"dataset selection failed: {decision[1]}")
 
     if decision[0] == "reuse":
         return Path(decision[1])
@@ -230,21 +284,35 @@ def get_dataset(
         raise RuntimeError(f"dataset generation failed: {msgs or 'unknown error'}")
 
     # rank 0 writes metadata into the staging dir, then renames it into place so
-    # readers never observe a half-written dataset.
+    # readers never observe a half-written dataset. This is another rank-0-only
+    # window inside a collective sequence: the rename can fail (a racing job
+    # already published this name, quota, ...), so the outcome is broadcast
+    # rather than allowed to kill rank 0 while the peers wait for it.
+    finalize_err = ""
     if rank == 0:
-        meta = {
-            "config_id": config_id,
-            "dataset_format_version": DATASET_FORMAT_VERSION,
-            "config_subset": volume_config,
-            "include_keys": INCLUDE_KEYS,
-            "code_commit": commit,
-            "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        }
-        (tmp / META_FILENAME).write_text(
-            yaml.safe_dump(meta, sort_keys=True, default_flow_style=False)
-        )
-        tmp.rename(dest)
+        try:
+            meta = {
+                "config_id": config_id,
+                "dataset_format_version": DATASET_FORMAT_VERSION,
+                "config_subset": volume_config,
+                "include_keys": INCLUDE_KEYS,
+                "code_commit": commit,
+                "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            }
+            (tmp / META_FILENAME).write_text(
+                yaml.safe_dump(meta, sort_keys=True, default_flow_style=False)
+            )
+            tmp.rename(dest)
+        except (Exception, SystemExit) as e:
+            finalize_err = (
+                f"rank 0 failed to finalize dataset at {dest}: {type(e).__name__}: {e}"
+            )
 
-    # ensure the rename is visible everywhere before returning
-    comm.Barrier()
+    # This broadcast doubles as the synchronization the old Barrier provided: no
+    # rank returns before rank 0 has published the rename (or reported that it
+    # could not), so nobody observes the staging path or a missing dataset.
+    finalize_err = comm.bcast(finalize_err, root=0)
+    if finalize_err:
+        raise RuntimeError(f"dataset generation failed: {finalize_err}")
+
     return dest

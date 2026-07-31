@@ -38,6 +38,7 @@ Two tiers of tests guard the invariant:
 
 from __future__ import annotations
 
+import logging
 import re
 from argparse import Namespace
 from math import ceil
@@ -338,6 +339,203 @@ def test_generation_success_finalizes_and_returns(tmp_path, monkeypatch):
     # No staging dir is left behind under the config_id base.
     leftover = [p for p in Path(result).parent.iterdir() if p.name.startswith(".tmp_")]
     assert leftover == []
+
+
+# ---------------------------------------------------------------------------
+# R27: rank 0 must never die between the collectives its peers have entered.
+# Every rank-0-only step of the consensus (the reuse/generate decision and the
+# final meta-write + rename) is wrapped so a failure travels to the peers as a
+# broadcast sentinel instead of stranding them in ``bcast``/``Barrier``.
+# ---------------------------------------------------------------------------
+
+
+def _base_dir_for(config: Namespace) -> Path:
+    """The ``<dataset_dir>/<config_id>`` directory ``get_dataset`` scans."""
+    config_dict = vars(config).copy()
+    config_dict["dataset_format_version"] = gd.DATASET_FORMAT_VERSION
+    volume_config = gd._get_required_keys_dict(config_dict, gd.INCLUDE_KEYS)
+    return Path(config.dataset_dir) / gd._hash_volume_config(volume_config)
+
+
+def test_decision_failure_is_broadcast_not_raised_before_bcast(tmp_path, monkeypatch):
+    """A rank-0 decision failure reaches peers through the broadcast.
+
+    Any exception inside the rank-0-only decision (an unreadable base dir, a
+    staging ``mkdir`` hitting ENOSPC, ...) must be converted into an error
+    sentinel that is broadcast, so peers already waiting in ``bcast`` learn
+    about it and raise the same error. Before the fix rank 0 raised *before*
+    reaching the broadcast, leaving every peer blocked forever.
+    """
+    config = _reuse_config(tmp_path / "datasets")
+    comm = FakeComm(rank=0, size=2)
+    monkeypatch.setattr(gd, "MPI", FakeMPI(comm))
+    monkeypatch.setattr(gd, "_git_commit_short", lambda log: "abc123")
+
+    def explode(*_args, **_kwargs):
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(gd, "_decide_reuse_or_generate", explode)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        gd.get_dataset(config)
+
+    # Rank 0 reached the broadcast before raising, and the payload is the
+    # error sentinel every peer will see.
+    assert comm.calls == ["bcast"]
+    assert comm.bcast_payloads[0][0] == "error"
+    assert "No space left on device" in str(excinfo.value)
+
+
+def test_non_root_raises_on_broadcast_decision_error(tmp_path, monkeypatch):
+    """A peer receiving the error sentinel raises instead of generating."""
+    config = _reuse_config(tmp_path / "datasets")
+    sentinel = ("error", "rank 0: OSError: No space left on device")
+    comm = FakeComm(rank=1, size=2, bcast_returns=[sentinel])
+    monkeypatch.setattr(gd, "MPI", FakeMPI(comm))
+    monkeypatch.setattr(gd, "_git_commit_short", lambda log: "abc123")
+
+    with pytest.raises(RuntimeError) as excinfo:
+        gd.get_dataset(config)
+
+    assert "No space left on device" in str(excinfo.value)
+    # The peer stopped at the decision broadcast: no generation collectives.
+    assert comm.calls == ["bcast"]
+
+
+def test_reuse_scan_skips_staging_dirs(tmp_path, monkeypatch):
+    """A complete ``meta.yaml`` stranded in a ``.tmp_*`` dir is never reused.
+
+    A job killed between the meta write and the rename leaves a fully valid
+    meta inside its staging dir. Treating that as a publishable dataset hands
+    back a half-generated directory (and one that cleanup may delete).
+    """
+    config = _reuse_config(tmp_path / "datasets")
+    base = _base_dir_for(config)
+    config_id = base.name
+    stranded = base / ".tmp_20260101-000000_1234"
+    stranded.mkdir(parents=True)
+    (stranded / gd.META_FILENAME).write_text(
+        yaml.safe_dump(
+            {
+                "config_id": config_id,
+                "dataset_format_version": gd.DATASET_FORMAT_VERSION,
+            }
+        )
+    )
+
+    comm = FakeComm(rank=0, size=1)
+    monkeypatch.setattr(gd, "MPI", FakeMPI(comm))
+    monkeypatch.setattr(gd, "_git_commit_short", lambda log: "abc123")
+    log = logging.getLogger("test_reuse_scan_skips_staging_dirs")
+
+    decision = gd._decide_reuse_or_generate(base, config_id, "abc123", False, log)
+
+    assert decision[0] == "generate", f"staging dir was reused: {decision}"
+
+
+def test_reuse_scan_tolerates_corrupt_meta(tmp_path, monkeypatch):
+    """A corrupt/unreadable candidate meta is skipped, not fatal.
+
+    A 0-byte ``meta.yaml`` (``yaml.safe_load`` -> ``None``) or an unparseable
+    one used to raise inside the rank-0-only scan. The scan must warn, skip the
+    directory, and keep looking -- here finding the good dataset next to it.
+    """
+    config = _reuse_config(tmp_path / "datasets")
+    base = _base_dir_for(config)
+    config_id = base.name
+    base.mkdir(parents=True)
+
+    # Sorted-descending scan order visits these two poison dirs first.
+    (base / "20260301-000000__zzz").mkdir()
+    (base / "20260301-000000__zzz" / gd.META_FILENAME).write_text("")
+    (base / "20260201-000000__yyy").mkdir()
+    (base / "20260201-000000__yyy" / gd.META_FILENAME).write_text("{[not yaml")
+
+    good = _write_reusable_dataset(base, config_id)
+    log = logging.getLogger("test_reuse_scan_tolerates_corrupt_meta")
+
+    decision = gd._decide_reuse_or_generate(base, config_id, "abc123", False, log)
+
+    assert decision[0] == "reuse"
+    assert Path(decision[1]) == good
+
+
+def test_staging_dir_names_are_collision_proof(tmp_path, monkeypatch):
+    """Two decisions in the same second stage into different directories.
+
+    The old name was ``.tmp_%Y%m%d-%H%M%S`` with ``mkdir(exist_ok=False)``, so
+    two same-config jobs starting in the same second raced to a
+    ``FileExistsError`` on one of them -- inside the unguarded rank-0 window.
+    """
+    config = _reuse_config(tmp_path / "datasets")
+    base = _base_dir_for(config)
+    base.mkdir(parents=True)
+    log = logging.getLogger("test_staging_dir_names_are_collision_proof")
+
+    # Pin the clock so both decisions share a timestamp: only a non-time
+    # component can keep the names apart.
+    monkeypatch.setattr(gd.time, "strftime", lambda *_args: "20260101-000000")
+
+    first = gd._decide_reuse_or_generate(base, base.name, "abc123", False, log)
+    second = gd._decide_reuse_or_generate(base, base.name, "abc123", False, log)
+
+    assert first[0] == "generate" and second[0] == "generate"
+    assert first[1] != second[1], "same-second staging dirs collided"
+    assert Path(first[1]).is_dir() and Path(second[1]).is_dir()
+
+
+def test_finalize_failure_is_broadcast_not_left_to_barrier(tmp_path, monkeypatch):
+    """A rank-0 rename failure is broadcast; peers raise instead of hanging.
+
+    The rename happens *after* the generation consensus, so a failure there
+    (e.g. a racing job already created the destination) used to kill rank 0
+    while every peer sat in the final ``Barrier``. The fix carries the failure
+    through one more collective and raises everywhere.
+    """
+    config = _reuse_config(tmp_path / "datasets")
+    comm = FakeComm(rank=0, size=2, allreduce_result=1)
+    monkeypatch.setattr(gd, "MPI", FakeMPI(comm))
+    monkeypatch.setattr(gd, "_git_commit_short", lambda log: "abc123")
+    monkeypatch.setattr(volumegen, "main", lambda _config: None)
+
+    # Pin the clock so the destination name is predictable, then have a
+    # "racing job" occupy it with a non-empty directory: the rename fails with
+    # ENOTEMPTY exactly as it did in the field.
+    monkeypatch.setattr(gd.time, "strftime", lambda *_args: "20260101-000000")
+    base = _base_dir_for(config)
+    dest = base / "20260101-000000__abc123"
+    dest.mkdir(parents=True)
+    (dest / "placeholder").write_text("created by a racing job")
+
+    with pytest.raises(RuntimeError) as excinfo:
+        gd.get_dataset(config)
+
+    message = str(excinfo.value)
+    assert "20260101-000000__abc123" in message
+    # The failure travelled through a collective *after* the generation
+    # consensus, so peers learn about it rather than waiting in the barrier.
+    assert "allgather" in comm.calls
+    assert comm.calls.index("allgather") < len(comm.calls) - 1
+
+
+def test_non_root_raises_on_broadcast_finalize_error(tmp_path, monkeypatch):
+    """A peer receiving the finalize error raises rather than returning dest."""
+    config = _reuse_config(tmp_path / "datasets")
+    dest = tmp_path / "datasets" / "cid" / "20260101-000000__abc123"
+    comm, _tmp, _dest = _generate_decision_comm(
+        rank=1, size=2, dest=dest, allreduce_result=1
+    )
+    # Second bcast: root's finalize verdict (a failure message).
+    comm._bcast_returns.append("rank 0 failed to finalize: OSError: boom")
+    monkeypatch.setattr(gd, "MPI", FakeMPI(comm))
+    monkeypatch.setattr(gd, "_git_commit_short", lambda log: "abc123")
+    monkeypatch.setattr(volumegen, "main", lambda _config: None)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        gd.get_dataset(config)
+
+    assert "boom" in str(excinfo.value)
+    assert not dest.exists()
 
 
 # ---------------------------------------------------------------------------
