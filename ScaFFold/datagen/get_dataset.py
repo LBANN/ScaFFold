@@ -99,11 +99,26 @@ def _hash_volume_config(volume_config: Dict[str, Any]) -> str:
     return hashlib.sha256(s).hexdigest()[:12]
 
 
-def _git_commit_short(log) -> str:
+def _git_commit_short(log, source_dir: Path | None = None) -> str:
+    """Return the short commit of the ScaFFold checkout, or ``"no-commit-id"``.
+
+    The commit identifies *the code that generated a dataset*: it is stamped
+    into ``meta.yaml``, into the published directory name, and is what
+    ``dataset_reuse_enforce_commit_id`` compares against. It must therefore be
+    read from the ScaFFold source tree rather than from the process working
+    directory, which is wherever the job was launched (a site workflow repo, a
+    scratch directory, ...) and has nothing to do with this code.
+
+    ``source_dir`` overrides the directory git runs in; it defaults to this
+    module's own location and exists so the non-checkout case can be tested.
+    """
+    if source_dir is None:
+        source_dir = Path(__file__).resolve().parent
     try:
         return (
             subprocess.check_output(
                 ["git", "rev-parse", "--short", "HEAD"],
+                cwd=str(source_dir),
                 stderr=subprocess.DEVNULL,  # Don't show console output to user
             )
             .decode()
