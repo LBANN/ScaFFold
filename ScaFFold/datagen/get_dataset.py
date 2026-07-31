@@ -37,10 +37,17 @@ META_FILENAME = "meta.yaml"
 # reader never observes a half-written dataset. The prefix is also what the
 # reuse scan skips and what the orphan cleanup collects.
 TMP_PREFIX = ".tmp_"
-# How long a staging directory must have sat untouched before it is treated as
-# orphaned (left by a killed/OOM'd job) and reclaimed. See
+# How long a staging directory must have shown no sign of life before it is
+# treated as orphaned (left by a killed/OOM'd job) and reclaimed. See
 # ``_cleanup_stale_staging_dirs`` for the safety argument behind the value.
 STALE_STAGING_AGE_SECONDS = 24 * 60 * 60
+# Bounds on the liveness probe that backs up the heartbeat: how many directory
+# levels below a staging dir it looks at, and how many directories it is willing
+# to visit before it gives up and calls the tree live. Directory mtimes change
+# when entries are created in them, so a couple of levels is enough to notice a
+# writer without stat-ing every volume file.
+_STALE_PROBE_MAX_DEPTH = 3
+_STALE_PROBE_MAX_DIRS = 10000
 # Bumped from 2 to 3 when instance point clouds moved from float64 to float32:
 # the storage layout is unchanged, but float32 voxel binning shifts a handful of
 # boundary voxels, so a float64-era dataset must not be reused as if it were
@@ -138,6 +145,67 @@ def _git_commit_short(log, source_dir: Path | None = None) -> str:
         return "no-commit-id"
 
 
+def _has_recent_write(path: Path, cutoff: float) -> bool:
+    """Return True if the top levels of ``path`` were written after ``cutoff``.
+
+    A directory's mtime changes whenever an entry is created in it, so the
+    directory mtimes near the top of a staging tree are a cheap proxy for "a
+    writer is active down there" -- no stat of the (possibly hundreds of
+    thousands of) volume files is needed. The walk therefore stats the staging
+    directory, its immediate children, and directories down to
+    ``_STALE_PROBE_MAX_DEPTH``, and stops at the first recent entry, which makes
+    the live case (the one that must not be misjudged) the cheap one.
+
+    A tree wide enough to exceed ``_STALE_PROBE_MAX_DIRS`` is reported as recent
+    rather than walked further: failing to reclaim disk is recoverable, deleting
+    a running job's dataset is not.
+    """
+    stack = [(path, 0)]
+    dirs_seen = 0
+    while stack:
+        current, depth = stack.pop()
+        if current.stat().st_mtime > cutoff:
+            return True
+        if depth >= _STALE_PROBE_MAX_DEPTH:
+            continue
+        with os.scandir(current) as entries:
+            for entry in entries:
+                if entry.is_dir(follow_symlinks=False):
+                    dirs_seen += 1
+                    if dirs_seen > _STALE_PROBE_MAX_DIRS:
+                        return True
+                    stack.append((Path(entry.path), depth + 1))
+                elif depth == 0 and entry.stat().st_mtime > cutoff:
+                    # Files directly in the staging dir (the heartbeat,
+                    # volumes_contents.csv, meta.yaml) are few and cheap.
+                    return True
+    return False
+
+
+def _staging_dir_is_live(path: Path, cutoff: float) -> bool:
+    """Return True if ``path`` shows any sign of a generation still running.
+
+    Two signals, in order of authority:
+
+    1. ``<staging>/.heartbeat``, refreshed by every writing rank every few
+       minutes for as long as volumes are being written (see
+       ``volumegen.StagingHeartbeat``). This is the reliable one, because it
+       does not depend on where in the tree the writers currently are.
+    2. a bounded-depth mtime probe, which covers staging directories written
+       before the heartbeat existed, or killed before the first beat.
+
+    Raises ``OSError`` if the directory cannot be examined; the caller treats
+    that as "cannot tell" and leaves the directory alone.
+    """
+    heartbeat = path / volumegen.STAGING_HEARTBEAT_NAME
+    try:
+        if heartbeat.stat().st_mtime > cutoff:
+            return True
+    except OSError:
+        pass  # No heartbeat: fall back to the mtime probe.
+    return _has_recent_write(path, cutoff)
+
+
 def _cleanup_stale_staging_dirs(
     base: Path, log, max_age: float = STALE_STAGING_AGE_SECONDS
 ) -> None:
@@ -149,39 +217,39 @@ def _cleanup_stale_staging_dirs(
 
     Safety policy. Only directories that (a) live directly under *this*
     config_id base, (b) carry the ``.tmp_`` prefix this module owns, and (c)
-    have been untouched for ``max_age`` are removed. The age gate is what keeps
-    a *concurrent* job's staging directory safe: unique staging names mean two
-    live jobs never share a directory, but they do share the base, so a live
-    peer's directory is visible here -- it is simply orders of magnitude younger
-    than the threshold (a day, against generations measured in minutes to
-    hours). Published datasets and anything outside ``base`` are never touched.
-    Failures are logged and ignored: cleanup is opportunistic and must never
-    break the decision it runs inside.
+    show no sign of life for ``max_age`` are removed. Published datasets and
+    anything outside ``base`` are never touched. Failures are logged and
+    ignored: cleanup is opportunistic and must never break the decision it runs
+    inside.
+
+    "No sign of life" is the delicate part, because the staging directory of a
+    *running* job is visible here (unique staging names mean two live jobs never
+    share a directory, but they do share the base). Age alone is not enough:
+    generation is not bounded by a day -- at the larger scales it is measured in
+    days -- and after the first minutes it writes only at depth >= 2, so the top
+    of the tree stops changing while the job is perfectly healthy. Judging by
+    the top-level mtimes alone therefore let a concurrent same-config start
+    rmtree a live generation out from under its peers. ``_staging_dir_is_live``
+    is the answer: an explicit heartbeat maintained by the writers, backed by a
+    bounded-depth mtime probe for directories that predate it.
     """
     now = time.time()
+    cutoff = now - max_age
     for path in base.iterdir():
         if not path.name.startswith(TMP_PREFIX) or not path.is_dir():
             continue
         try:
-            # Newest mtime among the staging dir and its immediate children: a
-            # bounded, cheap probe (no recursive stat storm over a partially
-            # generated dataset) that still notices a job that has started
-            # laying down its split directories.
-            newest = path.stat().st_mtime
-            for child in path.iterdir():
-                newest = max(newest, child.stat().st_mtime)
+            if _staging_dir_is_live(path, cutoff):
+                continue
         except OSError as exc:
-            log.warning("Could not stat staging dir %s: %s", path, exc)
-            continue
-
-        age = now - newest
-        if age < max_age:
+            log.warning("Could not examine staging dir %s: %s", path, exc)
             continue
 
         log.info(
-            "Removing orphaned dataset staging dir %s (untouched for %.1f hours)",
+            "Removing orphaned dataset staging dir %s (no write in the last "
+            "%.1f hours, and no live generation heartbeat)",
             path,
-            age / 3600.0,
+            max_age / 3600.0,
         )
         shutil.rmtree(path, ignore_errors=True)
 
@@ -430,6 +498,9 @@ def get_dataset(
                 "code_commit": commit,
                 "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             }
+            # The liveness marker described this directory while it was being
+            # written; it has no meaning in a published dataset.
+            (tmp / volumegen.STAGING_HEARTBEAT_NAME).unlink(missing_ok=True)
             _write_meta_atomic(tmp / META_FILENAME, meta)
             tmp.rename(dest)
         except BaseException as e:

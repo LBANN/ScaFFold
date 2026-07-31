@@ -27,6 +27,55 @@ from ScaFFold.utils.config_utils import Config
 from ScaFFold.utils.data_types import MASK_DTYPE, VOLUME_DTYPE
 from ScaFFold.utils.utils import setup_mpi_logger
 
+# Liveness marker for the directory being generated into. Volume writing is the
+# long phase of a generation and it happens deep inside the tree
+# (``volumes/<split>/N.npy``), so the top of the staging directory can look
+# untouched for many hours while the job is perfectly healthy. Every writing
+# rank therefore refreshes this file periodically, and
+# ``get_dataset._staging_dir_is_live`` reads it instead of trying to infer
+# liveness from mtimes it cannot cheaply see. The name is owned here, next to
+# the writer; ``get_dataset`` (which already imports this module) reads it from
+# here so the two sides cannot drift.
+STAGING_HEARTBEAT_NAME = ".heartbeat"
+# Refresh interval. Small enough to be negligible against the staleness
+# threshold (a day), large enough that it is one utime per rank per few minutes
+# no matter how fast volumes are written.
+STAGING_HEARTBEAT_INTERVAL_SECONDS = 5 * 60
+
+
+class StagingHeartbeat:
+    """Periodically touch a staging directory's heartbeat file.
+
+    ``beat()`` is called from the volume loop and is a no-op until the interval
+    has elapsed, so it costs one comparison per volume. Every rank writing into
+    the directory beats the same file: the marker means "somebody is still
+    working here", and a last-writer-wins utime is exactly the semantics wanted.
+    Failures are swallowed -- a heartbeat that cannot be written must never take
+    down a generation that is otherwise fine (the cleanup's second signal, the
+    bounded mtime probe, still applies).
+    """
+
+    def __init__(
+        self, staging_dir, interval: float = STAGING_HEARTBEAT_INTERVAL_SECONDS
+    ) -> None:
+        self.path = os.path.join(str(staging_dir), STAGING_HEARTBEAT_NAME)
+        self.interval = interval
+        self._last_beat = float("-inf")
+
+    def beat(self, now: float | None = None) -> bool:
+        """Touch the marker if the interval has elapsed; return whether it did."""
+        now = time.time() if now is None else now
+        if now - self._last_beat < self.interval:
+            return False
+        self._last_beat = now
+        try:
+            with open(self.path, "a"):
+                pass
+            os.utime(self.path, (now, now))
+        except OSError:
+            return False
+        return True
+
 
 def load_np_ptcloud(path: str) -> np.ndarray:
     """
@@ -253,9 +302,16 @@ def main(config: Dict):
             # this run's seed produced. Resolved once, outside the loop.
             instances_dir = layout.instance_dir(config)
 
-            # Generation loop
+            # Generation loop. Every rank reports that this staging directory
+            # is still being written to, so a concurrent job's orphan cleanup
+            # can tell a live multi-hour generation from one killed a day ago
+            # (the volumes themselves land two levels down, where a cheap
+            # top-level mtime probe cannot see them).
+            heartbeat = StagingHeartbeat(dataset_dir)
+            heartbeat.beat()
             start_time = time.time()
             for i, curr_vol in enumerate(volumes_contents_subset):
+                heartbeat.beat()
                 if i % 10 == 0:
                     log.debug("Rank %s processing local volume %s", rank, i)
 

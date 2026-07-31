@@ -658,6 +658,120 @@ def test_cleanup_never_touches_published_datasets(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# VB-1: a staging dir is aged by its DEEPEST recent write, not its top level.
+#
+# Generation is not bounded by the staleness threshold -- at the larger scales
+# it runs for days -- and after the first minutes it writes only at depth >= 2
+# (``volumes/<split>/N.npy``). Judging liveness from the staging dir and its
+# immediate children alone therefore reported a healthy multi-day generation as
+# "untouched for 48 hours", and a concurrent same-config start rmtree'd it out
+# from under its peers (which then died on FileNotFoundError).
+# ---------------------------------------------------------------------------
+
+
+def _cleanup(base: Path, name: str) -> None:
+    gd._cleanup_stale_staging_dirs(base, logging.getLogger(name))
+
+
+def test_live_generation_survives_a_deep_write(tmp_path):
+    """A >24h-old staging dir with a fresh deep write is NOT reclaimed."""
+    base = tmp_path / "cid"
+    base.mkdir(parents=True)
+
+    live = base / f"{gd.TMP_PREFIX}20260101-000000_222_cafebabe"
+    split = live / "volumes" / "training"
+    split.mkdir(parents=True)
+    _age_tree(live, 2 * gd.STALE_STAGING_AGE_SECONDS)
+
+    # The job is alive and still laying down volumes: the write lands two levels
+    # down, so only that directory's mtime is current.
+    (split / "0.npy").write_bytes(b"payload from a running job")
+
+    _cleanup(base, "test_live_generation_survives_a_deep_write")
+
+    assert live.exists(), "a live generation's staging dir was reclaimed"
+
+
+def test_live_generation_survives_on_its_heartbeat_alone(tmp_path):
+    """A fresh heartbeat keeps a staging dir whose whole tree looks ancient.
+
+    The mtime probe is bounded, so a generation writing deeper than it looks
+    (or on a filesystem with coarse directory mtimes) still has to be safe. The
+    heartbeat is the signal that does not depend on the shape of the tree.
+    """
+    base = tmp_path / "cid"
+    base.mkdir(parents=True)
+
+    live = base / f"{gd.TMP_PREFIX}20260101-000000_333_f00d"
+    (live / "volumes" / "training" / "deep" / "deeper").mkdir(parents=True)
+    heartbeat = live / volumegen.STAGING_HEARTBEAT_NAME
+    heartbeat.write_text("")
+    _age_tree(live, 2 * gd.STALE_STAGING_AGE_SECONDS)
+    now = time.time()
+    os.utime(heartbeat, (now, now))
+
+    _cleanup(base, "test_live_generation_survives_on_its_heartbeat_alone")
+
+    assert live.exists(), "a heartbeating generation's staging dir was reclaimed"
+
+
+def test_dead_staging_dir_with_stale_heartbeat_is_reclaimed(tmp_path):
+    """The heartbeat must not turn cleanup into a no-op (R37 still holds)."""
+    base = tmp_path / "cid"
+    base.mkdir(parents=True)
+
+    orphan = base / f"{gd.TMP_PREFIX}20200101-000000_111_deadbeef"
+    split = orphan / "volumes" / "training"
+    split.mkdir(parents=True)
+    (split / "0.npy").write_bytes(b"stale payload")
+    (orphan / volumegen.STAGING_HEARTBEAT_NAME).write_text("")
+    _age_tree(orphan, 2 * gd.STALE_STAGING_AGE_SECONDS)
+
+    _cleanup(base, "test_dead_staging_dir_with_stale_heartbeat_is_reclaimed")
+
+    assert not orphan.exists(), "an orphaned staging dir was not reclaimed"
+
+
+def test_generation_writes_and_then_drops_the_heartbeat(tmp_path, monkeypatch):
+    """volumegen marks the staging dir live; publishing removes the marker."""
+    config = _reuse_config(tmp_path / "datasets")
+    comm = FakeComm(rank=0, size=1, allreduce_result=1)
+    monkeypatch.setattr(gd, "MPI", FakeMPI(comm))
+    monkeypatch.setattr(gd, "_git_commit_short", lambda log: "abc123")
+
+    beating = {}
+
+    def fake_volumegen(cfg):
+        # Stand in for the write loop: report the staging dir as live.
+        volumegen.StagingHeartbeat(cfg.dataset_dir).beat()
+        beating["path"] = Path(cfg.dataset_dir) / volumegen.STAGING_HEARTBEAT_NAME
+        beating["existed_during_generation"] = beating["path"].exists()
+
+    monkeypatch.setattr(volumegen, "main", fake_volumegen)
+
+    published = Path(gd.get_dataset(config))
+
+    assert beating["existed_during_generation"], "no heartbeat during generation"
+    assert not (published / volumegen.STAGING_HEARTBEAT_NAME).exists(), (
+        "the staging heartbeat was published with the dataset"
+    )
+
+
+def test_heartbeat_respects_its_interval(tmp_path):
+    """``beat`` is a no-op until the interval elapses, then refreshes."""
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    heartbeat = volumegen.StagingHeartbeat(staging, interval=60)
+
+    assert heartbeat.beat(now=1000.0) is True
+    first = Path(heartbeat.path).stat().st_mtime
+    assert heartbeat.beat(now=1030.0) is False  # inside the interval
+    assert Path(heartbeat.path).stat().st_mtime == first
+    assert heartbeat.beat(now=1090.0) is True
+    assert Path(heartbeat.path).stat().st_mtime > first
+
+
+# ---------------------------------------------------------------------------
 # R28: meta.yaml is published atomically, so no reader ever sees a partial one.
 # ---------------------------------------------------------------------------
 
