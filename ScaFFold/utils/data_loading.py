@@ -165,15 +165,35 @@ class BasicDataset(Dataset):
         customlog(f"Dataset format version: {self.dataset_format_version}")
 
         # Masks are handed off in a signed 16-bit carrier (widened to long on
-        # the compute device), so every class id must fit that range. Legacy
-        # masks are remapped to 0..len(mask_values)-1; optimized masks store
-        # dense ids that stay within the same bound.
-        max_class_id = len(self.mask_values) - 1
+        # the compute device), so the largest class id the carrier will hold
+        # must fit that range.
+        max_class_id = self._max_class_id()
         if max_class_id > np.iinfo(np.int16).max:
             raise ValueError(
-                f"{len(self.mask_values)} classes exceed the int16 mask carrier "
-                f"limit ({np.iinfo(np.int16).max})"
+                f"Mask class id {max_class_id} (from {len(self.mask_values)} "
+                f"classes) exceeds the int16 mask carrier limit "
+                f"({np.iinfo(np.int16).max}); it would wrap negative"
             )
+
+    def _max_class_id(self):
+        """Return the largest class id ``_to_mask_carrier`` will have to carry.
+
+        The bound differs by format, and using the wrong one is unsafe in one
+        direction and needlessly strict in the other. v2+ masks ship *raw*
+        ``category + 1`` ids, and the per-split table lists only the categories
+        present in that split -- so a sparse split can declare two classes while
+        holding an id in the tens of thousands, which the class *count* check
+        happily waved through. Legacy masks, by contrast, are remapped to
+        ``0..len(mask_values)-1``, so the count is exactly right there and their
+        (arbitrarily large) raw values are irrelevant.
+        """
+        if self.dataset_format_version < DATASET_FORMAT_VERSION:
+            return len(self.mask_values) - 1
+
+        ids = np.asarray(self.mask_values)
+        if ids.size == 0:
+            return 0
+        return int(ids.max())
 
     def _load_mask_values(self, data_dir):
         """Return the label-remap table for this split.

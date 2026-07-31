@@ -636,6 +636,103 @@ def test_broken_meta_raises_instead_of_silent_legacy(tmp_path, broken_meta):
     assert str(root) in message
 
 
+def _build_v2_sparse_label_dataset(root: Path, label: int) -> Path:
+    """A v2 dataset whose only foreground label is the (large) ``label``.
+
+    v2 masks store raw ``category + 1`` ids and the per-split pickle lists only
+    the categories actually present in that split, so a sparse split can hold a
+    handful of very large ids.
+    """
+    vol_dir = root / "volumes" / "training"
+    mask_dir = root / "masks" / "training"
+    vol_dir.mkdir(parents=True)
+    mask_dir.mkdir(parents=True)
+    np.save(vol_dir / "0.npy", np.zeros((3, 4, 4, 4), dtype=VOLUME_DTYPE))
+    mask = np.zeros((4, 4, 4), dtype=MASK_DTYPE)
+    mask[0, 0, 0] = label
+    np.save(mask_dir / "0_mask.npy", mask)
+    with open(root / "train_unique_mask_vals", "wb") as handle:
+        pickle.dump({"mask_values": [0, label]}, handle)
+    (root / "meta.yaml").write_text("dataset_format_version: 2\n")
+    return root
+
+
+# ---------------------------------------------------------------------------
+# R34: the int16 carrier guard must bound the largest class *id*, not the count
+# ---------------------------------------------------------------------------
+
+
+def test_int16_guard_checks_the_largest_class_id(tmp_path):
+    """A v2 split holding an id above the int16 range is rejected.
+
+    The guard compared ``len(mask_values) - 1`` -- the class *count* -- against
+    the carrier limit, but v2 masks ship raw ids. A split listing only
+    ``[0, 40000]`` passed a two-class check and then wrapped 40000 to -25536 in
+    the int16 carrier, which survives the downstream ``.long()`` cast as a
+    negative label.
+    """
+    root = _build_v2_sparse_label_dataset(tmp_path / "sparse", label=40000)
+
+    with pytest.raises(ValueError) as excinfo:
+        FractalDataset(
+            root / "volumes" / "training",
+            root / "masks" / "training",
+            data_dir=root / "train_unique_mask_vals",
+        )
+
+    message = str(excinfo.value)
+    # The message names the offending id and how many classes the split has.
+    assert "40000" in message
+    assert "2" in message
+    assert str(np.iinfo(np.int16).max) in message
+
+
+def test_int16_guard_accepts_ids_inside_the_range(tmp_path):
+    """A large-but-representable id still loads, and does not wrap negative."""
+    label = int(np.iinfo(np.int16).max)
+    root = _build_v2_sparse_label_dataset(tmp_path / "edge", label=label)
+
+    ds = FractalDataset(
+        root / "volumes" / "training",
+        root / "masks" / "training",
+        data_dir=root / "train_unique_mask_vals",
+    )
+    carrier = ds[0]["mask"]
+    assert carrier.dtype == torch.int16
+    assert int(carrier.min()) >= 0
+    assert int(carrier.max()) == label
+
+
+def test_int16_guard_uses_remapped_ids_for_legacy_datasets(tmp_path):
+    """v1 raw values are remapped to 0..n-1, so huge raw values are fine.
+
+    Guarding on ``max(mask_values)`` alone would reject a legacy dataset that
+    the loader handles perfectly well: its carrier only ever holds the remapped
+    index, not the raw voxel value.
+    """
+    raw_mask = np.zeros((4, 4, 4), dtype=MASK_DTYPE)
+    raw_mask[0, 0, 0] = 40000
+    volume = np.zeros((4, 4, 4, 3), dtype=VOLUME_DTYPE)
+    root = _build_v1_split_dataset(
+        tmp_path / "legacy",
+        raw_mask,
+        volume,
+        train_vals=[0, 40000],
+        val_vals=[0, 40000],
+    )
+
+    ds = FractalDataset(
+        root / "volumes" / "training",
+        root / "masks" / "training",
+        data_dir=root / "train_unique_mask_vals",
+    )
+    assert ds.dataset_format_version == 1
+    carrier = ds[0]["mask"]
+    # 40000 was remapped to class index 1; nothing wrapped.
+    assert int(carrier.max()) == 1
+    assert int(carrier.min()) == 0
+
+
 def test_absent_meta_is_still_legacy_v1(tiny_v1_dataset):
     """The genuine legacy case (no ``meta.yaml`` at all) is unchanged.
 
