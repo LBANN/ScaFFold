@@ -18,6 +18,7 @@ from argparse import Namespace
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from ScaFFold.datagen import category_search as cs
 from ScaFFold.datagen import layout
@@ -190,3 +191,66 @@ def test_divergent_fs_views_take_the_same_collective_path(tmp_path, monkeypatch)
         "ranks with divergent filesystem views issued different collectives: "
         f"rank 0 {root_comm.calls} vs rank 1 {peer_comm.calls}"
     )
+
+
+# ---------------------------------------------------------------------------
+# R31: category CSVs appear complete or not at all.
+#
+# A category file truncated by a killed job is still counted as "done" by the
+# resume scan, so nothing ever regenerates it: instance generation then dies
+# parsing it, and the category search's own resume dies re-loading it. The
+# pipeline cannot self-heal -- the file has to be deleted by hand.
+# ---------------------------------------------------------------------------
+
+
+def _params() -> np.ndarray:
+    params = np.zeros((2, 13), dtype=np.float64)
+    params[:, 0] = params[:, 4] = params[:, 8] = 0.5
+    params[0, 12] = 0.5
+    return params
+
+
+def test_category_csv_write_is_atomic(tmp_path, monkeypatch):
+    """A killed mid-write leaves no category file under a name resume accepts."""
+    param_dir = tmp_path / "3DIFS_param"
+    param_dir.mkdir()
+
+    # One complete category, saved normally.
+    indices, saved = [], []
+    first = _params()
+    assert cs.save_valid_category(str(param_dir), first, indices, saved) == 0
+    assert np.loadtxt(param_dir / "000000.csv", delimiter=",").shape == (2, 13)
+
+    # The next save is interrupted after some bytes have been written.
+    observed = {}
+
+    def partial_then_raise(fname, arr, *args, **kwargs):
+        observed["listing"] = sorted(p.name for p in param_dir.iterdir())
+        handle = fname if hasattr(fname, "write") else open(fname, "w")
+        handle.write("0.5,0.5,0.5\n")
+        handle.flush()
+        if handle is not fname:
+            handle.close()
+        raise OSError("simulated SIGKILL mid-write")
+
+    monkeypatch.setattr(cs.np, "savetxt", partial_then_raise)
+
+    second = _params()
+    second[0, 0] = 0.25
+    with pytest.raises(OSError):
+        cs.save_valid_category(str(param_dir), second, indices, saved)
+
+    # No truncated category is visible: the resume scan still sees exactly the
+    # one complete category, and every file it names parses.
+    assert cs.parse_category_indices(str(param_dir)) == [0]
+    assert not (param_dir / "000001.csv").exists()
+    for idx in cs.parse_category_indices(str(param_dir)):
+        assert np.loadtxt(param_dir / f"{idx:06d}.csv", delimiter=",").shape == (2, 13)
+
+    # Mid-write, the partial data lived under a name neither the resume scan
+    # nor the instance loader (which takes every ``*.csv``) would pick up.
+    partial_names = [n for n in observed["listing"] if n != "000000.csv"]
+    assert all(not name.endswith(".csv") for name in partial_names), partial_names
+
+    # And nothing was left behind afterwards.
+    assert sorted(p.name for p in param_dir.iterdir()) == ["000000.csv"]

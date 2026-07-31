@@ -335,10 +335,39 @@ def save_valid_category(
     target = os.path.join(fracts_write_dir, "%06d.csv" % idx)
     if os.path.exists(target):
         raise FileExistsError(f"Refusing to overwrite existing category file: {target}")
-    np.savetxt(target, params, delimiter=",")
+    _savetxt_atomic(target, params)
     existing_indices.append(idx)
     existing_params.append(params)
     return idx
+
+
+def _savetxt_atomic(target: str, params: np.array) -> None:
+    """Write one category's parameters to ``target`` atomically.
+
+    A category CSV truncated by a killed job is poison: the six-digit name is
+    all the resume scan looks at, so the category counts as done forever, while
+    every consumer (instance generation, and the search's own resume) dies
+    parsing it. The file is therefore written to a temp name in the same
+    directory -- one that neither the resume glob (``NNNNNN.csv``) nor the
+    instance loader's ``*.csv`` filter can match -- flushed, fsynced, and only
+    then ``os.replace``d onto the final name.
+    """
+    directory, name = os.path.split(target)
+    tmp_path = os.path.join(directory, f".{name}.tmp{os.getpid()}")
+    try:
+        with open(tmp_path, "w") as handle:
+            np.savetxt(handle, params, delimiter=",")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, target)
+    except BaseException:
+        # A failed write must leave nothing behind: no temp file, and no
+        # partial file under the name resume would accept.
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 def _attempt_state_path(fracts_write_dir: str, rank: int) -> str:
