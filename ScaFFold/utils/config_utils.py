@@ -27,6 +27,40 @@ def require_positive_int(name: str, value: int) -> int:
     return value
 
 
+def validate_unet_dims(problem_scale, unet_bottleneck_dim) -> int:
+    """Check that ``problem_scale``/``unet_bottleneck_dim`` describe a real U-Net.
+
+    The U-Net has ``unet_layers = problem_scale - unet_bottleneck_dim``
+    down/up levels over a ``2**problem_scale`` volume, so the bottleneck
+    exponent must satisfy ``0 <= unet_bottleneck_dim <= problem_scale - 1``:
+    a larger value asks for a bottleneck no smaller than the input (zero or
+    negative layers) and a negative one asks for more pooling levels than the
+    volume has. Both are only discovered later as an opaque
+    ``max_pool3d`` size error -- in production, after the whole dataset has
+    been generated -- so reject them here, at config time, naming the two keys
+    that have to change.
+
+    Returns the validated bottleneck dimension.
+    """
+    if isinstance(unet_bottleneck_dim, bool) or not isinstance(
+        unet_bottleneck_dim, int
+    ):
+        raise ValueError(
+            f"unet_bottleneck_dim must be an integer; got {unet_bottleneck_dim!r}"
+        )
+    unet_layers = problem_scale - unet_bottleneck_dim
+    if unet_bottleneck_dim < 0 or unet_layers < 1:
+        raise ValueError(
+            f"unet_bottleneck_dim={unet_bottleneck_dim} is out of range for "
+            f"problem_scale={problem_scale}: it must satisfy "
+            f"0 <= unet_bottleneck_dim <= problem_scale - 1 "
+            f"(i.e. <= {problem_scale - 1}) so that the U-Net has at least one "
+            f"layer, but unet_layers = problem_scale - unet_bottleneck_dim = "
+            f"{unet_layers}. Raise problem_scale or lower unet_bottleneck_dim."
+        )
+    return unet_bottleneck_dim
+
+
 class Config:
     """
     A class for storing configuration settings for a specific run.
@@ -182,7 +216,9 @@ class Config:
                 "WARNING: problem_scale found to be non-integer. Truncating to nearest int."
             )
             self.problem_scale = math.floor(self.problem_scale)
-        self.unet_bottleneck_dim = config_dict["unet_bottleneck_dim"]
+        self.unet_bottleneck_dim = validate_unet_dims(
+            self.problem_scale, config_dict["unet_bottleneck_dim"]
+        )
         self.unet_layers = self.problem_scale - self.unet_bottleneck_dim
         self.n_fracts_per_vol = config_dict["n_fracts_per_vol"]
         self.n_instances_used_per_fractal = config_dict["n_instances_used_per_fractal"]

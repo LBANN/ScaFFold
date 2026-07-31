@@ -431,3 +431,36 @@ def test_run_config_records_the_effective_aux_values(monkeypatch, tmp_path):
         (Path(config["benchmark_run_dir"]) / "config.yaml").read_text()
     )
     assert dumped["verbose"] == 1
+
+
+# ---------------------------------------------------------------------------
+# R25: an out-of-range bottleneck is rejected before any work starts
+# ---------------------------------------------------------------------------
+
+
+def test_cli_override_bottleneck_out_of_range_rejected(monkeypatch, tmp_path):
+    """A command-line override that empties the U-Net is caught at config time.
+
+    The CLI recomputes unet_layers after applying overrides, so the check has
+    to run there too -- not only inside Config.
+    """
+    cfg = write_config(tmp_path)
+
+    with pytest.raises(ValueError) as excinfo:
+        run_cli(
+            monkeypatch,
+            [
+                "scaffold",
+                "benchmark",
+                "-c",
+                str(cfg),
+                "--problem-scale",
+                "4",
+                "--unet-bottleneck-dim",
+                "4",
+            ],
+        )
+
+    message = str(excinfo.value)
+    assert "unet_bottleneck_dim" in message
+    assert "problem_scale" in message

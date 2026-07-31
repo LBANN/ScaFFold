@@ -329,3 +329,42 @@ def test_base_config_copy_never_clobbers_merged_config(
     preserved = yaml.safe_load((run_dir / "base_config.yaml").read_text())
     assert preserved["local_batch_size"] == BASE["local_batch_size"]
     assert "machine_name" not in preserved
+
+
+# ---------------------------------------------------------------------------
+# unet_bottleneck_dim range (R25)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "problem_scale, bottleneck",
+    [(5, -1), (5, 5), (5, 6)],
+    ids=["negative", "zero-layers", "negative-layers"],
+)
+def test_bottleneck_out_of_range_rejected(problem_scale, bottleneck):
+    """An out-of-range bottleneck fails at config time, naming both keys.
+
+    Left unvalidated it produced a U-Net with more pooling levels than the
+    volume has, and the run died hours later inside max_pool3d with "Given
+    input size: (2048x1x1x1)" -- naming no config key at all.
+    """
+    bad = {**BASE, "problem_scale": problem_scale, "unet_bottleneck_dim": bottleneck}
+
+    with pytest.raises(ValueError) as excinfo:
+        config_utils.Config(bad)
+
+    message = str(excinfo.value)
+    assert "unet_bottleneck_dim" in message
+    assert "problem_scale" in message
+    assert str(bottleneck) in message
+    assert str(problem_scale) in message
+
+
+@pytest.mark.parametrize("bottleneck", [0, 3, 4])
+def test_bottleneck_in_range_accepted(bottleneck):
+    """The full valid range (at least one U-Net layer) is accepted."""
+    cfg = config_utils.Config(
+        {**BASE, "problem_scale": 5, "unet_bottleneck_dim": bottleneck}
+    )
+    assert cfg.unet_layers == 5 - bottleneck
+    assert cfg.unet_layers >= 1

@@ -456,7 +456,11 @@ def main():
         # The subcommand is always owned by the command line.
         combined_config["command"] = cli_args["command"]
 
-        # Recalculate unet_layers to capture any CLI overrides
+        # Recalculate unet_layers to capture any CLI overrides. The overridden
+        # pair has to be re-validated: Config only saw the config-file values.
+        config_utils.validate_unet_dims(
+            combined_config["problem_scale"], combined_config["unet_bottleneck_dim"]
+        )
         combined_config["unet_layers"] = (
             combined_config["problem_scale"] - combined_config["unet_bottleneck_dim"]
         )
