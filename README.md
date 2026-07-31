@@ -172,7 +172,7 @@ For n  in n_volumes:
 
 #### 1. Profiling with the PyTorch Profiler
 
-Set `PROFILE_TORCH=ON` to generate a PyTorch profiling trace that can be read into [Perfetto](https://ui.perfetto.dev/).
+Set `PROFILE_TORCH=ON` to generate a PyTorch profiling trace that can be read into [Perfetto](https://ui.perfetto.dev/). The trace is written into the run directory. `1`, `true`, `on` and `yes` (any case) enable profiling; every other value, including `0`, `false`, `no` and `off`, leaves it disabled.
 
 #### 2. Profiling with Caliper & Adiak
 

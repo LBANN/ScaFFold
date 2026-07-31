@@ -404,3 +404,68 @@ class TestProfilerTraceExport:
         )
 
         assert expected in Path(path).name
+
+
+class TestProfileTorchGate:
+    """R24: PROFILE_TORCH is parsed like every other profiler flag."""
+
+    @staticmethod
+    def _reload_with(monkeypatch_context, value):
+        import importlib
+
+        import ScaFFold.utils.perf_measure as perf_measure
+
+        if value is None:
+            monkeypatch_context.delenv("PROFILE_TORCH", raising=False)
+        else:
+            monkeypatch_context.setenv("PROFILE_TORCH", value)
+        monkeypatch_context.delenv("CALI_CONFIG", raising=False)
+        importlib.reload(perf_measure)
+        return perf_measure
+
+    @pytest.mark.parametrize("value", [None, "", "0", "false", "no", "off", "OFF"])
+    def test_disabled_values(self, monkeypatch, value):
+        """Anything that is not an affirmative value leaves profiling off.
+
+        ``PROFILE_TORCH=0`` used to *enable* the profiler: the gate only
+        rejected the literal "off", so every conventional way of saying "no"
+        silently turned profiling on.
+        """
+        import importlib
+
+        import ScaFFold.utils.perf_measure as perf_measure
+
+        try:
+            with monkeypatch.context() as m:
+                assert not self._reload_with(m, value).TORCH_PERF_ENABLED
+        finally:
+            importlib.reload(perf_measure)
+
+    @pytest.mark.parametrize("value", ["1", "true", "on", "ON", "yes", "TRUE"])
+    def test_enabled_values(self, monkeypatch, value):
+        """The affirmative spellings still enable the profiler."""
+        import importlib
+
+        import ScaFFold.utils.perf_measure as perf_measure
+
+        try:
+            with monkeypatch.context() as m:
+                assert self._reload_with(m, value).TORCH_PERF_ENABLED
+        finally:
+            importlib.reload(perf_measure)
+
+    def test_gate_matches_the_sub_option_parser(self, monkeypatch):
+        """The master switch and the sub-option flags agree on every spelling."""
+        import importlib
+
+        import ScaFFold.utils.perf_measure as perf_measure
+
+        try:
+            for value in ("1", "true", "on", "yes", "0", "false", "no", "off", ""):
+                with monkeypatch.context() as m:
+                    module = self._reload_with(m, value)
+                    assert module.TORCH_PERF_ENABLED == module._profiler_env_flag(
+                        "PROFILE_TORCH"
+                    ), value
+        finally:
+            importlib.reload(perf_measure)

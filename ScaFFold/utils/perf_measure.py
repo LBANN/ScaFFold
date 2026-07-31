@@ -18,6 +18,17 @@ from contextlib import nullcontext
 CALI_PERF_ENV_VAR = "CALI_CONFIG"
 TORCH_PERF_ENV_VAR = "PROFILE_TORCH"
 
+
+def _profiler_env_flag(name):
+    """Return True only for an affirmative value of the environment variable.
+
+    Every profiler toggle -- the master switch and its sub-options alike --
+    goes through this, so "0"/"false"/"no"/"off"/"" all mean off and there is
+    no spelling that means the opposite of what it says.
+    """
+    return os.environ.get(name, "").lower() in ("1", "true", "on", "yes")
+
+
 _CALI_PERF_ENABLED = False
 TORCH_PERF_ENABLED = False
 if CALI_PERF_ENV_VAR in os.environ:
@@ -33,10 +44,7 @@ if CALI_PERF_ENV_VAR in os.environ:
 
 # The torch profiler is gated purely on its own environment variable: Caliper
 # and the torch profiler may both be enabled at once.
-if (
-    TORCH_PERF_ENV_VAR in os.environ
-    and os.environ.get(TORCH_PERF_ENV_VAR).lower() != "off"
-):
+if _profiler_env_flag(TORCH_PERF_ENV_VAR):
     try:
         from torch.profiler import ProfilerActivity
         from torch.profiler import profile as torchprofile
@@ -98,10 +106,6 @@ def _profiler_env_int(name, default):
         return max(0, int(os.environ.get(name, default)))
     except (TypeError, ValueError):
         return default
-
-
-def _profiler_env_flag(name):
-    return os.environ.get(name, "").lower() in ("1", "true", "on", "yes")
 
 
 def get_torch_context(ranks_per_node, rank):
