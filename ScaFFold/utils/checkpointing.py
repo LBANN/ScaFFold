@@ -26,12 +26,13 @@ import torch.distributed as dist
 
 
 class CheckpointSaveError(RuntimeError):
-    """A checkpoint write failed.
+    """A rank-0 checkpoint operation failed (a write, a cleanup, a load).
 
-    Raised identically on every rank. Only rank 0 writes, but its outcome is
-    broadcast, so the peers report the real disk error instead of the
-    unmatched-collective symptom (an opaque gloo transport error, or an NCCL
-    watchdog timeout minutes later) that a rank-0-only raise produces.
+    Raised identically on every rank. Only rank 0 touches the run directory,
+    but its outcome is broadcast, so the peers report the real disk error
+    instead of the unmatched-collective symptom (an opaque gloo transport
+    error, or an NCCL watchdog timeout minutes later) that a rank-0-only raise
+    produces.
     """
 
 
@@ -111,17 +112,33 @@ class CheckpointManager:
         # Ensure base directory exists (Rank 0 only)
         if self.world_rank == 0:
             self.base_dir.mkdir(parents=True, exist_ok=True)
-            self._sweep_orphaned_tmp_files()
+            try:
+                self._sweep_orphaned_tmp_files()
+            except Exception as e:
+                # Construction is rank-0-only work outside any collective, so a
+                # raise here aborts rank 0 alone and leaves the peers waiting in
+                # the manager's first collective (``cleanup``). The sweep only
+                # reclaims space, so a directory that cannot be listed (a stale
+                # NFS/Lustre handle, a permissions oddity) degrades to a warning
+                # rather than taking the job down asymmetrically.
+                self._log(
+                    f"Could not sweep orphaned checkpoint temp files in "
+                    f"{self.base_dir}: {type(e).__name__}: {e}"
+                )
 
     def cleanup(self, train_from_scratch: bool) -> None:
         """Clear existing checkpoints if training from scratch.
 
         Rank-symmetric, like every other collective point here: any pending
-        async write is drained and its outcome broadcast, so a failure raises
-        on all ranks together (see ``save_checkpoint``).
+        async write is drained, the rank-0 deletion is fenced, and whichever
+        failed is broadcast, so a failure raises on all ranks together (see
+        ``save_checkpoint``). The broadcast payload is ``(phase, description)``
+        so the peers -- which saw neither the write nor the deletion -- report
+        the same operation rank 0 did.
         """
         # Ensure any pending async save is finished before deleting.
         error = self._drain_pending_save()
+        failure = None if error is None else ("save", error)
 
         if train_from_scratch:
             # Drop the cached state that described the run being deleted. Both
@@ -134,12 +151,29 @@ class CheckpointManager:
             self.last_saved_epoch = None
 
             if self.world_rank == 0:
-                self._remove_checkpoint_files()
+                # Rank 0 alone touches the filesystem here, while every peer is
+                # already committed to the broadcast below. Individual unlinks
+                # are tolerated inside, but the glob/stat around them can still
+                # raise on a shared filesystem (ESTALE, EACCES), and raising in
+                # this window strands the peers in an unmatched collective --
+                # the R05 hazard. Report the failure through the broadcast, like
+                # a failed write.
+                try:
+                    self._remove_checkpoint_files()
+                except Exception as e:
+                    if failure is None:
+                        self._save_error_exc = e
+                        failure = ("cleanup", f"{type(e).__name__}: {e}")
+                    else:
+                        # A drained write already failed; that outcome is the
+                        # one being reported, so this is only logged.
+                        self._log(f"Clearing existing checkpoints also failed: {e}")
 
-        error = self._broadcast_obj(error)
+        failure = self._broadcast_obj(failure)
         self._barrier()
-        if error is not None:
-            self._raise_save_error(error)
+        if failure is not None:
+            phase, description = failure
+            self._raise_save_error(description, phase=phase)
 
     def _remove_checkpoint_files(self) -> None:
         """Delete this run's checkpoint files and debris (rank 0 only).
@@ -230,15 +264,17 @@ class CheckpointManager:
             return f"{type(e).__name__}: {e}"
         return None
 
-    def _raise_save_error(self, description: str) -> None:
-        """Raise a broadcast save failure on this rank.
+    def _raise_save_error(self, description: str, phase: str = "save") -> None:
+        """Raise a broadcast rank-0 failure on this rank.
 
-        Rank 0 chains the original exception so its traceback survives; the
-        peers never saw it and raise the same message on its own.
+        ``phase`` names the operation that failed (``save``, ``cleanup``,
+        ``load``) so the message describes what actually went wrong. Rank 0
+        chains the original exception so its traceback survives; the peers never
+        saw it and raise the same message on its own.
         """
         cause, self._save_error_exc = self._save_error_exc, None
         raise CheckpointSaveError(
-            f"Checkpoint save failed on rank 0: {description}"
+            f"Checkpoint {phase} failed on rank 0: {description}"
         ) from cause
 
     def finalize_saves(self) -> None:
@@ -317,14 +353,26 @@ class CheckpointManager:
         # therefore never open the checkpoint files at all.
         result = None
         if self.world_rank == 0:
-            result = (
-                ("save_failed", error) if error is not None else self._select_and_load()
-            )
+            if error is not None:
+                result = ("save_failed", error)
+            else:
+                # The selection itself stats, deserializes and renames files
+                # while the peers are already blocked in the broadcast below, so
+                # anything it raises (a stale handle on ``exists``, a rename
+                # denied, an unpickling MemoryError) has to become a decision
+                # rather than a rank-0-only death.
+                try:
+                    result = self._select_and_load()
+                except Exception as e:
+                    self._save_error_exc = e
+                    result = ("load_failed", f"{type(e).__name__}: {e}")
         status, payload = self._broadcast_obj(result)
 
         # 2. Every rank acts on the same decision rank 0 reached.
         if status == "save_failed":
             self._raise_save_error(payload)
+        if status == "load_failed":
+            self._raise_save_error(payload, phase="load")
         if status == "empty":
             if require_checkpoint:
                 # An explicit restart must resume real state; silently
@@ -410,6 +458,11 @@ class CheckpointManager:
         * ``("empty", None)``           -- no checkpoint files exist;
         * ``("ok", checkpoint_dict)``   -- a candidate deserialized cleanly;
         * ``("unreadable", [paths])``   -- every candidate was corrupt.
+
+        The filesystem calls around those decisions (``exists``, the quarantine
+        rename) can still fail outright; the caller runs this inside a guard
+        that turns such a failure into a broadcast ``("load_failed", ...)``
+        decision, because raising here would strand the peers.
         """
         candidates = []
         if self.last_ckpt_path.exists():

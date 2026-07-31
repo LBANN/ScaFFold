@@ -39,7 +39,7 @@ import torch
 import torch.distributed as dist
 
 import ScaFFold.utils.trainer as trainer_mod
-from ScaFFold.utils.checkpointing import CheckpointManager
+from ScaFFold.utils.checkpointing import CheckpointManager, CheckpointSaveError
 from ScaFFold.utils.trainer import PyTorchTrainer
 from tests.helpers import mpi_runner
 
@@ -516,6 +516,102 @@ def test_init_sweeps_orphaned_tmp_files(tmp_path):
     assert not orphan.exists()
     assert own.exists()
     assert quarantined.exists()
+
+
+# ---------------------------------------------------------------------------
+# VA-1/VA-2/VA-3 -- the remaining rank-0 filesystem windows are fenced
+#
+# Rank 0 is the only rank that touches the run directory, and it does so while
+# its peers are already committed to the next collective. Every such window must
+# therefore report its failure *through* that collective; raising inside it
+# leaves the peers in an unmatched collective, where a plain disk error
+# resurfaces as an opaque gloo transport error or an NCCL watchdog timeout.
+# ---------------------------------------------------------------------------
+
+
+def _record_collectives(monkeypatch):
+    """Stub the process-group collectives, recording what a rank posts."""
+    posted = {"broadcasts": [], "barriers": 0}
+
+    def fake_broadcast(objs, src=0):
+        posted["broadcasts"].append(objs[0])
+
+    def fake_barrier(*args, **kwargs):
+        posted["barriers"] += 1
+
+    monkeypatch.setattr(dist, "broadcast_object_list", fake_broadcast)
+    monkeypatch.setattr(dist, "barrier", fake_barrier)
+    return posted
+
+
+def _raise_stale(*args, **kwargs):
+    raise OSError("[Errno 116] Stale file handle")
+
+
+def test_cleanup_rank0_fs_error_travels_through_the_broadcast(tmp_path, monkeypatch):
+    """A failure while clearing checkpoints fails every rank, not just rank 0.
+
+    ``_remove_checkpoint_files`` globs and stats the run directory; on a shared
+    filesystem those can raise (ESTALE, EACCES) even though each individual
+    unlink is already tolerated. That happens between the drain and the
+    broadcast, so an unfenced raise re-creates exactly the hazard R05 closed.
+    """
+    mgr, _ = _make_manager(tmp_path)
+    mgr.dist_enabled = True
+    posted = _record_collectives(monkeypatch)
+    monkeypatch.setattr(CheckpointManager, "_remove_checkpoint_files", _raise_stale)
+
+    with pytest.raises(CheckpointSaveError) as excinfo:
+        mgr.cleanup(train_from_scratch=True)
+
+    assert "Stale file handle" in str(excinfo.value)
+    # The peers' collectives were posted before the raise, so they fail with the
+    # same error instead of hanging.
+    assert len(posted["broadcasts"]) == 1
+    assert "Stale file handle" in str(posted["broadcasts"][0])
+    assert posted["barriers"] == 1
+
+
+def test_load_rank0_selection_error_travels_through_the_broadcast(
+    tmp_path, monkeypatch
+):
+    """A failure inside ``_select_and_load`` is a broadcast decision too.
+
+    The load path folded only the *drain* error into its decision broadcast, so
+    rank 0 stat-ing or renaming a checkpoint candidate could still die before
+    the broadcast the peers were already waiting in.
+    """
+    mgr, _ = _make_manager(tmp_path)
+    mgr.dist_enabled = True
+    posted = _record_collectives(monkeypatch)
+    monkeypatch.setattr(CheckpointManager, "_select_and_load", _raise_stale)
+
+    with pytest.raises(CheckpointSaveError) as excinfo:
+        mgr.load_from_checkpoint()
+
+    assert "Stale file handle" in str(excinfo.value)
+    assert len(posted["broadcasts"]) == 1
+    assert posted["broadcasts"][0][0] == "load_failed"
+
+
+def test_init_survives_an_unlistable_run_dir(tmp_path, monkeypatch, capsys):
+    """A run directory that cannot be listed warns instead of killing __init__.
+
+    The orphan sweep runs on rank 0 only and outside any collective, so a raise
+    here aborts rank 0 alone and strands the peers at the manager's first
+    collective (``cleanup``). ``pathlib`` already swallows PermissionError, but
+    a stale NFS/Lustre handle propagates; the sweep is opportunistic, so it must
+    degrade to a warning.
+    """
+    base = tmp_path / "checkpoints"
+    base.mkdir()
+    (base / "checkpoint_last.pth.tmp.999999").write_bytes(b"partial checkpoint")
+    monkeypatch.setattr(Path, "glob", _raise_stale)
+
+    mgr, _ = _make_manager(base)
+
+    assert mgr.base_dir == base
+    assert "sweep" in capsys.readouterr().out.lower()
 
 
 # ---------------------------------------------------------------------------
