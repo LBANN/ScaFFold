@@ -363,3 +363,71 @@ def test_benchmark_still_creates_its_run_dir(monkeypatch, tmp_path):
     assert (run_dir / "config.yaml").exists()
     assert (run_dir / "overrides.yaml").exists()
     assert (run_dir / "restart.sh").exists()
+
+
+# ---------------------------------------------------------------------------
+# R20: auxiliary keys set in YAML must survive; CLI > YAML > argparse default
+# ---------------------------------------------------------------------------
+
+
+def test_yaml_aux_keys_reach_the_driver(monkeypatch, tmp_path):
+    """Auxiliary keys set in the config file are not replaced by defaults.
+
+    ``Config`` accepts ``datagen_batch_size``/``verbose`` but does not store
+    them, so they used to vanish from the merged config and the argparse
+    default was installed instead -- making them settable only on the command
+    line despite being documented, validated config keys.
+    """
+    cfg = write_config(tmp_path, {"datagen_batch_size": 500, "verbose": 1})
+
+    _, calls = run_cli(monkeypatch, ["scaffold", "generate_fractals", "-c", str(cfg)])
+
+    (config,) = calls["generate_fractals"]
+    assert config["datagen_batch_size"] == 500
+    assert config["verbose"] == 1
+
+
+def test_cli_flag_outranks_yaml_aux_key(monkeypatch, tmp_path):
+    """An explicit command-line flag still wins over the config file."""
+    cfg = write_config(tmp_path, {"datagen_batch_size": 500, "verbose": 0})
+
+    _, calls = run_cli(
+        monkeypatch,
+        [
+            "scaffold",
+            "-v",
+            "generate_fractals",
+            "-c",
+            str(cfg),
+            "--datagen-batch-size",
+            "250",
+        ],
+    )
+
+    (config,) = calls["generate_fractals"]
+    assert config["datagen_batch_size"] == 250
+    assert config["verbose"] == 1
+
+
+def test_argparse_default_used_when_yaml_is_silent(monkeypatch, tmp_path):
+    """With neither a flag nor a config entry, the argparse default applies."""
+    cfg = write_config(tmp_path)
+
+    _, calls = run_cli(monkeypatch, ["scaffold", "generate_fractals", "-c", str(cfg)])
+
+    (config,) = calls["generate_fractals"]
+    assert config["datagen_batch_size"] == 10000
+    assert config["verbose"] == 0
+
+
+def test_run_config_records_the_effective_aux_values(monkeypatch, tmp_path):
+    """The run dir's config.yaml records what the run actually used."""
+    cfg = write_config(tmp_path, {"verbose": 1})
+
+    _, calls = run_cli(monkeypatch, ["scaffold", "benchmark", "-c", str(cfg)])
+
+    (config,) = calls["benchmark"]
+    dumped = yaml.safe_load(
+        (Path(config["benchmark_run_dir"]) / "config.yaml").read_text()
+    )
+    assert dumped["verbose"] == 1

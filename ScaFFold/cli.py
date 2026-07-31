@@ -90,6 +90,31 @@ def _make_fresh_run_dir(base_run_dir, timestamp):
             candidate = base_run_dir / f"{timestamp}-{suffix}"
 
 
+def explicit_cli_keys(args, parsers):
+    """Return the names of the options actually given on the command line.
+
+    argparse does not record which options were supplied, so a value counts as
+    explicit when it differs from the default of the first parser in
+    ``parsers`` that defines one (subcommand parser first, then the top-level
+    parser). Only these may outrank a config-file setting; everything else in
+    the namespace is an argparse default, which is the weakest source.
+
+    The one ambiguity is a flag passed with exactly its default value: it looks
+    absent, so a config-file entry wins over it. Both spellings then agree on
+    the default, which is the only value the flag could have contributed.
+    """
+    explicit = set()
+    for name, value in vars(args).items():
+        default = None
+        for parser in parsers:
+            default = parser.get_default(name)
+            if default is not None:
+                break
+        if value != default:
+            explicit.add(name)
+    return explicit
+
+
 def missing_checkpoint_error(combined_config):
     """Return the "nothing to resume from" message, or None if a restart can run.
 
@@ -365,6 +390,11 @@ def main():
     check_launcher_world_size(comm.Get_size())
     # Parse the command-line arguments.
     args = parser.parse_args()
+    subcommand_parsers = {
+        "benchmark": benchmark_parser,
+        "generate_fractals": generate_fractals_parser,
+    }
+    active_parser = subcommand_parsers[args.command]
     log = setup_mpi_logger(__file__, args.verbose)
     combined_config = None
 
@@ -398,12 +428,23 @@ def main():
         # into the run dir); keep the base config there.
         cli_args["config"] = config_paths[0]
 
-        # Combine configs: CLI args override config file values
+        # Combine configs, in increasing order of precedence:
+        # argparse default < config file < explicit command-line flag.
         combined_config = bench_config_dict.copy()
+        # Config only keeps the keys it consumes; the auxiliary keys it accepts
+        # (verbose, datagen_batch_size, ...) never become attributes, so put
+        # the file's values back first. Without this they are absent below and
+        # the argparse default overwrites what the user wrote in the config.
+        for key, value in merged_dict.items():
+            combined_config.setdefault(key, value)
+
+        explicit_cli = explicit_cli_keys(args, (active_parser, parser))
         for key, value in cli_args.items():
+            if key == "command":
+                continue
             if key not in combined_config:
                 combined_config[key] = value
-            elif value is not None and key != "command":
+            elif key in explicit_cli and value is not None:
                 log.info(
                     "Overriding '%s=%s' with '%s=%s'",
                     key,
@@ -412,6 +453,8 @@ def main():
                     value,
                 )
                 combined_config[key] = value
+        # The subcommand is always owned by the command line.
+        combined_config["command"] = cli_args["command"]
 
         # Recalculate unet_layers to capture any CLI overrides
         combined_config["unet_layers"] = (
