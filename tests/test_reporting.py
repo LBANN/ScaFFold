@@ -469,3 +469,83 @@ class TestProfileTorchGate:
                     ), value
         finally:
             importlib.reload(perf_measure)
+
+
+class TestProfilerSchedule:
+    """R26: the schedule must not record everything before the first step."""
+
+    @staticmethod
+    def _context_with(monkeypatch_context, env):
+        """Reload perf_measure with ``env`` applied and build a profiler context."""
+        import importlib
+
+        import ScaFFold.utils.perf_measure as perf_measure
+
+        monkeypatch_context.setenv("PROFILE_TORCH", "1")
+        monkeypatch_context.delenv("CALI_CONFIG", raising=False)
+        for name in ("PROFILE_TORCH_WAIT", "PROFILE_TORCH_WARMUP"):
+            monkeypatch_context.delenv(name, raising=False)
+        for key, value in env.items():
+            monkeypatch_context.setenv(key, value)
+        importlib.reload(perf_measure)
+        assert perf_measure.TORCH_PERF_ENABLED
+        ctx, is_local = perf_measure.get_torch_context(1, 0)
+        assert is_local
+        return ctx
+
+    def test_wait_zero_does_not_record_step_zero(self, monkeypatch, capsys):
+        """PROFILE_TORCH_WAIT=0 is clamped so step 0 records nothing.
+
+        worker.main enters the profiler context around checkpoint cleanup and
+        every warmup batch, and ``prof.step()`` only advances once per training
+        batch -- so a schedule that is already active at step 0 buffers all of
+        that as a single unbounded step, which is exactly what the bounded
+        window exists to prevent.
+        """
+        import importlib
+
+        from torch.profiler import ProfilerAction
+
+        import ScaFFold.utils.perf_measure as perf_measure
+
+        try:
+            with monkeypatch.context() as m:
+                ctx = self._context_with(m, {"PROFILE_TORCH_WAIT": "0"})
+                assert ctx.schedule(0) == ProfilerAction.NONE
+            output = capsys.readouterr().out
+            assert "PROFILE_TORCH_WAIT" in output
+        finally:
+            importlib.reload(perf_measure)
+
+    def test_default_schedule_skips_step_zero(self, monkeypatch):
+        """The default window already skips step 0 (control)."""
+        import importlib
+
+        from torch.profiler import ProfilerAction
+
+        import ScaFFold.utils.perf_measure as perf_measure
+
+        try:
+            with monkeypatch.context() as m:
+                ctx = self._context_with(m, {})
+                assert ctx.schedule(0) == ProfilerAction.NONE
+        finally:
+            importlib.reload(perf_measure)
+
+    def test_larger_wait_is_preserved(self, monkeypatch):
+        """A wait longer than the minimum is left alone."""
+        import importlib
+
+        from torch.profiler import ProfilerAction
+
+        import ScaFFold.utils.perf_measure as perf_measure
+
+        try:
+            with monkeypatch.context() as m:
+                ctx = self._context_with(
+                    m, {"PROFILE_TORCH_WAIT": "3", "PROFILE_TORCH_WARMUP": "1"}
+                )
+                assert ctx.schedule(2) == ProfilerAction.NONE
+                assert ctx.schedule(3) == ProfilerAction.WARMUP
+        finally:
+            importlib.reload(perf_measure)

@@ -122,7 +122,22 @@ def get_torch_context(ranks_per_node, rank):
         # trace. The window (skip `wait`, prime `warmup`, capture `active`, once)
         # is tunable via the environment. Callers must drive it with
         # ``prof.step()`` once per training step for the schedule to advance.
+        # The context is entered around checkpoint cleanup and the warmup
+        # batches, but prof.step() only advances once per *training* batch, so
+        # everything before the first training batch lands in step 0. The
+        # window must therefore skip at least one step: with wait=0 that whole
+        # prologue -- warmup_batches forward+backward passes per rank -- is
+        # buffered in host memory as a single unbounded step, which is the very
+        # thing the bounded window exists to prevent.
         wait = _profiler_env_int("PROFILE_TORCH_WAIT", 1)
+        if wait < 1:
+            print(
+                "PROFILE_TORCH_WAIT must be at least 1: the profiler window "
+                "opens before the warmup batches, whose work would otherwise "
+                "accumulate in host memory as one unbounded step. Using "
+                "PROFILE_TORCH_WAIT=1."
+            )
+            wait = 1
         warmup = _profiler_env_int("PROFILE_TORCH_WARMUP", 1)
         active = _profiler_env_int("PROFILE_TORCH_ACTIVE", 3) or 1
 
