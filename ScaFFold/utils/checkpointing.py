@@ -111,6 +111,7 @@ class CheckpointManager:
         # Ensure base directory exists (Rank 0 only)
         if self.world_rank == 0:
             self.base_dir.mkdir(parents=True, exist_ok=True)
+            self._sweep_orphaned_tmp_files()
 
     def cleanup(self, train_from_scratch: bool) -> None:
         """Clear existing checkpoints if training from scratch.
@@ -141,14 +142,56 @@ class CheckpointManager:
             self._raise_save_error(error)
 
     def _remove_checkpoint_files(self) -> None:
-        """Delete this run's checkpoint files (rank 0 only)."""
-        for p in (self.last_ckpt_path, self.best_ckpt_path):
+        """Delete this run's checkpoint files and debris (rank 0 only).
+
+        Besides the two canonical files, a run directory can hold
+        ``checkpoint_*.pth.tmp.<pid>`` (an interrupted write whose Python-level
+        cleanup never ran) and ``checkpoint_*.pth.corrupt`` (a checkpoint
+        quarantined on resume). Both are full-checkpoint-sized and nothing else
+        removes them, so a "from scratch" cleanup that left them would claim to
+        have cleared the checkpoints while keeping their bytes on disk.
+        """
+        debris = sorted(
+            set(self.base_dir.glob("checkpoint_*.pth.tmp.*"))
+            | set(self.base_dir.glob("checkpoint_*.pth.corrupt"))
+        )
+        for p in (self.last_ckpt_path, self.best_ckpt_path, *debris):
             if p.exists():
                 try:
                     p.unlink()
                     self._log(f"Removed existing checkpoint: {p}")
                 except Exception as e:
                     self._log(f"Failed to remove {p}: {e}")
+
+    def _sweep_orphaned_tmp_files(self) -> None:
+        """Delete temp files stranded by checkpoint writes that were killed.
+
+        ``_atomic_save`` unlinks its ``<name>.tmp.<pid>`` file when the write
+        raises, but a SIGKILL (walltime, node failure) skips that Python-level
+        cleanup and strands a full-checkpoint-sized file. These accumulate one
+        per killed pid: the kill/restart cycle that produces them always takes
+        the *resume* path, so ``cleanup(train_from_scratch=True)`` never gets a
+        chance to clear them.
+
+        Sweeping at construction is safe because run directories are per-run
+        and not shared between concurrently running jobs (F55), so any temp
+        file here belongs to a dead process -- except one from this pid, which
+        another manager in this process could still be writing.
+
+        ``*.corrupt`` files are deliberately left alone here:
+        ``_quarantine_corrupt`` renames onto a fixed name, so at most two can
+        ever exist (they cannot accumulate) and they are the only evidence of
+        what a resume discarded. The from-scratch cleanup removes them.
+        """
+        own_suffix = f".tmp.{os.getpid()}"
+        for path in sorted(self.base_dir.glob("checkpoint_*.pth.tmp.*")):
+            if path.name.endswith(own_suffix):
+                continue
+            try:
+                path.unlink()
+                self._log(f"Removed orphaned checkpoint temp file: {path}")
+            except OSError as e:
+                self._log(f"Failed to remove {path}: {e}")
 
     def wait_for_save(self):
         """Block until the background save (if any) is complete.

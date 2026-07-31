@@ -27,6 +27,7 @@ they need neither a GPU nor a process group.
 from __future__ import annotations
 
 import math
+import os
 import re
 import textwrap
 import time
@@ -462,6 +463,59 @@ def test_cleanup_from_scratch_resets_best(tmp_path):
     # The fresh run's first epoch is its best, and a best checkpoint exists.
     assert mgr2.save_checkpoint(epoch=1, val_loss_avg=0.5) is True
     assert mgr2.best_ckpt_path.exists()
+
+
+# ---------------------------------------------------------------------------
+# R07 -- checkpoint debris (.tmp.<pid>, .corrupt) does not accumulate
+# ---------------------------------------------------------------------------
+
+
+def test_cleanup_from_scratch_removes_stale_debris(tmp_path):
+    """A from-scratch cleanup clears checkpoint debris, not just the two files.
+
+    ``_atomic_save``'s temp file survives a process kill (its unlink only runs
+    on a Python-level exception) and ``_quarantine_corrupt``'s ``.corrupt``
+    rename is never undone. Both are full-checkpoint-sized, so a cleanup that
+    claims to have cleared the checkpoints while leaving them behind keeps
+    multi-GB files on the shared filesystem.
+    """
+    mgr, _ = _make_manager(tmp_path)
+    mgr.save_checkpoint(epoch=1, val_loss_avg=0.5)
+
+    stale_tmp = tmp_path / "checkpoint_last.pth.tmp.999999"
+    stale_tmp.write_bytes(b"partial checkpoint")
+    quarantined = tmp_path / "checkpoint_best.pth.corrupt"
+    quarantined.write_bytes(b"truncated checkpoint")
+
+    mgr.cleanup(train_from_scratch=True)
+
+    assert not stale_tmp.exists()
+    assert not quarantined.exists()
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_init_sweeps_orphaned_tmp_files(tmp_path):
+    """Constructing a manager sweeps temp files left by killed writes.
+
+    Repeated walltime kills of a long run take the *resume* path, never the
+    from-scratch cleanup, so without this sweep one stranded temp file per
+    killed pid piles up in the run directory. A temp file belonging to this
+    process is left alone (another manager here may still be writing it), and
+    the quarantined ``.corrupt`` file is kept: at most two can ever exist and
+    they are the only evidence of what a resume discarded.
+    """
+    orphan = tmp_path / "checkpoint_last.pth.tmp.999999"
+    orphan.write_bytes(b"partial checkpoint")
+    own = tmp_path / f"checkpoint_last.pth.tmp.{os.getpid()}"
+    own.write_bytes(b"possibly in flight")
+    quarantined = tmp_path / "checkpoint_last.pth.corrupt"
+    quarantined.write_bytes(b"truncated checkpoint")
+
+    _make_manager(tmp_path)
+
+    assert not orphan.exists()
+    assert own.exists()
+    assert quarantined.exists()
 
 
 # ---------------------------------------------------------------------------
