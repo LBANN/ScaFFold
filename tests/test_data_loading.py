@@ -594,3 +594,60 @@ def test_load_mask_only_v1_legacy(tiny_v1_dataset, monkeypatch):
     assert loaded["image"] == 0
     assert mask_only.dtype == torch.int16
     assert torch.equal(mask_only, expected)
+
+
+# ---------------------------------------------------------------------------
+# R28: a *present but broken* meta.yaml must not be mistaken for a v1 dataset
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "broken_meta",
+    [
+        pytest.param("", id="zero-byte"),
+        pytest.param("{[not: valid: yaml", id="unparseable"),
+        pytest.param("- just\n- a\n- list\n", id="not-a-mapping"),
+        pytest.param("config_id: abc123\n", id="version-key-missing"),
+        pytest.param("dataset_format_version: two\n", id="version-not-an-int"),
+    ],
+)
+def test_broken_meta_raises_instead_of_silent_legacy(tmp_path, broken_meta):
+    """A corrupt ``meta.yaml`` is an error, never a silent legacy downgrade.
+
+    Treating a broken meta as "no meta" reclassifies a modern dataset as legacy
+    v1: the loader then transposes channels-first volumes (a (3,N,N,N) sample
+    comes back (N,3,N,N)) and remaps already-dense labels. Training proceeds on
+    silently corrupted data. The dataset directory itself is intact here -- only
+    the metadata is damaged -- so the failure must be loud and actionable.
+    """
+    root = _build_v2_constant_dataset(tmp_path / "ds", n_volumes=2)
+    (root / "meta.yaml").write_text(broken_meta)
+
+    with pytest.raises(ValueError) as excinfo:
+        FractalDataset(
+            root / "volumes" / "training",
+            root / "masks" / "training",
+            data_dir=root / "train_unique_mask_vals",
+        )
+
+    message = str(excinfo.value)
+    assert "meta.yaml" in message
+    # The message must point at the offending file so it can be repaired.
+    assert str(root) in message
+
+
+def test_absent_meta_is_still_legacy_v1(tiny_v1_dataset):
+    """The genuine legacy case (no ``meta.yaml`` at all) is unchanged.
+
+    Control for the test above: v1 datasets predate the metadata file, so a
+    *missing* meta must keep selecting the legacy loader rather than raising.
+    """
+    root = tiny_v1_dataset(n_categories=2, n_train=2, n_val=1, n=8)
+    assert not (root / "meta.yaml").exists()
+
+    ds = FractalDataset(
+        root / "volumes" / "training",
+        root / "masks" / "training",
+        data_dir=root / "train_unique_mask_vals",
+    )
+    assert ds.dataset_format_version == 1

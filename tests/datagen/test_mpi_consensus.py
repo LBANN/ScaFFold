@@ -539,6 +539,54 @@ def test_non_root_raises_on_broadcast_finalize_error(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# R28: meta.yaml is published atomically, so no reader ever sees a partial one.
+# ---------------------------------------------------------------------------
+
+
+def test_meta_write_is_atomic(tmp_path, monkeypatch):
+    """An interrupted meta write leaves the previous file intact and no temp.
+
+    ``meta.yaml`` is the file that decides how every sample is interpreted (a
+    truncated one reclassifies the dataset as legacy v1), so it must appear at
+    its final name complete or not at all.
+    """
+    target = tmp_path / gd.META_FILENAME
+    gd._write_meta_atomic(target, {"dataset_format_version": gd.DATASET_FORMAT_VERSION})
+    good_bytes = target.read_bytes()
+
+    # Interrupt the write after bytes have reached the temp file but before the
+    # rename -- the shape of a kill mid-write.
+    def boom(_fd):
+        raise OSError("simulated SIGKILL mid-write")
+
+    monkeypatch.setattr(gd.os, "fsync", boom)
+
+    with pytest.raises(OSError):
+        gd._write_meta_atomic(target, {"dataset_format_version": 99})
+
+    # The final name still holds the complete previous file, byte-for-byte, and
+    # no temp file is left behind for the reuse scan to trip over.
+    assert target.read_bytes() == good_bytes
+    assert [p.name for p in tmp_path.iterdir()] == [gd.META_FILENAME]
+
+
+def test_published_dataset_has_no_partial_meta(tmp_path, monkeypatch):
+    """A successful generation publishes a parseable meta and no temp files."""
+    config = _reuse_config(tmp_path / "datasets")
+    comm = FakeComm(rank=0, size=1, allreduce_result=1)
+    monkeypatch.setattr(gd, "MPI", FakeMPI(comm))
+    monkeypatch.setattr(gd, "_git_commit_short", lambda log: "abc123")
+    monkeypatch.setattr(volumegen, "main", lambda _config: None)
+
+    result = Path(gd.get_dataset(config))
+
+    meta = yaml.safe_load((result / gd.META_FILENAME).read_text())
+    assert meta["dataset_format_version"] == gd.DATASET_FORMAT_VERSION
+    # Nothing hidden alongside it (a temp meta would be a dotted sibling).
+    assert [p.name for p in result.iterdir() if p.name.startswith(".")] == []
+
+
+# ---------------------------------------------------------------------------
 # A missing instance file raises FileNotFoundError (a catchable Exception)
 # rather than calling sys.exit(1) (a BaseException that bypasses consensus), and
 # volumegen's generation loop catches worker failures locally so it reaches the

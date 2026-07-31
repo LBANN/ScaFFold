@@ -277,20 +277,41 @@ class BasicDataset(Dataset):
         return np.load(path, allow_pickle=False, mmap_mode=mmap_mode)
 
     def _load_dataset_format_version(self):
+        """Determine which on-disk layout this dataset uses.
+
+        Only a *missing* ``meta.yaml`` means legacy v1: those datasets predate
+        the metadata file. A metadata file that exists but cannot be read or
+        does not carry a usable version is a damaged modern dataset, and
+        falling back to the legacy loader there silently transposes
+        channels-first volumes and remaps already-dense labels -- corrupt
+        training data with no error. Such a dataset is rejected instead, with a
+        message naming the file so it can be repaired or regenerated.
+        """
         meta_path = self.dataset_root / META_FILENAME
         if not meta_path.exists():
             return LEGACY_DATASET_FORMAT_VERSION
 
         try:
             with open(meta_path, "r") as meta_file:
-                meta = yaml.safe_load(meta_file) or {}
+                meta = yaml.safe_load(meta_file)
         except Exception as exc:
-            customlog(
-                f"Failed to read dataset metadata from {meta_path}: {exc}. Falling back to legacy loader."
-            )
-            return LEGACY_DATASET_FORMAT_VERSION
+            raise ValueError(
+                f"Dataset metadata {meta_path} exists but could not be read "
+                f"({type(exc).__name__}: {exc}). A dataset carrying a "
+                f"{META_FILENAME} is not a legacy dataset; refusing to guess its "
+                "layout. Repair the file or regenerate the dataset."
+            ) from exc
 
-        return int(meta.get("dataset_format_version", LEGACY_DATASET_FORMAT_VERSION))
+        version = meta.get("dataset_format_version") if isinstance(meta, dict) else None
+        try:
+            return int(version)
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"Dataset metadata {meta_path} is missing a usable "
+                f"'dataset_format_version' (got {version!r}). A dataset carrying "
+                f"a {META_FILENAME} is not a legacy dataset; refusing to guess "
+                "its layout. Repair the file or regenerate the dataset."
+            ) from None
 
     @staticmethod
     def _prepare_legacy_image(img):

@@ -115,6 +115,33 @@ def _git_commit_short(log) -> str:
         return "no-commit-id"
 
 
+def _write_meta_atomic(meta_path: Path, meta: Dict[str, Any]) -> None:
+    """Write ``meta`` to ``meta_path`` atomically.
+
+    ``meta.yaml`` is what the loader reads to decide how every sample in the
+    dataset is interpreted, so a partially written one is worse than none at
+    all: a truncated file parses as empty and silently reclassifies a modern
+    dataset as legacy v1. The document is therefore written to a temp file in
+    the same directory, flushed and fsynced, and only then ``os.replace``d onto
+    the final name -- an atomic rename within one filesystem.
+    """
+    tmp_path = meta_path.parent / f".{meta_path.name}.tmp{os.getpid()}"
+    try:
+        with open(tmp_path, "w") as handle:
+            handle.write(yaml.safe_dump(meta, sort_keys=True, default_flow_style=False))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, meta_path)
+    except BaseException:
+        # A failed write must not leave a temp file behind, and the final name
+        # must keep whatever complete document was already there.
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
 def _decide_reuse_or_generate(
     base: Path,
     config_id: str,
@@ -299,9 +326,7 @@ def get_dataset(
                 "code_commit": commit,
                 "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             }
-            (tmp / META_FILENAME).write_text(
-                yaml.safe_dump(meta, sort_keys=True, default_flow_style=False)
-            )
+            _write_meta_atomic(tmp / META_FILENAME, meta)
             tmp.rename(dest)
         except (Exception, SystemExit) as e:
             finalize_err = (
