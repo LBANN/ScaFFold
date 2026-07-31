@@ -636,6 +636,72 @@ def test_broken_meta_raises_instead_of_silent_legacy(tmp_path, broken_meta):
     assert str(root) in message
 
 
+# ---------------------------------------------------------------------------
+# R32: uneven spatial shards are accepted but computed wrong (known, unfixed)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.xfail(
+    reason="uneven spatial shards mishandled; to be fixed upstream in DistConv",
+    strict=True,
+)
+def test_uneven_spatial_shards_pool_like_the_unsharded_volume():
+    """Per-shard pooling must agree with pooling the whole volume.
+
+    ``SpatialShardSpec`` slices with ``torch.chunk`` semantics and only rejects
+    an *empty* shard, so ``vol_size=16`` over 3 shards is accepted as 6/6/4 --
+    nothing anywhere validates ``vol_size % num_shards`` or the per-U-Net-level
+    evenness that pooling needs. DistConv's ``DCTensor`` intercepts only
+    ``aten.convolution``, so ``max_pool3d`` runs independently on each local
+    shard; with unequal (or odd) shards the local pooling windows stop lining up
+    with the global ones, and by the second level whole planes are dropped and
+    values appear that are the max of no global window at all. The same happens
+    for equal-but-odd shards (``vol_size=10`` over 2 shards -> 5/5), and an odd
+    local shard entering a strided conv trips DistConv's own divisibility check
+    with a cryptic error deep in the first forward.
+
+    A volume ramp is used so a pooled value names the plane it came from.
+
+    XFAIL: the fix belongs in DistConv (its sharded ops must handle uneven
+    spatial decompositions), not in the loader, which is why this documents the
+    hazard instead of asserting a workaround. ``strict=True``: the comparison is
+    plain deterministic CPU pooling, so it cannot pass by chance -- if it ever
+    passes, DistConv/ScaFFold has changed and this test must be revisited.
+    """
+    vol_size, num_shards = 16, 3
+    ramp = torch.zeros(1, 1, vol_size, vol_size, vol_size)
+    for plane in range(vol_size):
+        ramp[0, 0, plane] = plane
+
+    # What the dataset hands each rank: uneven shards, accepted without a word.
+    volume = np.arange(vol_size**3, dtype=np.float32).reshape((vol_size,) * 3)
+    shard_sizes = [
+        dl.SpatialShardSpec(
+            shard_dims=(2,), num_shards=(num_shards,), shard_indices=(index,)
+        )
+        .slice_array(volume, {2: 0, 3: 1, 4: 2}, "mask")
+        .shape[0]
+        for index in range(num_shards)
+    ]
+    assert shard_sizes == [6, 6, 4]
+
+    # Two U-Net levels of pooling, globally versus per local shard.
+    pool = torch.nn.MaxPool3d(2)
+    global_pooled = pool(pool(ramp))
+    shards = list(torch.split(ramp, shard_sizes, dim=2))
+    shards = [pool(pool(shard)) for shard in shards]
+    sharded_pooled = torch.cat(shards, dim=2)
+
+    assert sharded_pooled.shape == global_pooled.shape, (
+        f"sharded pooling produced {list(sharded_pooled.shape[2:])} planes vs "
+        f"{list(global_pooled.shape[2:])} globally"
+    )
+    assert torch.equal(sharded_pooled, global_pooled), (
+        f"per-shard planes {sharded_pooled[0, 0, :, 0, 0].tolist()} vs global "
+        f"{global_pooled[0, 0, :, 0, 0].tolist()}"
+    )
+
+
 def _build_v2_sparse_label_dataset(root: Path, label: int) -> Path:
     """A v2 dataset whose only foreground label is the (large) ``label``.
 
