@@ -229,6 +229,7 @@ def main(config: Dict):
     # the failure is then propagated to all ranks via an allreduce.
     ok = True
     err = ""
+    interrupt = None
 
     try:
         if start_idx >= end_idx:
@@ -337,11 +338,14 @@ def main(config: Dict):
                     total_time,
                     len(volumes_contents_subset) / total_time,
                 )
-    except (Exception, SystemExit) as e:
+    except BaseException as e:
         # Capture the failure locally instead of letting it unwind past the
-        # collective below, which would desynchronize the ranks.
+        # collective below, which would desynchronize the ranks. BaseException,
+        # not (Exception, SystemExit): a KeyboardInterrupt delivered to one rank
+        # would otherwise skip the consensus and hang the others.
         ok = False
         err = f"rank {rank}: {type(e).__name__}: {e}"
+        interrupt = e if isinstance(e, KeyboardInterrupt) else None
 
     # Consensus on the generation status. This replaces a bare Barrier: every
     # rank always executes exactly this collective (regardless of success or
@@ -350,6 +354,10 @@ def main(config: Dict):
     all_ok = comm.allreduce(1 if ok else 0, op=MPI.MIN) == 1
     errs = comm.allgather(err)
     if not all_ok:
+        # The interrupted rank re-raises the operator's abort verbatim; the
+        # others report the gathered failure.
+        if interrupt is not None:
+            raise interrupt
         msgs = "; ".join(e for e in errs if e)
         raise RuntimeError(f"volume generation failed: {msgs or 'unknown error'}")
 

@@ -541,6 +541,57 @@ def test_non_root_raises_on_broadcast_finalize_error(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# VB-3: the consensus guards catch BaseException, not (Exception, SystemExit).
+#
+# ``KeyboardInterrupt`` is neither, so an interrupt delivered to rank 0 alone
+# (Ctrl-C on the launching terminal, a site watchdog's SIGINT) unwound straight
+# past the broadcast and hung every peer -- the failure mode the guard exists to
+# prevent, arriving through the one exception class it did not cover.
+# ---------------------------------------------------------------------------
+
+
+def test_rank0_interrupt_still_posts_the_decision_sentinel(tmp_path, monkeypatch):
+    """A KeyboardInterrupt on rank 0 reaches the peers as an error sentinel."""
+    config = _reuse_config(tmp_path / "datasets")
+    comm = FakeComm(rank=0, size=2)
+    monkeypatch.setattr(gd, "MPI", FakeMPI(comm))
+    monkeypatch.setattr(gd, "_git_commit_short", lambda log: "abc123")
+
+    def interrupted(*_args, **_kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(gd, "_decide_reuse_or_generate", interrupted)
+
+    # Rank 0 keeps the operator's abort ...
+    with pytest.raises(KeyboardInterrupt):
+        gd.get_dataset(config)
+
+    # ... but only after telling the peers to stop.
+    assert comm.calls == ["bcast"]
+    assert comm.bcast_payloads[0][0] == "error"
+    assert "KeyboardInterrupt" in comm.bcast_payloads[0][1]
+
+
+def test_interrupt_during_generation_reaches_the_consensus(tmp_path, monkeypatch):
+    """An interrupt inside volumegen still drives the allreduce and allgather."""
+    config = _reuse_config(tmp_path / "datasets")
+    comm = FakeComm(rank=0, size=2, allreduce_result=0, allgather_peers=[""])
+    monkeypatch.setattr(gd, "MPI", FakeMPI(comm))
+    monkeypatch.setattr(gd, "_git_commit_short", lambda log: "abc123")
+
+    def interrupted(_config):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(volumegen, "main", interrupted)
+
+    with pytest.raises(KeyboardInterrupt):
+        gd.get_dataset(config)
+
+    assert "allreduce" in comm.calls and "allgather" in comm.calls
+    assert "KeyboardInterrupt" in comm.allgather_payloads[0]
+
+
+# ---------------------------------------------------------------------------
 # R37: orphaned staging dirs are reclaimed instead of accumulating forever.
 # ---------------------------------------------------------------------------
 

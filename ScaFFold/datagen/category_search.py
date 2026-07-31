@@ -461,21 +461,44 @@ def main(config: Config) -> None:
     # partially visible directory) put one rank inside the loop while another is
     # past it, so the two post mismatched collectives on COMM_WORLD and the job
     # hangs. One scan, one broadcast, one shared verdict.
-    if rank == 0:
-        existing_indices = parse_category_indices(fracts_write_dir)
-    else:
-        existing_indices = None
-    existing_indices = comm.bcast(existing_indices, root=0)
-
+    #
+    # Rank 0 also loads the parameters of the categories already on disk (only
+    # it writes, so only it needs them for the duplicate guard). That read is
+    # part of the same rank-0-only window: a category CSV that will not parse --
+    # ragged, or hand-edited -- would otherwise kill rank 0 *after* the peers
+    # had already taken the broadcast and moved on to the next collective. Scan
+    # and load are therefore one guarded decision, reported through one
+    # broadcast, exactly as ``get_dataset`` reports its selection.
     existing_params = []
+    interrupt = None
     if rank == 0:
-        for idx in existing_indices:
-            existing_params.append(
-                np.loadtxt(
-                    os.path.join(fracts_write_dir, "%06d.csv" % idx),
-                    delimiter=",",
+        try:
+            existing_indices = parse_category_indices(fracts_write_dir)
+            for idx in existing_indices:
+                existing_params.append(
+                    np.loadtxt(
+                        os.path.join(fracts_write_dir, "%06d.csv" % idx),
+                        delimiter=",",
+                    )
                 )
+            scan = ("ok", existing_indices)
+        except BaseException as e:
+            existing_params = []
+            scan = (
+                "error",
+                f"rank 0 failed to scan existing categories in "
+                f"{fracts_write_dir}: {type(e).__name__}: {e}",
             )
+            interrupt = e if isinstance(e, KeyboardInterrupt) else None
+    else:
+        scan = None
+    status, payload = comm.bcast(scan, root=0)
+    if status == "error":
+        # Rank 0 keeps an operator's interrupt; every rank aborts either way.
+        if interrupt is not None:
+            raise interrupt
+        raise RuntimeError(f"category search failed: {payload}")
+    existing_indices = payload
 
     # Calculate number of remaining fractal categories to generate
     existing_categories = len(existing_indices)

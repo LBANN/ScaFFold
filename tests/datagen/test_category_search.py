@@ -149,7 +149,7 @@ def _seed_one_category(config: Namespace) -> None:
 def test_work_scan_is_root_only_and_broadcast(tmp_path, monkeypatch):
     """A non-root rank never scans; it consumes root's broadcast index list."""
     config = _cs_config(tmp_path / "fractals")
-    comm = CategorySearchComm(rank=1, size=2, bcast_returns=[[0]])
+    comm = CategorySearchComm(rank=1, size=2, bcast_returns=[("ok", [0])])
     monkeypatch.setattr(cs, "MPI", FakeMPI(comm))
 
     def no_scan(*_args, **_kwargs):
@@ -182,15 +182,62 @@ def test_divergent_fs_views_take_the_same_collective_path(tmp_path, monkeypatch)
 
     # Rank 1: an empty directory (a divergent view), but root broadcast [0].
     peer_config = _cs_config(tmp_path / "peer_view")
-    peer_comm = CategorySearchComm(rank=1, size=2, bcast_returns=[[0]])
+    peer_comm = CategorySearchComm(rank=1, size=2, bcast_returns=[("ok", [0])])
     monkeypatch.setattr(cs, "MPI", FakeMPI(peer_comm))
     cs.main(peer_config)
 
-    assert root_comm.bcast_payloads[0] == [0]
+    assert root_comm.bcast_payloads[0] == ("ok", [0])
     assert peer_comm.calls == root_comm.calls, (
         "ranks with divergent filesystem views issued different collectives: "
         f"rank 0 {root_comm.calls} vs rank 1 {peer_comm.calls}"
     )
+
+
+# ---------------------------------------------------------------------------
+# VB-2: the whole rank-0 scan window is fenced, not just the index parse.
+#
+# Rank 0 also reads the parameters of every category already on disk, right
+# after the scan broadcast. A CSV that will not parse therefore killed rank 0
+# while its peers had already consumed the broadcast and moved on -- the same
+# stranding the scan broadcast was introduced to prevent.
+# ---------------------------------------------------------------------------
+
+
+def test_unparseable_existing_category_is_broadcast_not_raised_on_root(
+    tmp_path, monkeypatch
+):
+    """A ragged category CSV becomes a broadcast error, not a rank-0-only death."""
+    config = _cs_config(tmp_path / "fractals")
+    param_dir = Path(layout.category_param_dir(config))
+    param_dir.mkdir(parents=True, exist_ok=True)
+    # Six-digit name, so the scan accepts it; ragged rows, so loadtxt raises.
+    (param_dir / "000000.csv").write_text("0.5,0.5,0.5\n0.5,0.5\n")
+
+    comm = CategorySearchComm(rank=0, size=2)
+    monkeypatch.setattr(cs, "MPI", FakeMPI(comm))
+
+    with pytest.raises(RuntimeError) as excinfo:
+        cs.main(config)
+
+    # Rank 0 stopped at the scan broadcast, and what it broadcast is the error
+    # sentinel its peers need in order to abort with it.
+    assert comm.calls == ["Barrier", "bcast"]
+    assert comm.bcast_payloads[-1][0] == "error"
+    assert "000000.csv" in str(excinfo.value) or "3DIFS_param" in str(excinfo.value)
+
+
+def test_peer_raises_on_broadcast_scan_error(tmp_path, monkeypatch):
+    """A peer receiving the scan sentinel raises instead of entering the loop."""
+    config = _cs_config(tmp_path / "fractals")
+    sentinel = ("error", "rank 0 failed to scan existing categories: ValueError: boom")
+    comm = CategorySearchComm(rank=1, size=2, bcast_returns=[sentinel])
+    monkeypatch.setattr(cs, "MPI", FakeMPI(comm))
+
+    with pytest.raises(RuntimeError, match="boom"):
+        cs.main(config)
+
+    # It never reached the work loop's collectives.
+    assert comm.calls == ["Barrier", "bcast"]
 
 
 # ---------------------------------------------------------------------------

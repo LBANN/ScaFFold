@@ -292,6 +292,21 @@ def _decide_reuse_or_generate(
     return ("generate", str(tmp), str(dest))
 
 
+def _reraisable(exc: BaseException) -> BaseException | None:
+    """Return ``exc`` when the rank that caught it should re-raise it verbatim.
+
+    The consensus guards below turn any failure into a sentinel so every rank
+    aborts together, and every rank then raises a ``RuntimeError`` carrying the
+    collected messages. That is the right report for a genuine error -- and for
+    ``SystemExit``, which must never escape ``get_dataset`` (a peer would treat
+    the silent unwind as success). A ``KeyboardInterrupt`` is different: it is
+    not an error but an operator abort, so the rank that received it re-raises
+    it after posting the sentinel, keeping the interrupt's own semantics (and
+    exit status) while its peers still learn to stop.
+    """
+    return exc if isinstance(exc, KeyboardInterrupt) else None
+
+
 def get_dataset(
     config: Namespace,
     require_commit: bool = False,  # default: ignore commit mismatches for reuse
@@ -334,22 +349,32 @@ def get_dataset(
     # the broadcast below, so a rank-0 exception would strand the whole job.
     # Any failure is therefore turned into an error sentinel that travels
     # through the same broadcast and makes every rank raise the same error.
+    interrupt = None
     if rank == 0:
         try:
             decision = _decide_reuse_or_generate(
                 base, config_id, commit, require_commit, log
             )
-        except (Exception, SystemExit) as e:
+        except BaseException as e:
+            # BaseException, not (Exception, SystemExit): a KeyboardInterrupt
+            # delivered to rank 0 alone (Ctrl-C on the launching terminal, a
+            # site watchdog SIGINT) would otherwise skip the broadcast and hang
+            # every peer -- the exact failure this guard exists to prevent.
             decision = (
                 "error",
                 f"rank 0 failed to select a dataset under {base}: "
                 f"{type(e).__name__}: {e}",
             )
+            interrupt = _reraisable(e)
     else:
         decision = None
     decision = comm.bcast(decision, root=0)
 
     if decision[0] == "error":
+        # Rank 0 keeps the abort signal it was actually given; the peers, which
+        # only ever saw the sentinel, report it as a generation failure.
+        if interrupt is not None:
+            raise interrupt
         raise RuntimeError(f"dataset selection failed: {decision[1]}")
 
     if decision[0] == "reuse":
@@ -364,13 +389,15 @@ def get_dataset(
     err = ""
 
     # A worker failure must not skip any collective below: catch everything
-    # (including SystemExit, which is a BaseException and would otherwise bypass
-    # the consensus) so every rank always reaches the allreduce and gather.
+    # (BaseException, so neither SystemExit nor a KeyboardInterrupt delivered to
+    # one rank can bypass the consensus) so every rank always reaches the
+    # allreduce and gather.
     try:
         volumegen.main(config)
-    except (Exception, SystemExit) as e:
+    except BaseException as e:
         ok = False
         err = f"volumegen attempt failed: rank {rank}: {type(e).__name__}: {e}"
+        interrupt = _reraisable(e)
 
     # Reach a global verdict, then have every rank participate in the error
     # gather so no rank is left in a mismatched collective on the failure path.
@@ -382,6 +409,8 @@ def get_dataset(
             shutil.rmtree(tmp, ignore_errors=True)
         # Every rank raises with the collected messages, so a non-root rank
         # never returns an unfinalized dataset path.
+        if interrupt is not None:
+            raise interrupt
         msgs = "; ".join(e for e in errs if e)
         raise RuntimeError(f"dataset generation failed: {msgs or 'unknown error'}")
 
@@ -403,16 +432,19 @@ def get_dataset(
             }
             _write_meta_atomic(tmp / META_FILENAME, meta)
             tmp.rename(dest)
-        except (Exception, SystemExit) as e:
+        except BaseException as e:
             finalize_err = (
                 f"rank 0 failed to finalize dataset at {dest}: {type(e).__name__}: {e}"
             )
+            interrupt = _reraisable(e)
 
     # This broadcast doubles as the synchronization the old Barrier provided: no
     # rank returns before rank 0 has published the rename (or reported that it
     # could not), so nobody observes the staging path or a missing dataset.
     finalize_err = comm.bcast(finalize_err, root=0)
     if finalize_err:
+        if interrupt is not None:
+            raise interrupt
         raise RuntimeError(f"dataset generation failed: {finalize_err}")
 
     return dest
