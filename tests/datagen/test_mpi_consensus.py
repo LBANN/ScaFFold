@@ -53,7 +53,7 @@ from mpi4py import MPI
 
 from ScaFFold.datagen import get_dataset as gd
 from ScaFFold.datagen import instance as inst
-from ScaFFold.datagen import volumegen
+from ScaFFold.datagen import layout, volumegen
 
 RANK_SCRIPTS = Path(__file__).resolve().parents[1] / "helpers" / "rank_scripts"
 
@@ -684,15 +684,10 @@ def _seed_one_instance(fract_base: Path, config: Namespace, *, present: bool) ->
 
     volumegen selects instance indices with ``random.sample(range(145), ...)``
     seeded by ``config.seed``; to be robust we populate every one of the 145
-    instance slots for category 0 when ``present`` is True.
+    instance slots for category 0 when ``present`` is True. The library path is
+    seed-keyed, so it is derived from the same config the run under test uses.
     """
-    inst_dir = (
-        fract_base
-        / f"var{config.variance_threshold}"
-        / "instances"
-        / f"np{config.point_num}"
-        / "000000"
-    )
+    inst_dir = Path(layout.instance_dir(config)) / "000000"
     inst_dir.mkdir(parents=True, exist_ok=True)
     if present:
         rng = np.random.default_rng(0)
@@ -803,7 +798,7 @@ def _instance_config(fract_base: Path) -> Namespace:
 
 def _seed_ifs_params(fract_base: Path, config: Namespace, n_categories: int) -> None:
     """Write a contractive IFS param CSV per category so generation stays fast."""
-    param_dir = fract_base / f"var{config.variance_threshold}" / "3DIFS_param"
+    param_dir = Path(layout.category_param_dir(config))
     param_dir.mkdir(parents=True, exist_ok=True)
     params = np.zeros((2, 13), dtype=np.float64)
     params[:, 0] = params[:, 4] = params[:, 8] = 0.5
@@ -869,14 +864,7 @@ def test_instance_non_root_uses_broadcast_list_not_local_glob(tmp_path, monkeypa
     assert rc == 0
 
     # Rank 1 received the broadcast list and generated its share (pair [1, 0]).
-    generated = (
-        fract_base
-        / f"var{config.variance_threshold}"
-        / "instances"
-        / f"np{config.point_num}"
-        / "000001"
-        / "000001_0000.npy"
-    )
+    generated = Path(layout.instance_dir(config)) / "000001" / "000001_0000.npy"
     assert generated.exists()
 
 

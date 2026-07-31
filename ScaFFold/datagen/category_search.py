@@ -26,6 +26,7 @@ import time
 import numpy as np
 from mpi4py import MPI
 
+from ScaFFold.datagen import layout
 from ScaFFold.datagen.generate_fractal_points import generate_fractal_points
 from ScaFFold.datagen.rng import SEED_MASK, derive_seed, seed_numba
 from ScaFFold.utils.config_utils import Config
@@ -403,11 +404,11 @@ def main(config: Config) -> None:
 
     log.info("MPI size = %s", size)
 
-    # Setup directories
-    fracts_sub_dir = f"var{config.variance_threshold}"
-    fracts_write_dir = os.path.join(
-        config.fract_base_dir, fracts_sub_dir, "3DIFS_param"
-    )
+    # Setup directories. The library is keyed by seed (see
+    # ScaFFold.datagen.layout): categories are drawn from a seed-derived
+    # candidate stream, so a run under a different seed must never resume onto
+    # another seed's parameter files.
+    fracts_write_dir = layout.category_param_dir(config)
     if rank == 0:
         log.info("Writing fractals to %s", fracts_write_dir)
         if os.path.exists(fracts_write_dir) and config.datagen_from_scratch:

@@ -37,6 +37,7 @@ import numpy as np
 import pytest
 
 from ScaFFold.datagen import instance as inst
+from ScaFFold.datagen import layout
 from ScaFFold.datagen import mask_detection as md
 from ScaFFold.datagen.volumegen import (
     load_np_ptcloud,
@@ -74,13 +75,15 @@ def _seed_category(fract_base: Path, *, point_num: int, keep: range) -> Path:
 
     Pre-seeding all but instance 0 means a ``main`` run only has to generate the
     single missing instance, keeping the test fast. Returns the instance dir.
+    The library lives under the seed-keyed layout, so the paths are derived from
+    the same config the run under test uses.
     """
-    vt = 0.15
-    param_dir = fract_base / f"var{vt}" / "3DIFS_param"
+    config = _make_config(fract_base, point_num=point_num)
+    param_dir = Path(layout.category_param_dir(config))
     param_dir.mkdir(parents=True)
     np.savetxt(param_dir / "000000.csv", _contractive_params(), delimiter=",")
 
-    inst_dir = fract_base / f"var{vt}" / "instances" / f"np{point_num}" / "000000"
+    inst_dir = Path(layout.instance_dir(config)) / "000000"
     inst_dir.mkdir(parents=True)
     rng = np.random.default_rng(0)
     for i in keep:

@@ -22,6 +22,7 @@ from typing import Dict
 import numpy as np
 from mpi4py import MPI
 
+from ScaFFold.datagen import layout
 from ScaFFold.utils.config_utils import Config
 from ScaFFold.utils.data_types import MASK_DTYPE, VOLUME_DTYPE
 from ScaFFold.utils.utils import setup_mpi_logger
@@ -240,7 +241,10 @@ def main(config: Dict):
             fractal_colors = np.random.rand(config.n_categories, 3)
 
             grid_size = resolve_grid_size(config)
-            fract_base_dir = str(config.fract_base_dir)
+            # The instance library is keyed by seed (see ScaFFold.datagen
+            # .layout), so a volume can only ever be built from point clouds
+            # this run's seed produced. Resolved once, outside the loop.
+            instances_dir = layout.instance_dir(config)
 
             # Generation loop
             start_time = time.time()
@@ -269,12 +273,7 @@ def main(config: Dict):
                     curr_instance = curr_vol[1 + 2 * curr_fract + 1]
                     fractal_color = fractal_colors[curr_category]
 
-                    instances_dir = (
-                        f"var{config.variance_threshold}/instances/np{config.point_num}"
-                    )
-
                     point_cloud_path = os.path.join(
-                        fract_base_dir,
                         instances_dir,
                         f"{curr_category:06d}",
                         f"{curr_category:06d}_{curr_instance:04d}.npy",
