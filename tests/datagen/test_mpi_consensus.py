@@ -39,7 +39,9 @@ Two tiers of tests guard the invariant:
 from __future__ import annotations
 
 import logging
+import os
 import re
+import time
 from argparse import Namespace
 from math import ceil
 from pathlib import Path
@@ -536,6 +538,72 @@ def test_non_root_raises_on_broadcast_finalize_error(tmp_path, monkeypatch):
 
     assert "boom" in str(excinfo.value)
     assert not dest.exists()
+
+
+# ---------------------------------------------------------------------------
+# R37: orphaned staging dirs are reclaimed instead of accumulating forever.
+# ---------------------------------------------------------------------------
+
+
+def _age_tree(path: Path, seconds: float) -> None:
+    """Backdate ``path`` and everything under it by ``seconds``."""
+    stamp = time.time() - seconds
+    for entry in sorted(path.rglob("*"), reverse=True):
+        os.utime(entry, (stamp, stamp))
+    os.utime(path, (stamp, stamp))
+
+
+def test_stale_staging_dirs_are_cleaned(tmp_path, monkeypatch):
+    """A long-orphaned ``.tmp_*`` dir is reclaimed; a live one is not.
+
+    Every killed generation leaves a full staging tree behind (potentially
+    terabytes) that nothing ever reclaims. Cleanup is age-gated so a *running*
+    job's staging dir -- which by construction is far younger than the
+    threshold -- is never deleted out from under it.
+    """
+    config = _reuse_config(tmp_path / "datasets")
+    base = _base_dir_for(config)
+    base.mkdir(parents=True)
+
+    orphan = base / f"{gd.TMP_PREFIX}20200101-000000_111_deadbeef"
+    (orphan / "volumes" / "training").mkdir(parents=True)
+    (orphan / "volumes" / "training" / "0.npy").write_bytes(b"stale payload")
+    _age_tree(orphan, 10 * gd.STALE_STAGING_AGE_SECONDS)
+
+    live = base / f"{gd.TMP_PREFIX}20260101-000000_222_cafebabe"
+    (live / "volumes").mkdir(parents=True)
+
+    log = logging.getLogger("test_stale_staging_dirs_are_cleaned")
+    gd._decide_reuse_or_generate(base, base.name, "abc123", False, log)
+
+    assert not orphan.exists(), "orphaned staging dir was not reclaimed"
+    assert live.exists(), "a concurrent job's staging dir was deleted"
+
+
+def test_cleanup_never_touches_published_datasets(tmp_path):
+    """Only ``.tmp_*`` dirs under this config_id base are ever removed.
+
+    An old published dataset is precisely what reuse is for, and other configs'
+    (or other users') directories are none of this job's business.
+    """
+    config = _reuse_config(tmp_path / "datasets")
+    base = _base_dir_for(config)
+    base.mkdir(parents=True)
+
+    published = _write_reusable_dataset(base, "some-other-config")
+    _age_tree(published, 10 * gd.STALE_STAGING_AGE_SECONDS)
+
+    # A staging dir belonging to a different config_id base entirely.
+    other_base = base.parent / "0123456789ab"
+    other_orphan = other_base / f"{gd.TMP_PREFIX}20200101-000000_333_f00d"
+    other_orphan.mkdir(parents=True)
+    _age_tree(other_orphan, 10 * gd.STALE_STAGING_AGE_SECONDS)
+
+    log = logging.getLogger("test_cleanup_never_touches_published_datasets")
+    gd._decide_reuse_or_generate(base, base.name, "abc123", False, log)
+
+    assert published.exists(), "an old published dataset was deleted"
+    assert other_orphan.exists(), "cleanup escaped this job's config_id base"
 
 
 # ---------------------------------------------------------------------------

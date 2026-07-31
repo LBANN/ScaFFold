@@ -37,6 +37,10 @@ META_FILENAME = "meta.yaml"
 # reader never observes a half-written dataset. The prefix is also what the
 # reuse scan skips and what the orphan cleanup collects.
 TMP_PREFIX = ".tmp_"
+# How long a staging directory must have sat untouched before it is treated as
+# orphaned (left by a killed/OOM'd job) and reclaimed. See
+# ``_cleanup_stale_staging_dirs`` for the safety argument behind the value.
+STALE_STAGING_AGE_SECONDS = 24 * 60 * 60
 # Bumped from 2 to 3 when instance point clouds moved from float64 to float32:
 # the storage layout is unchanged, but float32 voxel binning shifts a handful of
 # boundary voxels, so a float64-era dataset must not be reused as if it were
@@ -115,6 +119,54 @@ def _git_commit_short(log) -> str:
         return "no-commit-id"
 
 
+def _cleanup_stale_staging_dirs(
+    base: Path, log, max_age: float = STALE_STAGING_AGE_SECONDS
+) -> None:
+    """Reclaim orphaned ``.tmp_*`` staging directories under one config base.
+
+    A generation killed by a walltime limit, an OOM, or a node failure leaves
+    its whole staging tree behind, and nothing ever removed it: every retry
+    stacked another (potentially multi-terabyte) copy under the same config_id.
+
+    Safety policy. Only directories that (a) live directly under *this*
+    config_id base, (b) carry the ``.tmp_`` prefix this module owns, and (c)
+    have been untouched for ``max_age`` are removed. The age gate is what keeps
+    a *concurrent* job's staging directory safe: unique staging names mean two
+    live jobs never share a directory, but they do share the base, so a live
+    peer's directory is visible here -- it is simply orders of magnitude younger
+    than the threshold (a day, against generations measured in minutes to
+    hours). Published datasets and anything outside ``base`` are never touched.
+    Failures are logged and ignored: cleanup is opportunistic and must never
+    break the decision it runs inside.
+    """
+    now = time.time()
+    for path in base.iterdir():
+        if not path.name.startswith(TMP_PREFIX) or not path.is_dir():
+            continue
+        try:
+            # Newest mtime among the staging dir and its immediate children: a
+            # bounded, cheap probe (no recursive stat storm over a partially
+            # generated dataset) that still notices a job that has started
+            # laying down its split directories.
+            newest = path.stat().st_mtime
+            for child in path.iterdir():
+                newest = max(newest, child.stat().st_mtime)
+        except OSError as exc:
+            log.warning("Could not stat staging dir %s: %s", path, exc)
+            continue
+
+        age = now - newest
+        if age < max_age:
+            continue
+
+        log.info(
+            "Removing orphaned dataset staging dir %s (untouched for %.1f hours)",
+            path,
+            age / 3600.0,
+        )
+        shutil.rmtree(path, ignore_errors=True)
+
+
 def _write_meta_atomic(meta_path: Path, meta: Dict[str, Any]) -> None:
     """Write ``meta`` to ``meta_path`` atomically.
 
@@ -165,6 +217,10 @@ def _decide_reuse_or_generate(
     poison directory (exactly what a killed job leaves behind) must never be
     able to cause one.
     """
+    # Rank 0 is the only rank that touches this base, so this is also the one
+    # safe place to reclaim staging dirs orphaned by earlier killed jobs.
+    _cleanup_stale_staging_dirs(base, log)
+
     candidates = sorted(
         (p for p in base.iterdir() if p.is_dir()), key=lambda p: p.name, reverse=True
     )
