@@ -1086,18 +1086,21 @@ class PyTorchTrainer(BaseTrainer):
         completed_epochs = epoch - 1
 
         if not completed_new_epoch:
-            # The loop exited without running a single new epoch: the resumed
-            # checkpoint already covers every epoch this run was asked for.
-            # There is nothing new to save (the existing checkpoint already
-            # records epoch `completed_epochs`) and none of the per-epoch
-            # metrics the final save would write were ever computed, so skip
-            # it and return normally -- the caller's post-processing still has
-            # the CSV the original run left behind.
+            # The loop exited without running a single epoch: the state we
+            # resumed either already covers every epoch this run was asked for,
+            # or already met target_dice. There is nothing new to save (the
+            # checkpoint on disk already records epoch `completed_epochs`) and
+            # none of the per-epoch metrics the final save would write were
+            # ever computed, so skip it and return normally -- the caller's
+            # post-processing still has the CSV the original run left behind.
             self.log.warning(
-                "Nothing to resume: the loaded checkpoint already covers epoch "
-                "%s, so no new epoch was trained and no checkpoint was written. "
-                "Increase 'epochs' (or lower 'target_dice') to train further.",
-                completed_epochs,
+                "No new epoch was trained (start epoch %s, 'epochs' %s, "
+                "starting val dice %s vs target_dice %s): there was nothing to "
+                "resume, and no checkpoint was written.",
+                self.start_epoch,
+                self.config.epochs,
+                self.start_val_dice,
+                self.config.target_dice,
             )
         # Save a final checkpoint when the run exits (convergence or max epochs)
         # at an epoch that was not a checkpoint interval, so the converged
