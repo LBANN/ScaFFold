@@ -28,6 +28,7 @@ benchmark launch. The trainer tests use the CPU, single-process fixtures.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import numpy as np
@@ -142,19 +143,27 @@ _HEADER = (
 )
 
 
-def _stub_trainer(run_dir, *, train_from_scratch, log):
+def _stub_trainer(run_dir, *, train_from_scratch, log, **config_overrides):
     """A PyTorchTrainer carrying only what cleanup_or_resume/train touch.
 
     Built via ``object.__new__`` (as the checkpointing tests do) so no dataset,
     model, or process group is needed. A real CheckpointManager over a tiny
     linear model backs the resume path so load/save round-trip faithfully.
+
+    ``config_overrides`` set additional config fields (``epochs``,
+    ``target_dice``, ``checkpoint_interval``, ...) for tests that drive
+    ``train()``'s loop-entry and final-save control flow.
     """
     t = object.__new__(PyTorchTrainer)
-    t.config = SimpleNamespace(
-        train_from_scratch=train_from_scratch,
-        run_dir=str(run_dir),
-        checkpoint_interval=-1,
-    )
+    config_fields = {
+        "train_from_scratch": train_from_scratch,
+        "run_dir": str(run_dir),
+        "checkpoint_interval": -1,
+        "epochs": -1,
+        "target_dice": 0.95,
+    }
+    config_fields.update(config_overrides)
+    t.config = SimpleNamespace(**config_fields)
     t.world_rank = 0
     t.global_step = 0
     t.total_optimizer_steps = 0
@@ -344,6 +353,69 @@ def test_step_counters_roundtrip(tmp_path):
     assert t2.start_epoch == 3
     assert t2.global_step == 37
     assert t2.total_optimizer_steps == 37
+
+
+def test_restart_of_completed_run_trains_and_saves_nothing(tmp_path, caplog):
+    """Restarting a run whose checkpoint already covers ``epochs`` exits cleanly.
+
+    The epoch loop breaks at the max-epoch check before any new epoch runs, so
+    no epoch metric exists to checkpoint: the final-save block must be skipped
+    (the last checkpoint already covers the completed epochs) rather than
+    saving with an unbound ``val_loss_avg``. ``train()`` has to return normally
+    so the worker's post-processing still runs off the CSV already on disk, and
+    the run must say plainly that there was nothing to resume.
+    """
+    log = logging.getLogger("resume.r01")
+    run = tmp_path / "run"
+    run.mkdir()
+
+    # Artifacts of a completed epochs=2 run: a checkpoint recording epoch 2
+    # (written by the in-loop save) plus its CSV rows.
+    t1 = _stub_trainer(
+        run,
+        train_from_scratch=False,
+        log=log,
+        epochs=2,
+        checkpoint_interval=1,
+    )
+    t1.checkpoint_manager.save_checkpoint(
+        epoch=2,
+        val_loss_avg=0.5,
+        extras={
+            "train_mask_values": None,
+            "global_step": 8,
+            "total_optimizer_steps": 8,
+        },
+    )
+    csv = run / "train_stats.csv"
+    csv.write_text(_HEADER + "\n")
+    _write_rows(csv, [1, 2])
+
+    ckpt = t1.checkpoint_manager.last_ckpt_path
+    before = ckpt.read_bytes()
+
+    # The user reruns the generated restart command against the same dir.
+    t2 = _stub_trainer(
+        run,
+        train_from_scratch=False,
+        log=log,
+        epochs=2,
+        checkpoint_interval=1,
+    )
+    t2.config.restart = True
+    t2.cleanup_or_resume()
+    assert t2.start_epoch == 3  # past the last epoch: nothing left to train
+
+    with caplog.at_level(logging.WARNING):
+        t2.train()  # must not raise
+
+    # Nothing new was written: the existing checkpoint is byte-identical (a
+    # fresh save would serialize this trainer's own randomly-initialized model)
+    # and the CSV still holds exactly the original run's epochs.
+    assert ckpt.read_bytes() == before
+    epochs = [ln.split(",")[0] for ln in csv.read_text().splitlines()[1:]]
+    assert epochs == ["1", "2"]
+    assert "nothing to resume" in caplog.text.lower()
 
 
 def test_total_steps_resume_predates_dedicated_key(tmp_path):

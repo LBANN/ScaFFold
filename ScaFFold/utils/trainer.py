@@ -776,6 +776,11 @@ class PyTorchTrainer(BaseTrainer):
         # other ranks would make them disagree about whether to call
         # save_checkpoint on exit, deadlocking its internal collective.
         last_checkpoint_epoch = None
+        # Whether this invocation completed at least one NEW epoch. A resume
+        # whose checkpoint already covers config.epochs (or an --epochs lowered
+        # below the checkpointed epoch) leaves the loop at the max-epoch check
+        # before any epoch body runs, so none of the per-epoch metrics exist.
+        completed_new_epoch = False
         with open(self.outfile_path, "a", newline="") as outfile:
             start = time.time()
             while dice_score_train < self.config.target_dice:
@@ -1030,6 +1035,7 @@ class PyTorchTrainer(BaseTrainer):
 
                 dice_score_train = val_score
                 epoch += 1
+                completed_new_epoch = True
 
                 # This check must exist otherwise the condition dice_score_train < self.config.target_dice will evaluate to False and incorrectly exit the training
                 if math.isnan(dice_score_train):
@@ -1039,12 +1045,26 @@ class PyTorchTrainer(BaseTrainer):
 
         completed_epochs = epoch - 1
 
+        if not completed_new_epoch:
+            # The loop exited without running a single new epoch: the resumed
+            # checkpoint already covers every epoch this run was asked for.
+            # There is nothing new to save (the existing checkpoint already
+            # records epoch `completed_epochs`) and none of the per-epoch
+            # metrics the final save would write were ever computed, so skip
+            # it and return normally -- the caller's post-processing still has
+            # the CSV the original run left behind.
+            self.log.warning(
+                "Nothing to resume: the loaded checkpoint already covers epoch "
+                "%s, so no new epoch was trained and no checkpoint was written. "
+                "Increase 'epochs' (or lower 'target_dice') to train further.",
+                completed_epochs,
+            )
         # Save a final checkpoint when the run exits (convergence or max epochs)
         # at an epoch that was not a checkpoint interval, so the converged
         # weights that produced the reported metrics are not lost. Skipped when
         # checkpointing is disabled, when no epoch completed, or when the last
         # completed epoch was already checkpointed inside the loop.
-        if (
+        elif (
             self.config.checkpoint_interval > 0
             and completed_epochs >= 1
             and last_checkpoint_epoch != completed_epochs
