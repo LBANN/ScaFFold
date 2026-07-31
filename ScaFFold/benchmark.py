@@ -45,9 +45,14 @@ def main(kwargs_dict: dict = {}):
         run_dict["run_dir"] = str(benchmark_run_dir)
         run_dict["run_iter"] = Path(f"{benchmark_run_dir}/run")
     elif rank == 0:
-        # Save copy of benchmark config yml to run dir
+        # Save a copy of the benchmark config yml in the run dir, under a fixed
+        # name of its own. Copying it in under its original name overwrites the
+        # merged config.yaml the CLI just wrote whenever the base config file
+        # happens to be called config.yaml -- and restart.sh points -c at
+        # $RUN_DIR/config.yaml, so the restart would reload the raw base config
+        # with none of the run's overrides or metadata.
         bench_config_path = Path(args.config)
-        shutil.copy(bench_config_path, benchmark_run_dir)
+        shutil.copy(bench_config_path, Path(benchmark_run_dir) / "base_config.yaml")
 
         run_dict = {k: v for k, v in vars(args).items() if k not in ["command"]}
         run_dict["run_dir"] = str(benchmark_run_dir)

@@ -272,3 +272,60 @@ def test_list_valued_key_rejected_in_run_config(tmp_path):
     }
     with pytest.raises(ValueError, match="local_batch_size"):
         config_utils.RunConfig(bad)
+
+
+# ---------------------------------------------------------------------------
+# The base config is preserved under a name of its own (R22)
+# ---------------------------------------------------------------------------
+
+
+def _run_benchmark_with_base(monkeypatch, tmp_path, base_name):
+    """Run the driver with a base config named ``base_name``; return the run dir.
+
+    The run dir starts out holding the merged ``config.yaml`` the CLI writes,
+    so the test can tell whether the copy of the base config overwrote it.
+    """
+    import ScaFFold.benchmark as benchmark_mod
+    import ScaFFold.worker as worker_mod
+
+    monkeypatch.setattr(worker_mod, "main", lambda kwargs_dict={}: None)
+    monkeypatch.setattr(benchmark_mod.worker, "main", worker_mod.main)
+
+    base = _write_yaml(tmp_path / base_name, BASE)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    merged = {**BASE, "local_batch_size": 2, "machine_name": "some-host"}
+    _write_yaml(run_dir / "config.yaml", merged)
+
+    kwargs = {
+        **merged,
+        "command": "benchmark",
+        "restart": False,
+        "verbose": 0,
+        "config": base,
+        "benchmark_run_dir": str(run_dir),
+    }
+    benchmark_mod.main(kwargs_dict=kwargs)
+    return run_dir
+
+
+@pytest.mark.parametrize("base_name", ["config.yaml", "base.yml"])
+def test_base_config_copy_never_clobbers_merged_config(
+    monkeypatch, tmp_path, base_name
+):
+    """The merged config.yaml survives even when the base file has that name.
+
+    Copying the base config into the run dir under its own name silently
+    overwrote the merged dump -- losing the CLI overrides, machine name and
+    scheduler metadata -- and, since restart.sh points -c at
+    ``$RUN_DIR/config.yaml``, a restart then reloaded the raw base config.
+    """
+    run_dir = _run_benchmark_with_base(monkeypatch, tmp_path, base_name)
+
+    merged = yaml.safe_load((run_dir / "config.yaml").read_text())
+    assert merged["local_batch_size"] == 2
+    assert merged["machine_name"] == "some-host"
+
+    preserved = yaml.safe_load((run_dir / "base_config.yaml").read_text())
+    assert preserved["local_batch_size"] == BASE["local_batch_size"]
+    assert "machine_name" not in preserved
