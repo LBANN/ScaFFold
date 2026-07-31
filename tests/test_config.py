@@ -12,7 +12,7 @@
 #
 # SPDX-License-Identifier: (Apache-2.0)
 
-"""Tests for config loading/validation, override merging, and benchmark sweeps."""
+"""Tests for config loading/validation, override merging, and the benchmark driver."""
 
 from pathlib import Path
 
@@ -87,7 +87,7 @@ def test_unknown_key_warns_when_not_strict(capsys):
 )
 def test_documented_keys_accepted(config_path):
     """Every shipped config file loads cleanly under strict validation."""
-    config_utils.load_config(str(config_path), "sweep")
+    config_utils.load_config(str(config_path), "benchmark")
 
 
 def test_invalid_type_message_names_type(tmp_path):
@@ -167,11 +167,11 @@ def test_config_yaml_roundtrip(tmp_path):
         }
     )
     path = _write_yaml(tmp_path / "config.yaml", combined)
-    config_utils.load_config(path, "sweep")  # must not raise
+    config_utils.load_config(path, "benchmark")  # must not raise
 
 
 # ---------------------------------------------------------------------------
-# Benchmark parameter sweeps
+# Single-run benchmark driver; list-valued (sweep) params are rejected
 # ---------------------------------------------------------------------------
 
 
@@ -203,31 +203,72 @@ def _run_benchmark(monkeypatch, tmp_path, config_updates):
     return calls
 
 
-def test_sweep_cross_product(monkeypatch, tmp_path):
-    """List-valued sweep params produce one scalarized run per combination."""
-    calls = _run_benchmark(
-        monkeypatch,
-        tmp_path,
-        {"local_batch_size": [1, 2], "starting_learning_rate": [0.1, 0.2]},
-    )
-    assert len(calls) == 4
-    combos = sorted((c["local_batch_size"], c["starting_learning_rate"]) for c in calls)
-    assert combos == [(1, 0.1), (1, 0.2), (2, 0.1), (2, 0.2)]
-    # Every run received scalars and its own run directory.
-    run_dirs = {c["run_dir"] for c in calls}
-    assert len(run_dirs) == 4
-
-
-def test_scalar_config_single_run(monkeypatch, tmp_path):
-    """An all-scalar config runs the worker exactly once."""
+def test_benchmark_runs_worker_once(monkeypatch, tmp_path):
+    """One benchmark invocation runs the worker exactly once, in the run dir."""
     calls = _run_benchmark(monkeypatch, tmp_path, {})
     assert len(calls) == 1
     assert calls[0]["local_batch_size"] == BASE["local_batch_size"]
+    # The run uses the benchmark run dir directly: no per-combination subdirs.
+    run_root = tmp_path / "run"
+    assert calls[0]["run_dir"] == str(run_root)
+    assert list(run_root.glob("param_set_*")) == []
 
 
-def test_list_in_scalar_field_fails_fast():
-    """A list reaching a scalar Config field raises naming the key."""
+def test_no_sweep_expansion_helper():
+    """The sweep-expansion entry point is gone from the benchmark driver."""
+    import ScaFFold.benchmark as benchmark_mod
+
+    assert not hasattr(benchmark_mod, "expand_sweep_combinations")
+
+
+@pytest.mark.parametrize(
+    "key, value",
+    [
+        ("problem_scale", [6, 7]),
+        ("unet_bottleneck_dim", [3, 4]),
+        ("n_categories", [5, 10]),
+        ("local_batch_size", [1, 2]),
+    ],
+)
+def test_list_valued_scalar_key_rejected(key, value):
+    """A list value for a scalar key is rejected by name, not by a stray TypeError."""
     bad = dict(BASE)
-    bad["local_batch_size"] = [1, 2]
-    with pytest.raises(ValueError, match="local_batch_size"):
+    bad[key] = value
+    with pytest.raises(ValueError) as excinfo:
         config_utils.Config(bad)
+    message = str(excinfo.value)
+    assert key in message
+    assert "parameter sweeps are no longer supported" in message.lower()
+    assert str(value) in message
+
+
+def test_list_valued_key_rejected_by_load_config(tmp_path):
+    """The benchmark config load path rejects sweeps with the same clear error."""
+    path = _write_yaml(tmp_path / "sweepy.yml", {**BASE, "problem_scale": [6, 7]})
+    with pytest.raises(ValueError) as excinfo:
+        config_utils.load_config(path, "benchmark")
+    message = str(excinfo.value)
+    assert "problem_scale" in message
+    assert "parameter sweeps are no longer supported" in message.lower()
+
+
+def test_all_list_valued_keys_named():
+    """Every offending key is named in one error, not just the first one hit."""
+    bad = {**BASE, "problem_scale": [6, 7], "local_batch_size": [1, 2]}
+    with pytest.raises(ValueError) as excinfo:
+        config_utils.Config(bad)
+    message = str(excinfo.value)
+    assert "problem_scale" in message
+    assert "local_batch_size" in message
+
+
+def test_list_valued_key_rejected_in_run_config(tmp_path):
+    """A list reaching the worker's RunConfig is rejected before any setup."""
+    bad = {
+        **BASE,
+        "local_batch_size": [1, 2],
+        "run_dir": str(tmp_path),
+        "run_iter": str(tmp_path / "run"),
+    }
+    with pytest.raises(ValueError, match="local_batch_size"):
+        config_utils.RunConfig(bad)

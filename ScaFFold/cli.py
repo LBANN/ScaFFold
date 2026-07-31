@@ -170,8 +170,8 @@ def main():
         help="Run the benchmark.",
         description=(
             "The default run method for ScaFFold. "
-            "Users may specify lists of run parameters in the config file. "
-            "This subcommand runs one instance of the benchmark for each parameter combination. "
+            "Each invocation runs exactly one instance of the benchmark, using "
+            "the single-valued run parameters given in the config file. "
             "Requires path to config file."
         ),
     )
@@ -325,10 +325,9 @@ def main():
         # paths (benchmark, action="append"): base config plus overrides.
         config_paths = args.config if isinstance(args.config, list) else [args.config]
         merged_dict = config_utils.load_config_files(config_paths)
-        # Validate the merged result and derive dependent settings
-        # (list-valued sweep params are allowed here; the benchmark driver
-        # expands them per run).
-        bench_config = config_utils.Config(merged_dict, allow_sweeps=True)
+        # Validate the merged result and derive dependent settings. Every run
+        # parameter must be single-valued; a list is rejected here by name.
+        bench_config = config_utils.Config(merged_dict)
         bench_config_dict = vars(bench_config)
         cli_args = vars(args)
         # Downstream consumers expect a single config path (e.g. to copy it

@@ -61,9 +61,9 @@ The model is trained from a random initialization until convergence, which is de
 
 ScaFFold benchmark training always uses PyTorch distributed execution with DistConv spatial parallelism. For a singleton run, launch one distributed rank rather than disabling distributed execution.
 
-`benchmark` creates a folder for the benchmark run(s) at `base_run_dir` set in the config file. For reproducibility, we store a copy of the benchmark run config yml. Within each run subfolder, `benchmark` creates a yml config for that specific run.
+Each `benchmark` invocation performs exactly one benchmark run, in a run folder created under `base_run_dir` set in the config file. Every run parameter must be single-valued; a list (e.g. `problem_scale: [6, 7]`) is rejected by name, since parameter sweeps are not supported. To compare parameter settings, launch one benchmark run per setting. For reproducibility, the run folder holds a copy of the benchmark config yml plus the fully merged `config.yaml` for that run.
 
-After each run completes, statistics from the run are stored in `train_stats.csv`. Additionally, users can inspect plots of the training and validation losses over time in `<base_run_dir/figures`.
+After the run completes, statistics from the run are stored in `train_stats.csv`. Additionally, users can inspect plots of the training and validation losses over time in `<base_run_dir/figures`.
 
 Parameters are set in a `.yml` config file and can be modified by the user. See
 [`ScaFFold/configs/benchmark_default.yml`](ScaFFold/configs/benchmark_default.yml)
@@ -143,7 +143,7 @@ The weights we use to scale IFS parameters look like the following:
 
 ### Dataset generation
 
-Finally,  we are ready to generate a dataset for training our model. Each sample in the dataset is composed of several fractal instances (default=3), randomly selected from any category, overlain with eachother in a 3D voxel grid. Each fractal instance in a sample is placed in a random, non-centered location in the voxel grid if the `scale` parameter set in the sweep config file is <1; otherwise, each fractal instance is centered on the center of the voxel grid. Below is an outline of the data generation process:
+Finally,  we are ready to generate a dataset for training our model. Each sample in the dataset is composed of several fractal instances (default=3), randomly selected from any category, overlain with eachother in a 3D voxel grid. Each fractal instance in a sample is placed in a random, non-centered location in the voxel grid if the `scale` parameter set in the benchmark config file is <1; otherwise, each fractal instance is centered on the center of the voxel grid. Below is an outline of the data generation process:
 ```
 For n  in n_volumes:
 

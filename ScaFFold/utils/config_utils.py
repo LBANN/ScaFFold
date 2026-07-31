@@ -106,8 +106,8 @@ class Config:
         }
     )
 
-    # Fields that hold scalars; a list here indicates an unexpanded parameter
-    # sweep leaking into a single run.
+    # Fields that hold scalars. Parameter sweeps are not supported, so a list
+    # here is a user error and is rejected by name (see _validate_keys).
     _SCALAR_KEYS = frozenset(
         {
             "n_categories",
@@ -136,7 +136,7 @@ class Config:
     )
 
     @classmethod
-    def _validate_keys(cls, config_dict, strict, allow_sweeps):
+    def _validate_keys(cls, config_dict, strict):
         allowed = cls.KNOWN_KEYS | cls.AUX_KEYS
         unknown = sorted(set(config_dict) - allowed)
         if unknown:
@@ -144,20 +144,22 @@ class Config:
             if strict:
                 raise ValueError(message)
             print(f"WARNING: {message}")
-        if allow_sweeps:
-            return
         lists = sorted(
             k for k in cls._SCALAR_KEYS if isinstance(config_dict.get(k), list)
         )
         if lists:
+            details = "; ".join(
+                f"{k}: parameter sweeps are no longer supported; "
+                f"got list {config_dict[k]}"
+                for k in lists
+            )
             raise ValueError(
-                f"Config key(s) {', '.join(lists)} hold list values but a "
-                "single run needs scalars. Parameter sweeps must be expanded "
-                "before constructing a run config."
+                f"{details}. Each of these keys must hold a single value; "
+                "launch one benchmark run per parameter setting."
             )
 
-    def __init__(self, config_dict, strict=True, allow_sweeps=False):
-        self._validate_keys(config_dict, strict, allow_sweeps)
+    def __init__(self, config_dict, strict=True):
+        self._validate_keys(config_dict, strict)
         self.library_root = str(ScaFFold.paths.scaffold_root).rstrip("/") + "/ScaFFold/"
         self.base_run_dir = str(Path(config_dict["base_run_dir"]).resolve())
         self.dataset_dir = str(
@@ -279,7 +281,11 @@ def load_config_files(file_paths):
 
 def load_config(file_path: str, config_type: str):
     """
-    Load run config from yaml file
+    Load a config from a yaml file.
+
+    ``config_type`` is either ``"benchmark"`` (a benchmark config, before a run
+    directory has been resolved) or ``"run"`` (a config for one run, which also
+    carries ``run_dir``/``run_iter``). Both require single-valued parameters.
 
     Returns:
         Config: A Config instance with settings loaded from the yaml file
@@ -290,13 +296,12 @@ def load_config(file_path: str, config_type: str):
     with open(file_path, "r") as file:
         config_dict = yaml.safe_load(file)
 
-    if config_type == "sweep":
-        # Sweep configs may hold list-valued parameters that the benchmark
-        # driver expands into one run per combination.
-        return Config(config_dict, allow_sweeps=True)
+    if config_type == "benchmark":
+        return Config(config_dict)
     elif config_type == "run":
         return RunConfig(config_dict)
     else:
         raise ValueError(
-            f"Invalid config type specified: {config_type}. Must be either 'sweep' or 'run'"
+            f"Invalid config type specified: {config_type}. "
+            "Must be either 'benchmark' or 'run'"
         )
