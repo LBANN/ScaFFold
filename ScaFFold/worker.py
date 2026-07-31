@@ -17,6 +17,7 @@ import os
 import socket
 import time
 from argparse import Namespace
+from pathlib import Path
 
 import numpy as np
 import psutil
@@ -107,28 +108,36 @@ def export_profiler_trace(prof, config, log, rank, world_size, ranks_per_node):
     then raises; the trace can also fill the filesystem), so log them and let
     the job finish.
 
+    The trace is written into ``config.run_dir`` so it lands with the rest of
+    the run's artifacts instead of wherever the job happened to be launched
+    from.
+
     Returns the path written, or None if the trace could not be written.
     """
+    # Round up: with a partly-filled last node, flooring would report one node
+    # too few (and a ranks_per_node larger than the job would report none).
+    nodes = max(1, math.ceil(world_size / max(1, ranks_per_node)))
     tracename = (
         f"torch-{socket.gethostname()}-r{rank}"
-        f"-N{world_size // ranks_per_node}-n{world_size}"
+        f"-N{nodes}-n{world_size}"
         f"-ps{config.problem_scale}-e{config.epochs}"
         f"-nipf{config.n_instances_used_per_fractal}-{int(time.time())}.json"
     )
+    tracepath = Path(getattr(config, "run_dir", None) or os.getcwd()) / tracename
     try:
-        prof.export_chrome_trace(tracename)
+        prof.export_chrome_trace(str(tracepath))
     except Exception as e:
         log.error(
             "Could not write PyTorch trace '%s': %s: %s. Continuing so the "
             "run can finish; a run with zero profiled steps never starts the "
             "profiler and has no trace to export.",
-            tracename,
+            tracepath,
             type(e).__name__,
             e,
         )
         return None
-    log.info("Wrote PyTorch trace '%s'", tracename)
-    return tracename
+    log.info("Wrote PyTorch trace '%s'", tracepath)
+    return tracepath
 
 
 @annotate()

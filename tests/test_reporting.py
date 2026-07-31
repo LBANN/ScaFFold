@@ -18,6 +18,7 @@ from types import SimpleNamespace
 
 import matplotlib
 import numpy as np
+import pytest
 
 matplotlib.use("Agg")
 
@@ -289,6 +290,20 @@ class TestProfilerTraceExport:
         return prof
 
     @staticmethod
+    def _stepped_profiler():
+        """A profiler with a completed capture window."""
+        from torch.profiler import ProfilerActivity, profile, schedule
+
+        prof = profile(
+            activities=[ProfilerActivity.CPU],
+            schedule=schedule(wait=1, warmup=1, active=1, repeat=1),
+        )
+        with prof:
+            for _ in range(4):
+                prof.step()
+        return prof
+
+    @staticmethod
     def _config(run_dir):
         return SimpleNamespace(
             problem_scale=4,
@@ -346,3 +361,46 @@ class TestProfilerTraceExport:
 
         assert path is not None
         assert Path(path).exists()
+
+    def test_trace_lands_in_the_run_dir(self, tmp_path, caplog):
+        """R23: the trace goes to the run dir, not whatever CWD happens to be."""
+        import logging
+
+        import ScaFFold.worker as worker
+
+        prof = self._stepped_profiler()
+        log = logging.getLogger("test_trace_lands_in_the_run_dir")
+
+        path = worker.export_profiler_trace(
+            prof, self._config(tmp_path), log, rank=0, world_size=1, ranks_per_node=1
+        )
+
+        assert Path(path).parent == tmp_path
+        assert list(tmp_path.glob("torch-*.json")) == [Path(path)]
+
+    @pytest.mark.parametrize(
+        "world_size, ranks_per_node, expected",
+        [(8, 4, "-N2-n8-"), (6, 4, "-N2-n6-"), (1, 1, "-N1-n1-")],
+        ids=["even", "ragged-last-node", "singleton"],
+    )
+    def test_trace_name_counts_nodes_not_ranks(
+        self, tmp_path, world_size, ranks_per_node, expected
+    ):
+        """R23: the N field is a node count, and never rounds a node away."""
+        import logging
+
+        import ScaFFold.worker as worker
+
+        prof = self._stepped_profiler()
+        log = logging.getLogger("test_trace_name_counts_nodes")
+
+        path = worker.export_profiler_trace(
+            prof,
+            self._config(tmp_path),
+            log,
+            rank=0,
+            world_size=world_size,
+            ranks_per_node=ranks_per_node,
+        )
+
+        assert expected in Path(path).name

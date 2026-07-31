@@ -62,11 +62,22 @@ def get_local_rank(required: bool = False) -> int:
 
 
 def get_local_size(required: bool = False) -> int:
-    """Return the number of local MPI ranks."""
+    """Return the number of local MPI ranks.
+
+    Recognizes the same launchers as ``get_local_rank``: a variable honored
+    there but not here silently yields 1, which makes per-node logic (e.g. the
+    profiler's one-rank-per-node gate) treat every rank as node-local.
+    """
+    if "LOCAL_WORLD_SIZE" in os.environ:
+        return int(os.environ["LOCAL_WORLD_SIZE"])
     if "MV2_COMM_WORLD_LOCAL_SIZE" in os.environ:
         return int(os.environ["MV2_COMM_WORLD_LOCAL_SIZE"])
     if "OMPI_COMM_WORLD_LOCAL_SIZE" in os.environ:
         return int(os.environ["OMPI_COMM_WORLD_LOCAL_SIZE"])
+    if "PMI_LOCAL_SIZE" in os.environ:
+        return int(os.environ["PMI_LOCAL_SIZE"])
+    if "PALS_LOCAL_SIZE" in os.environ:
+        return int(os.environ["PALS_LOCAL_SIZE"])
     if "SLURM_NNODES" in os.environ and "SLURM_NTASKS" in os.environ:
         return int(os.environ["SLURM_NTASKS"]) // int(os.environ["SLURM_NNODES"])
     # Flux does not have an env variable for this, so we assume an

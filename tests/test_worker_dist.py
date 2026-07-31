@@ -226,3 +226,53 @@ def test_worker_singleton_smoke(monkeypatch, tiny_config, tiny_dataset):
     assert trainer.config.global_batch_size == trainer.config.local_batch_size
     # The worker destroyed the process group before rank-0 post-processing.
     assert not torch.distributed.is_initialized()
+
+
+# ---------------------------------------------------------------------------
+# Local size detection (R23)
+# ---------------------------------------------------------------------------
+
+_LOCAL_SIZE_CASES = [
+    # torchrun exports LOCAL_WORLD_SIZE alongside LOCAL_RANK.
+    ({"LOCAL_WORLD_SIZE": "4"}, 4),
+    ({"MV2_COMM_WORLD_LOCAL_SIZE": "4"}, 4),
+    ({"OMPI_COMM_WORLD_LOCAL_SIZE": "4"}, 4),
+    ({"PMI_LOCAL_SIZE": "4"}, 4),
+    ({"PALS_LOCAL_SIZE": "4"}, 4),
+    ({"SLURM_NTASKS": "8", "SLURM_NNODES": "2"}, 4),
+    ({"FLUX_JOB_SIZE": "8", "FLUX_JOB_NNODES": "2"}, 4),
+]
+
+_LOCAL_SIZE_VARS = [
+    "LOCAL_WORLD_SIZE",
+    "MV2_COMM_WORLD_LOCAL_SIZE",
+    "OMPI_COMM_WORLD_LOCAL_SIZE",
+    "PMI_LOCAL_SIZE",
+    "PALS_LOCAL_SIZE",
+    "SLURM_NTASKS",
+    "SLURM_NNODES",
+    "FLUX_JOB_SIZE",
+    "FLUX_JOB_NNODES",
+]
+
+
+def test_local_size_detection_matrix(monkeypatch):
+    """Every launcher that reports a local rank has its local size honored too.
+
+    An unrecognized variable silently yields 1, which makes the per-node
+    profiler gate ``rank % ranks_per_node == 0`` select *every* rank and
+    mislabels the trace's node count.
+    """
+    for env, want_local_size in _LOCAL_SIZE_CASES:
+        for var in _LOCAL_SIZE_VARS:
+            monkeypatch.delenv(var, raising=False)
+        for key, value in env.items():
+            monkeypatch.setenv(key, value)
+        assert distributed_mod.get_local_size() == want_local_size, env
+
+
+def test_local_size_defaults_to_one(monkeypatch):
+    """With nothing to go on, one rank per node is still the assumption."""
+    for var in _LOCAL_SIZE_VARS:
+        monkeypatch.delenv(var, raising=False)
+    assert distributed_mod.get_local_size() == 1
