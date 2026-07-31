@@ -90,6 +90,26 @@ def _make_fresh_run_dir(base_run_dir, timestamp):
             candidate = base_run_dir / f"{timestamp}-{suffix}"
 
 
+def missing_checkpoint_error(combined_config):
+    """Return the "nothing to resume from" message, or None if a restart can run.
+
+    Reports the first problem found rather than raising, so the caller can make
+    this a rank-0 decision and broadcast the verdict instead of letting every
+    rank stat the shared filesystem and possibly disagree.
+    """
+    checkpoint_dir = Path(combined_config["run_dir"]) / combined_config.get(
+        "checkpoint_dir", "checkpoints"
+    )
+    expected_checkpoints = (
+        checkpoint_dir / "checkpoint_last.pth",
+        checkpoint_dir / "checkpoint_best.pth",
+    )
+    if any(path.exists() for path in expected_checkpoints):
+        return None
+    expected = " or ".join(str(path) for path in expected_checkpoints)
+    return f"Restart requested but no checkpoint was found. Expected {expected}."
+
+
 def resolve_run_dir(args_dict, combined_config):
     """Decide the benchmark run directory and whether this launch resumes a run.
 
@@ -449,23 +469,21 @@ def main():
     comm.Barrier()
     combined_config = comm.bcast(combined_config, root=0)
 
+    # Restart pre-check. Like every other decision here it is made once, on
+    # rank 0, and broadcast: the check reads the filesystem, and ranks can see
+    # different views of a shared filesystem (stale NFS/Lustre attribute
+    # caches). A rank that decided for itself would either abort alone --
+    # stranding its peers in benchmark.py's timeout-less barrier -- or keep
+    # running after rank 0 had already aborted.
+    restart_precheck_error = None
     if combined_config.get("restart", False):
-        run_dir = combined_config.get("run_dir")
-        if not run_dir:
+        if not combined_config.get("run_dir"):
             raise ValueError("--restart requires --run-dir")
-
-        checkpoint_dir = Path(run_dir) / combined_config.get(
-            "checkpoint_dir", "checkpoints"
-        )
-        expected_checkpoints = (
-            checkpoint_dir / "checkpoint_last.pth",
-            checkpoint_dir / "checkpoint_best.pth",
-        )
-        if not any(path.exists() for path in expected_checkpoints):
-            expected = " or ".join(str(path) for path in expected_checkpoints)
-            raise FileNotFoundError(
-                f"Restart requested but no checkpoint was found. Expected {expected}."
-            )
+        if rank == 0:
+            restart_precheck_error = missing_checkpoint_error(combined_config)
+    restart_precheck_error = comm.bcast(restart_precheck_error, root=0)
+    if restart_precheck_error is not None:
+        raise FileNotFoundError(restart_precheck_error)
 
     if rank == 0:
         log.debug("combined_config = %s", combined_config)
