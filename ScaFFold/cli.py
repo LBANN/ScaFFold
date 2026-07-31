@@ -24,7 +24,47 @@ from mpi4py import MPI
 from ScaFFold.utils import config_utils
 from ScaFFold.utils.collect_scheduler_info import collect_scheduler_metadata
 from ScaFFold.utils.create_restart_script import create_restart_script
+from ScaFFold.utils.distributed import get_world_size
 from ScaFFold.utils.utils import setup_mpi_logger
+
+
+def check_launcher_world_size(mpi_world_size):
+    """Verify that the MPI world spans the whole job.
+
+    ScaFFold uses two different sources of truth for the job shape: the CLI and
+    the benchmark driver make their job-wide decisions on ``MPI.COMM_WORLD``
+    rank 0, while the training path takes its rank and world size from the
+    launcher's environment (``get_world_rank`` / ``get_world_size``). Those
+    agree only when the job was started by an MPI-aware launcher.
+
+    Under a plain ``torchrun`` (or a bare ``python`` invocation of several
+    processes) mpi4py initializes as an independent singleton in every process,
+    so every process believes it is MPI rank 0: each one runs the rank-0 block,
+    atomically claims its *own* timestamped run directory, and the job then
+    diverges -- non-zero launcher ranks crash on a broadcast that never
+    happened while rank 0 blocks in the first collective until it times out.
+
+    Fail loudly here, before any run directory is created, instead of leaving
+    that mess behind. ``get_world_size`` falls back to the MPI communicator
+    when the environment reports nothing, so an unlauncher-ed single process
+    trivially agrees with itself.
+    """
+    env_world_size = get_world_size()
+    if env_world_size != mpi_world_size:
+        raise RuntimeError(
+            f"Launcher/MPI world size mismatch: MPI.COMM_WORLD reports "
+            f"{mpi_world_size} rank(s) but the launcher environment reports "
+            f"{env_world_size}. ScaFFold decides run directories and restart "
+            "state on MPI rank 0 and broadcasts them, so an MPI world that "
+            "does not span the job is unrecoverable: every process acts as "
+            "rank 0, each claims a separate run directory, and the job hangs "
+            "in the first collective. This is what a plain 'torchrun' (or "
+            "launching the processes directly) produces, because mpi4py then "
+            "initializes as a singleton in every process. Launch ScaFFold "
+            "with an MPI-aware launcher (torchrun-hpc, flux run, srun, "
+            "mpirun) so that MPI spans all ranks, or run a single process "
+            "with no launcher environment set."
+        )
 
 
 def _make_fresh_run_dir(base_run_dir, timestamp):
@@ -299,6 +339,10 @@ def main():
 
     comm = MPI.COMM_WORLD
     rank = comm.Get_rank()
+    # Every rank runs this identically, before any run directory is created,
+    # so a mis-launched job aborts uniformly instead of leaving per-rank run
+    # dirs behind and hanging.
+    check_launcher_world_size(comm.Get_size())
     # Parse the command-line arguments.
     args = parser.parse_args()
     log = setup_mpi_logger(__file__, args.verbose)
