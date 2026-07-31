@@ -441,30 +441,36 @@ def main():
         combined_config["vol_size"] = pow(2, combined_config["problem_scale"])
         combined_config["point_num"] = int(combined_config["vol_size"] ** 3 / 256)
 
-        # Resolve the run directory and whether this launch resumes a run.
-        # This sets combined_config["benchmark_run_dir"] on every path and,
-        # when resuming, forces train_from_scratch off / restart on.
-        benchmark_run_dir, restarting = resolve_run_dir(vars(args), combined_config)
-        if restarting:
-            log.info("Resuming in existing directory: %s", benchmark_run_dir)
+        # The run directory, its config dumps and its restart script belong to
+        # the benchmark subcommand alone. Fractal generation writes nothing
+        # there, and the restart script it used to get replayed
+        # `generate_fractals --restart --run-dir ...` -- flags that subparser
+        # rejects, so the script could only ever exit 2.
+        if args.command == "benchmark":
+            # Resolve the run directory and whether this launch resumes a run.
+            # This sets combined_config["benchmark_run_dir"] on every path and,
+            # when resuming, forces train_from_scratch off / restart on.
+            benchmark_run_dir, restarting = resolve_run_dir(vars(args), combined_config)
+            if restarting:
+                log.info("Resuming in existing directory: %s", benchmark_run_dir)
 
-        # Add scheduler metadata and machine name to config.yaml
-        combined_config["scheduler_metadata"] = collect_scheduler_metadata()
-        combined_config["machine_name"] = socket.gethostname()
+            # Add scheduler metadata and machine name to config.yaml
+            combined_config["scheduler_metadata"] = collect_scheduler_metadata()
+            combined_config["machine_name"] = socket.gethostname()
 
-        # Dump configs (Overwrite is okay/desired on restart to capture new job IDs)
-        overrides = {
-            k: v for k, v in cli_args.items() if v is not None and k != "command"
-        }
-        with open(benchmark_run_dir / "overrides.yaml", "w") as file:
-            yaml.dump(overrides, file)
-        with open(benchmark_run_dir / "config.yaml", "w") as file:
-            yaml.dump(combined_config, file)
+            # Dump configs (Overwrite is okay/desired on restart to capture new job IDs)
+            overrides = {
+                k: v for k, v in cli_args.items() if v is not None and k != "command"
+            }
+            with open(benchmark_run_dir / "overrides.yaml", "w") as file:
+                yaml.dump(overrides, file)
+            with open(benchmark_run_dir / "config.yaml", "w") as file:
+                yaml.dump(combined_config, file)
 
-        # 4. Generate/Update the restart script in the directory. The
-        # communicator size is ground truth for the job scale; environment
-        # sniffing is only the fallback for callers that lack it.
-        create_restart_script(benchmark_run_dir, world_size=comm.Get_size())
+            # 4. Generate/Update the restart script in the directory. The
+            # communicator size is ground truth for the job scale; environment
+            # sniffing is only the fallback for callers that lack it.
+            create_restart_script(benchmark_run_dir, world_size=comm.Get_size())
 
     comm.Barrier()
     combined_config = comm.bcast(combined_config, root=0)

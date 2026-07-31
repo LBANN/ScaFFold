@@ -312,3 +312,54 @@ def test_restart_precheck_failure_raises_on_every_rank(monkeypatch, tmp_path):
     comm = _FakeComm(rank=1, size=2, bcast_returns=[rank0_config, rank0_error])
     with pytest.raises(FileNotFoundError, match="no checkpoint"):
         run_cli(monkeypatch, _restart_argv(cfg, run_dir), comm=comm)
+
+
+# ---------------------------------------------------------------------------
+# R19: generate_fractals is not a benchmark run
+# ---------------------------------------------------------------------------
+
+
+def test_generate_fractals_creates_no_benchmark_run_dir(monkeypatch, tmp_path):
+    """Fractal generation leaves no benchmark run dir and no restart script.
+
+    The rank-0 block used to run for every subcommand, so a generation job
+    littered base_run_dir with a timestamped benchmark directory holding a
+    restart.sh that replays ``generate_fractals --restart --run-dir ...`` --
+    flags the generate_fractals subparser rejects, so the script exits 2.
+    """
+    cfg = write_config(tmp_path)
+
+    _, calls = run_cli(monkeypatch, ["scaffold", "generate_fractals", "-c", str(cfg)])
+
+    assert len(calls["generate_fractals"]) == 1
+    assert not (tmp_path / "runs").exists(), "generation created a benchmark run dir"
+    assert list(tmp_path.rglob("restart.sh")) == []
+    assert list(tmp_path.rglob("overrides.yaml")) == []
+
+
+def test_generate_fractals_config_reaches_the_driver(monkeypatch, tmp_path):
+    """The merged config still reaches the generation driver (control)."""
+    cfg = write_config(tmp_path)
+
+    _, calls = run_cli(
+        monkeypatch,
+        ["scaffold", "generate_fractals", "-c", str(cfg), "--n-categories", "3"],
+    )
+
+    (config,) = calls["generate_fractals"]
+    assert config["n_categories"] == 3
+    assert config["fract_base_dir"] == str(tmp_path / "fractals")
+
+
+def test_benchmark_still_creates_its_run_dir(monkeypatch, tmp_path):
+    """The benchmark subcommand keeps its run dir, dumps and restart script."""
+    cfg = write_config(tmp_path)
+
+    _, calls = run_cli(monkeypatch, ["scaffold", "benchmark", "-c", str(cfg)])
+
+    (config,) = calls["benchmark"]
+    run_dir = Path(config["benchmark_run_dir"])
+    assert run_dir.is_dir()
+    assert (run_dir / "config.yaml").exists()
+    assert (run_dir / "overrides.yaml").exists()
+    assert (run_dir / "restart.sh").exists()
