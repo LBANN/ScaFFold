@@ -44,11 +44,15 @@ STALE_STAGING_AGE_SECONDS = 24 * 60 * 60
 # Bumped from 2 to 3 when instance point clouds moved from float64 to float32:
 # the storage layout is unchanged, but float32 voxel binning shifts a handful of
 # boundary voxels, so a float64-era dataset must not be reused as if it were
-# float32. This version stamps new datasets, gates reuse below, and feeds the
-# config_id hash, so an older dataset is neither matched nor scanned. The loader
-# in data_loading.py keeps its own (lower) minimum-layout version and still reads
-# v3 through the modern dense path.
-DATASET_FORMAT_VERSION = 3
+# float32. Bumped from 3 to 4 when the voxel centering offset was corrected from
+# (grid_size - 1 - span)/2 to (grid_size - span)/2: every volume and mask
+# generated before that was misregistered by half a voxel (with the first
+# half-voxel of each axis clipped onto plane 0), so those datasets must be
+# regenerated rather than reused. This version stamps new datasets, gates reuse
+# below, and feeds the config_id hash, so an older dataset is neither matched nor
+# scanned. The loader in data_loading.py keeps its own (lower) minimum-layout
+# version and still reads v4 through the modern dense path.
+DATASET_FORMAT_VERSION = 4
 INCLUDE_KEYS = [
     "dataset_format_version",
     "n_categories",

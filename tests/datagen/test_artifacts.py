@@ -312,20 +312,22 @@ def test_scale_config_rejected():
 # ---------------------------------------------------------------------------
 
 
-def _dense_reference_indices(points: np.ndarray, grid_size: int, eps=1e-6):
-    """The pre-refactor index computation, kept verbatim as a reference.
+def _reference_indices(points: np.ndarray, grid_size: int, eps=1e-6, *, clip=True):
+    """The index computation of ``points_to_voxel_indices``, spelled out.
 
-    This is the exact math the old dense ``points_to_voxelgrid`` ran before
-    scattering ``True`` into a full ``grid_size**3`` boolean array; the scatter
-    API must reproduce the identical occupied-voxel set and painted values.
+    Two tests need to see inside the function: the scatter-vs-dense equivalence
+    check (which needs the per-point indices the dense grid was built from) and
+    the centering check (which needs the indices *before* ``np.clip`` hides
+    out-of-range bins). Every test using this asserts the replica reproduces the
+    real function's output, so it cannot silently drift from it.
     """
     mins = points.min(axis=0)
     maxs = points.max(axis=0)
     voxel_size = (float((maxs - mins).max()) + eps) / grid_size
     scaled = (points - mins) / voxel_size
-    offset = (grid_size - 1 - scaled.max(axis=0)) / 2.0
+    offset = (grid_size - scaled.max(axis=0)) / 2.0
     idx = np.floor(scaled + offset).astype(int)
-    return np.clip(idx, 0, grid_size - 1)
+    return np.clip(idx, 0, grid_size - 1) if clip else idx
 
 
 def test_voxel_indices_match_dense_grid():
@@ -337,7 +339,7 @@ def test_voxel_indices_match_dense_grid():
     idx = points_to_voxel_indices(points, grid_size)
 
     # Reference dense grid built the old way, from the reference index math.
-    ref_idx = _dense_reference_indices(points, grid_size)
+    ref_idx = _reference_indices(points, grid_size)
     reference = np.zeros((grid_size,) * 3, dtype=bool)
     reference[ref_idx[:, 0], ref_idx[:, 1], ref_idx[:, 2]] = True
 
@@ -421,3 +423,80 @@ def test_dataset_version_bumped_past_float64_era():
     from ScaFFold.datagen import get_dataset as gd
 
     assert gd.DATASET_FORMAT_VERSION > 2
+
+
+# ---------------------------------------------------------------------------
+# R33: voxel centering is a whole voxel, not half of one
+# ---------------------------------------------------------------------------
+
+
+def _assert_replica_tracks_real(grid_size: int = 16) -> None:
+    """Pin ``_reference_indices`` to the real function on a sparse cloud.
+
+    A sparse cloud is essential here: a dense one occupies every voxel under
+    any offset, so the comparison would pass vacuously.
+    """
+    sparse = np.random.default_rng(7).random((300, 3)).astype(np.float32)
+    assert np.array_equal(
+        np.unique(_reference_indices(sparse, grid_size), axis=0),
+        points_to_voxel_indices(sparse, grid_size),
+    ), "the replicated index arithmetic no longer matches points_to_voxel_indices"
+
+
+def test_voxelization_never_bins_outside_the_grid():
+    """No point lands outside ``[0, grid_size)`` before the safety clip.
+
+    The centering offset positions a span of ``span`` voxels inside a grid of
+    ``grid_size`` voxels, so the free space to split between the two margins is
+    ``grid_size - span``. Using ``grid_size - 1 - span`` shifted every cloud
+    half a voxel toward the origin: points in the first half-voxel of each
+    filled axis floored to -1, and ``np.clip`` quietly folded them into bin 0.
+    """
+    grid_size = 16
+    _assert_replica_tracks_real(grid_size)
+    rng = np.random.default_rng(1234)
+    points = rng.random((200_000, 3)).astype(np.float32)
+
+    pre_clip = _reference_indices(points, grid_size, clip=False)
+    assert pre_clip.min() >= 0, (
+        f"{int((pre_clip < 0).any(axis=1).sum())} of {len(points)} points floored "
+        "below bin 0 and were clipped back in"
+    )
+    assert pre_clip.max() <= grid_size - 1
+
+
+def test_voxelization_density_is_uniform_at_the_boundaries():
+    """A uniform cloud fills the boundary planes like the interior ones.
+
+    The half-voxel shift piled the clipped points onto plane 0 (1.5x the
+    interior density) and starved the far plane (0.5x), a systematic
+    misregistration in every generated volume and mask.
+    """
+    grid_size = 16
+    _assert_replica_tracks_real(grid_size)
+    rng = np.random.default_rng(1234)
+    points = rng.random((200_000, 3)).astype(np.float32)
+
+    idx = _reference_indices(points, grid_size)
+    counts = np.bincount(idx[:, 0], minlength=grid_size)
+    interior = counts[2:-2].mean()
+    assert 0.9 <= counts[0] / interior <= 1.1, (
+        f"boundary plane 0 holds {counts[0] / interior:.2f}x the interior density"
+    )
+    assert 0.9 <= counts[-1] / interior <= 1.1, (
+        f"boundary plane {grid_size - 1} holds {counts[-1] / interior:.2f}x the "
+        "interior density"
+    )
+
+
+def test_dataset_version_bumped_past_half_voxel_era():
+    """The reuse marker advanced past 3: pre-fix datasets are misregistered.
+
+    Correcting the offset changes the voxel contents of every generated volume
+    and mask, so a dataset built before the fix must not be handed to a run
+    after it. Bumping the version both stops the reuse scan from matching those
+    directories and changes the config_id they hash to.
+    """
+    from ScaFFold.datagen import get_dataset as gd
+
+    assert gd.DATASET_FORMAT_VERSION > 3

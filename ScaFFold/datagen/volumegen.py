@@ -82,9 +82,15 @@ def points_to_voxel_indices(
     scaled = (points - mins) / voxel_size
 
     # 4) Center the occupied region: the largest axis fills the grid while the
-    #    shorter axes are offset so their span sits in the middle.
+    #    shorter axes are offset so their span sits in the middle. The free
+    #    space to split between the two margins is (grid_size - span) voxels,
+    #    measured in the same voxel units as ``scaled``; subtracting an extra 1
+    #    (as if the offset were an index rather than a length) shifted every
+    #    cloud half a voxel toward the origin, floored the first half-voxel of
+    #    each filled axis to -1, and let the clip below fold those points onto
+    #    plane 0.
     span = scaled.max(axis=0)
-    offset = (grid_size - 1 - span) / 2.0
+    offset = (grid_size - span) / 2.0
     idx = np.floor(scaled + offset).astype(int)
 
     # 5) Clip to valid range (guards float rounding at the boundaries).
