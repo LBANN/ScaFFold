@@ -133,6 +133,7 @@ def test_same_second_run_dirs_distinct(tmp_path, monkeypatch):
 
 from types import SimpleNamespace  # noqa: E402
 
+import ScaFFold.utils.trainer as trainer_mod  # noqa: E402
 from ScaFFold.utils.checkpointing import CheckpointManager  # noqa: E402
 from ScaFFold.utils.trainer import PyTorchTrainer  # noqa: E402
 
@@ -416,6 +417,66 @@ def test_restart_of_completed_run_trains_and_saves_nothing(tmp_path, caplog):
     epochs = [ln.split(",")[0] for ln in csv.read_text().splitlines()[1:]]
     assert epochs == ["1", "2"]
     assert "nothing to resume" in caplog.text.lower()
+
+
+def test_converged_resume_does_not_retrain(tiny_trainer, monkeypatch):
+    """A restart of an already-converged run must not train another epoch.
+
+    The validation dice the checkpointed epoch achieved is persisted with the
+    checkpoint and restored on resume, so the ``while dice_score_train <
+    target_dice`` loop is never entered. Without it a converged ``epochs: -1``
+    run re-trains, re-logs and re-checkpoints one full epoch on every restart,
+    inflating ``sum(epoch_duration)`` -- the FOM denominator -- and the
+    reported epoch count relative to the same run left un-restarted.
+    """
+    overrides = {
+        "checkpoint_interval": 1,
+        "epochs": -1,
+        "target_dice": 0.95,
+        "train_from_scratch": 0,
+    }
+
+    def converged_evaluate(*args, **kwargs):
+        # Two validation samples at hard dice 0.96, i.e. above target.
+        return (0.96 * 2, 0.1 * 2, 0.1, 2, 2)
+
+    monkeypatch.setattr(trainer_mod, "evaluate", converged_evaluate)
+
+    def stub_batches(trainer):
+        """Replace the DistConv forward path and count the batches it runs."""
+        calls = {"n": 0}
+
+        def _step(batch, **kwargs):
+            calls["n"] += 1
+            return 1, torch.tensor(0.1), torch.tensor(0.96)
+
+        monkeypatch.setattr(trainer, "_run_training_batch", _step)
+        return calls
+
+    # The original run: converges in epoch 1 and checkpoints it.
+    first = tiny_trainer(config_overrides=overrides)
+    first_calls = stub_batches(first)
+    first.cleanup_or_resume()
+    first.train()
+    assert first_calls["n"] > 0  # it really did train
+
+    ckpt_path = first.checkpoint_manager.last_ckpt_path
+    saved = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    assert saved["epoch"] == 1
+    csv = Path(first.outfile_path)
+    assert [ln.split(",")[0] for ln in csv.read_text().splitlines()[1:]] == ["1"]
+
+    # The user reruns the restart command: nothing is left to train.
+    second = tiny_trainer(config_overrides=overrides)
+    second_calls = stub_batches(second)
+    second.cleanup_or_resume()
+    assert second.start_epoch == 2
+    second.train()
+
+    assert second_calls["n"] == 0, "a converged run re-trained an extra epoch"
+    assert [ln.split(",")[0] for ln in csv.read_text().splitlines()[1:]] == ["1"]
+    reloaded = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    assert reloaded["epoch"] == 1
 
 
 def test_total_steps_resume_predates_dedicated_key(tmp_path):

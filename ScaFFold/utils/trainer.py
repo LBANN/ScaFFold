@@ -117,6 +117,10 @@ class BaseTrainer:
         self.global_step = 0
         self.total_optimizer_steps = 0
         self.start_epoch = -1
+        # Validation dice already achieved by the epoch we resume from (0 for a
+        # fresh run). The training loop's exit condition is a threshold on this
+        # score, so it has to survive a restart: see cleanup_or_resume.
+        self.start_val_dice = 0.0
         self.ps = getattr(self.config, "_parallel_strategy", None)
         self.spatial_mesh = None  # Spatial mesh for use w/ DistConv
         self.data_num_replicas = self.world_size
@@ -387,6 +391,7 @@ class PyTorchTrainer(BaseTrainer):
                         pass
 
             self.start_epoch = 1
+            self.start_val_dice = 0.0
         else:
             # Load checkpoint via manager. An explicit restart must find a
             # checkpoint; a plain non-scratch launch may simply start fresh.
@@ -398,6 +403,16 @@ class PyTorchTrainer(BaseTrainer):
             restored = self.checkpoint_manager.restored_extras
             if "train_mask_values" in restored:
                 self.train_set.mask_values = restored["train_mask_values"]
+
+            # Resume the convergence state, not just the weights. The loop runs
+            # while the validation dice is below target_dice, so a run that had
+            # already converged must re-enter the loop with the score it
+            # achieved -- starting from 0 would unconditionally re-train (and
+            # re-log, and re-checkpoint) one full epoch before the condition is
+            # re-tested, inflating the epoch count and the FOM's total train
+            # time. Checkpoints written before this key existed simply fall
+            # back to 0, i.e. the old behaviour.
+            self.start_val_dice = restored.get("val_dice", 0.0)
 
             # Continue the optimizer-step counts from where the checkpoint
             # left off; otherwise a resumed run restarts them at 0 and
@@ -766,7 +781,10 @@ class PyTorchTrainer(BaseTrainer):
         """
 
         epoch = self.start_epoch
-        dice_score_train = 0
+        # Seeded from the resumed checkpoint (0 for a fresh run) so an already
+        # converged run exits the loop immediately instead of training an
+        # extra epoch to rediscover that it converged.
+        dice_score_train = self.start_val_dice
         epoch_minibatch_times_s = []
         # Track the last epoch checkpointed inside the loop so the final-save
         # decision below is identical on every rank. The in-loop checkpoint
@@ -1027,6 +1045,9 @@ class PyTorchTrainer(BaseTrainer):
                         "train_mask_values": self.train_set.mask_values,
                         "global_step": self.global_step,
                         "total_optimizer_steps": self.total_optimizer_steps,
+                        # The convergence state: what a resume must restore to
+                        # know this epoch already met (or missed) target_dice.
+                        "val_dice": val_score,
                     }
                     self.checkpoint_manager.save_checkpoint(epoch, val_loss_avg, extras)
                     last_checkpoint_epoch = epoch
@@ -1073,6 +1094,7 @@ class PyTorchTrainer(BaseTrainer):
                 "train_mask_values": self.train_set.mask_values,
                 "global_step": self.global_step,
                 "total_optimizer_steps": self.total_optimizer_steps,
+                "val_dice": val_score,
             }
             self.checkpoint_manager.save_checkpoint(
                 completed_epochs, val_loss_avg, extras
