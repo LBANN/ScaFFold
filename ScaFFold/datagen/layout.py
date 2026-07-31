@@ -57,6 +57,41 @@ def category_param_dir(config) -> str:
     return os.path.join(library_root(config), "3DIFS_param")
 
 
+def legacy_category_param_dir(config) -> str:
+    """Return where the category CSVs lived before the layout was seed-keyed."""
+    return os.path.join(
+        str(config.fract_base_dir),
+        f"var{config.variance_threshold}",
+        "3DIFS_param",
+    )
+
+
+def warn_if_legacy_library(config, log) -> bool:
+    """Warn when a library in the old, seed-agnostic layout is being ignored.
+
+    The relayout is deliberately silent about old data -- an existence check in
+    the seed-keyed location simply does not find it -- which from the outside
+    looks like a library that was there yesterday being regenerated for no
+    reason (at large scales, hours of work). One line naming both directories
+    turns that into an explained, expected event. Returns whether the old
+    layout was present, so callers can test the condition directly.
+    """
+    legacy = legacy_category_param_dir(config)
+    if not os.path.isdir(legacy):
+        return False
+    log.warning(
+        "Found a fractal library in the old, seed-agnostic layout at %s. "
+        "Libraries are now keyed by seed, so this one cannot be reused (a run "
+        "under a different seed would silently adopt another seed's data) and "
+        "the categories for seed %s will be generated at %s. Delete the old "
+        "directory once you no longer need it.",
+        legacy,
+        int(config.seed),
+        category_param_dir(config),
+    )
+    return True
+
+
 def instance_dir(config) -> str:
     """Return the directory holding this seed's instance point clouds.
 

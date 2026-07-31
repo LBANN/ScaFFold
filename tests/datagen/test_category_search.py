@@ -194,6 +194,78 @@ def test_divergent_fs_views_take_the_same_collective_path(tmp_path, monkeypatch)
 
 
 # ---------------------------------------------------------------------------
+# VB-4: temp files stranded by killed writes are swept, as in instance.py.
+#
+# Both atomic writers name their temp file after the writing pid, so a job
+# killed mid-write leaves one behind per killed process, forever: nothing in
+# this module ever looked at them again.
+# ---------------------------------------------------------------------------
+
+
+def test_stale_temp_files_are_swept(tmp_path, monkeypatch):
+    """Category and attempt-counter temps from dead pids are removed."""
+    config = _cs_config(tmp_path / "fractals")
+    param_dir = Path(layout.category_param_dir(config))
+    param_dir.mkdir(parents=True, exist_ok=True)
+    _seed_one_category(config)  # n_categories=1, so the search has no work
+
+    stale_csv = param_dir / ".000001.csv.tmp999999"
+    stale_csv.write_text("0.5,0.5\n")
+    stale_counter = param_dir / ".rng_attempt_rank3.tmp999999"
+    stale_counter.write_text("17")
+
+    comm = CategorySearchComm(rank=0, size=1)
+    monkeypatch.setattr(cs, "MPI", FakeMPI(comm))
+
+    cs.main(config)
+
+    assert not stale_csv.exists(), "a stranded category temp file was kept"
+    assert not stale_counter.exists(), "a stranded attempt-counter temp was kept"
+    # The real artifact is untouched: only the temp names are swept.
+    assert (param_dir / "000000.csv").exists()
+
+
+# ---------------------------------------------------------------------------
+# VB-6: a library in the old, seed-agnostic layout is explained, not ignored.
+# ---------------------------------------------------------------------------
+
+
+def test_old_layout_library_is_reported(tmp_path, monkeypatch, caplog):
+    """A pre-relayout library produces one warning naming both directories."""
+    config = _cs_config(tmp_path / "fractals")
+    legacy = Path(layout.legacy_category_param_dir(config))
+    legacy.mkdir(parents=True)
+    (legacy / "000000.csv").write_text("")
+    _seed_one_category(config)  # nothing to generate under the new layout
+
+    comm = CategorySearchComm(rank=0, size=1)
+    monkeypatch.setattr(cs, "MPI", FakeMPI(comm))
+
+    with caplog.at_level("WARNING"):
+        cs.main(config)
+
+    messages = " ".join(record.getMessage() for record in caplog.records)
+    assert str(legacy) in messages
+    assert layout.category_param_dir(config) in messages
+
+
+def test_no_warning_without_an_old_layout(tmp_path, monkeypatch, caplog):
+    """The warning does not fire for a fresh library (control)."""
+    config = _cs_config(tmp_path / "fractals")
+    _seed_one_category(config)
+
+    comm = CategorySearchComm(rank=0, size=1)
+    monkeypatch.setattr(cs, "MPI", FakeMPI(comm))
+
+    with caplog.at_level("WARNING"):
+        cs.main(config)
+
+    assert "seed-agnostic" not in " ".join(
+        record.getMessage() for record in caplog.records
+    )
+
+
+# ---------------------------------------------------------------------------
 # VB-2: the whole rank-0 scan window is fenced, not just the index parse.
 #
 # Rank 0 also reads the parameters of every category already on disk, right

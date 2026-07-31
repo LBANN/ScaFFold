@@ -403,6 +403,35 @@ def write_attempt_counter(fracts_write_dir: str, rank: int, attempt_index: int) 
     os.replace(tmp, path)
 
 
+def _sweep_stale_temp_files(fracts_write_dir: str, log) -> None:
+    """Remove temp files stranded by killed writes in the category directory.
+
+    Both atomic writers here (``_savetxt_atomic`` and ``write_attempt_counter``)
+    unlink their temp file when the write raises, but a SIGKILL -- walltime, an
+    OOM, a node failure -- skips that Python-level cleanup and strands it. The
+    names carry the writer's pid, so they accumulate one per killed process and
+    nothing else ever removes them; ``instance.py`` sweeps its equivalents for
+    exactly this reason.
+
+    Called on rank 0 before any rank has written anything this run, and
+    best-effort: this is housekeeping, and it runs just before a Barrier the
+    peers are heading into, so it must not raise.
+    """
+    patterns = (
+        # .NNNNNN.csv.tmp<pid> -- a partially written category CSV.
+        f"{fracts_write_dir}/.*.csv.tmp*",
+        # .rng_attempt_rank<r>.tmp<pid> -- a partially written attempt counter.
+        f"{fracts_write_dir}/.rng_attempt_rank*.tmp*",
+    )
+    for pattern in patterns:
+        for stale in glob.glob(pattern):
+            try:
+                os.remove(stale)
+                log.info("Removed stale category-search temp file %s", stale)
+            except OSError as exc:
+                log.warning("Could not remove stale temp file %s: %s", stale, exc)
+
+
 def main(config: Config) -> None:
     """
     Generate fractal categories.
@@ -440,10 +469,15 @@ def main(config: Config) -> None:
     fracts_write_dir = layout.category_param_dir(config)
     if rank == 0:
         log.info("Writing fractals to %s", fracts_write_dir)
+        # A library in the pre-seed layout is invisible to everything below, so
+        # say why it is being ignored rather than appearing to regenerate work
+        # that is plainly still on disk.
+        layout.warn_if_legacy_library(config, log)
         if os.path.exists(fracts_write_dir) and config.datagen_from_scratch:
             log.info("Removing existing fractals directory")
             shutil.rmtree(fracts_write_dir)
         os.makedirs(fracts_write_dir, exist_ok=True)
+        _sweep_stale_temp_files(fracts_write_dir, log)
 
     # Wait until dir setup completes
     comm.Barrier()
