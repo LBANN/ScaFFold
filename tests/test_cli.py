@@ -464,3 +464,36 @@ def test_cli_override_bottleneck_out_of_range_rejected(monkeypatch, tmp_path):
     message = str(excinfo.value)
     assert "unet_bottleneck_dim" in message
     assert "problem_scale" in message
+
+
+# ---------------------------------------------------------------------------
+# The whole config path survives a restart (R20/R22 together)
+# ---------------------------------------------------------------------------
+
+
+def test_config_round_trips_through_a_restart(monkeypatch, tmp_path):
+    """A restart driven by the run dir's config.yaml reproduces the run.
+
+    This is exactly what the generated restart.sh does: ``-c
+    $RUN_DIR/config.yaml --restart --run-dir $RUN_DIR``. It exercises the merge
+    in both directions -- CLI overrides and auxiliary config keys have to come
+    back out of the dumped config, and the resume flags have to win.
+    """
+    cfg = write_config(tmp_path, {"verbose": 1, "datagen_batch_size": 500})
+
+    _, calls = run_cli(
+        monkeypatch,
+        ["scaffold", "benchmark", "-c", str(cfg), "--local-batch-size", "2"],
+    )
+    run_dir = Path(calls["benchmark"][0]["benchmark_run_dir"])
+    _make_checkpoint(run_dir)
+
+    _, resumed = run_cli(monkeypatch, _restart_argv(run_dir / "config.yaml", run_dir))
+
+    (config,) = resumed["benchmark"]
+    assert config["local_batch_size"] == 2  # CLI override from the first run
+    assert config["verbose"] == 1  # auxiliary key set in YAML
+    assert config["datagen_batch_size"] == 500
+    assert config["restart"] is True
+    assert config["train_from_scratch"] is False
+    assert config["benchmark_run_dir"] == str(run_dir)
