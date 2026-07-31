@@ -78,14 +78,26 @@ def _rewrite_config_and_add_restart(cli_args: List[str]) -> List[str]:
     return new_args
 
 
+def _substitute_placeholder(tok: str, var_subs: dict[str, str]) -> str:
+    """Return ``tok`` with a placeholder replaced by its Bash expansion.
+
+    A placeholder may be a whole token (``--config __CFG__``) or the value half
+    of a combined token (``--config=__CFG__``); argparse accepts both spellings
+    on the command line, so the rewriter can emit either. Anything else is
+    shell-quoted verbatim.
+    """
+    if tok in var_subs:
+        return var_subs[tok]  # e.g., "$RUN_DIR/config.yaml"
+    flag, sep, value = tok.partition("=")
+    if sep and value in var_subs:
+        # --config=__CFG__ -> --config="$RUN_DIR/config.yaml"
+        return shlex.quote(flag + sep) + var_subs[value]
+    return shlex.quote(tok)
+
+
 def _bash_array(var_name: str, argv: List[str], var_subs: dict[str, str]) -> str:
     """Render a Bash array declaration VAR=( ... ), safely quoted, with simple placeholder substitution."""
-    parts = []
-    for tok in argv:
-        if tok in var_subs:
-            parts.append(var_subs[tok])  # e.g., "$RUN_DIR/config.yaml"
-        else:
-            parts.append(shlex.quote(tok))
+    parts = [_substitute_placeholder(tok, var_subs) for tok in argv]
     return f"{var_name}=( " + " ".join(parts) + " )"
 
 

@@ -182,3 +182,78 @@ def test_generated_script_is_valid_bash(monkeypatch, tmp_path):
         assert result.returncode == 0, (
             f"bash -n failed for variant {i}:\n{result.stderr}"
         )
+
+
+# ---------------------------------------------------------------------------
+# R14: combined ``--flag=value`` tokens
+# ---------------------------------------------------------------------------
+
+
+def test_config_equals_form_is_substituted(monkeypatch, tmp_path):
+    """``--config=PATH`` is repointed at the run dir, not left as a placeholder.
+
+    The rewriter emits the placeholder as part of a combined token, so a
+    substitution that only matches whole tokens leaves ``--config=__CFG__`` in
+    the script and the restart dies with "Config file '__CFG__' not found".
+    """
+    _isolate_env(monkeypatch)
+    argv = [
+        "/usr/bin/scaffold",
+        "benchmark",
+        "--config=/some/where/config.yml",
+        "--epochs",
+        "10",
+    ]
+
+    script = _generate(monkeypatch, tmp_path / "run", argv=argv)
+
+    assert "__CFG__" not in script
+    assert '--config="$RUN_DIR/config.yaml"' in script
+    assert "/some/where/config.yml" not in script
+
+
+@pytest.mark.parametrize(
+    "config_argv",
+    [
+        ["-c", "/some/where/config.yml"],
+        ["--config", "/some/where/config.yml"],
+        ["--config=/some/where/config.yml"],
+    ],
+    ids=["short", "long-space", "long-equals"],
+)
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
+def test_every_config_spelling_expands_to_the_run_dir_config(
+    monkeypatch, tmp_path, config_argv
+):
+    """Bash expands every ``--config`` spelling to ``$RUN_DIR/config.yaml``.
+
+    The generated PY array is sourced and expanded by a real shell so the test
+    asserts on the arguments the restarted CLI actually receives.
+    """
+    _isolate_env(monkeypatch)
+    argv = ["/usr/bin/scaffold", "benchmark"] + config_argv
+
+    script = _generate(monkeypatch, tmp_path / "run", argv=argv)
+
+    py_decl = next(line for line in script.splitlines() if line.startswith("PY=("))
+    probe = tmp_path / f"probe_{config_argv[0][-1]}.sh"
+    probe.write_text(f'RUN_DIR=/run/dir\n{py_decl}\nprintf "%s\\n" "${{PY[@]}}"\n')
+    result = subprocess.run(
+        ["bash", str(probe)], capture_output=True, text=True, check=True
+    )
+
+    tokens = result.stdout.split("\n")
+    assert "/run/dir/config.yaml" in tokens or (
+        "--config=/run/dir/config.yaml" in tokens
+    )
+    assert not any("__CFG__" in tok for tok in tokens)
+
+
+def test_run_dir_placeholder_is_substituted(monkeypatch, tmp_path):
+    """The appended ``--run-dir`` placeholder still resolves (control)."""
+    _isolate_env(monkeypatch)
+
+    script = _generate(monkeypatch, tmp_path / "run")
+
+    assert "__RUN_DIR__" not in script
+    assert '--run-dir "$RUN_DIR"' in script
