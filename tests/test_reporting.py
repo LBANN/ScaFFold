@@ -270,3 +270,79 @@ class TestTorchProfiler:
                 )
         finally:
             importlib.reload(perf_measure)
+
+
+class TestProfilerTraceExport:
+    """R15: a failed trace export must not strand the other ranks."""
+
+    @staticmethod
+    def _unstepped_profiler():
+        """A profiler whose window never opened (a run with zero batches)."""
+        from torch.profiler import ProfilerActivity, profile, schedule
+
+        prof = profile(
+            activities=[ProfilerActivity.CPU],
+            schedule=schedule(wait=1, warmup=1, active=3, repeat=1),
+        )
+        with prof:
+            pass  # no prof.step(): the schedule never leaves its wait phase
+        return prof
+
+    @staticmethod
+    def _config(run_dir):
+        return SimpleNamespace(
+            problem_scale=4,
+            epochs=1,
+            n_instances_used_per_fractal=2,
+            run_dir=str(run_dir),
+        )
+
+    def test_zero_step_export_is_reported_not_raised(self, tmp_path, caplog):
+        """Exporting an unstepped profiler logs an error instead of raising.
+
+        The export runs before the ``dist.barrier()`` that precedes rank-0
+        post-processing, so a raise here kills the profiling rank and leaves
+        every other rank blocked in that barrier until the collective timeout.
+        """
+        import logging
+
+        import ScaFFold.worker as worker
+
+        log = logging.getLogger("test_zero_step_export")
+        with caplog.at_level(logging.DEBUG, logger=log.name):
+            result = worker.export_profiler_trace(
+                self._unstepped_profiler(),
+                self._config(tmp_path),
+                log,
+                rank=0,
+                world_size=1,
+                ranks_per_node=1,
+            )
+
+        assert result is None
+        messages = " ".join(record.getMessage() for record in caplog.records)
+        assert "trace" in messages.lower()
+
+    def test_successful_export_writes_a_trace(self, tmp_path, caplog):
+        """A profiler with a completed window still writes its trace (control)."""
+        import logging
+
+        from torch.profiler import ProfilerActivity, profile, schedule
+
+        import ScaFFold.worker as worker
+
+        prof = profile(
+            activities=[ProfilerActivity.CPU],
+            schedule=schedule(wait=1, warmup=1, active=1, repeat=1),
+        )
+        with prof:
+            for _ in range(4):
+                prof.step()
+
+        log = logging.getLogger("test_successful_export")
+        path = worker.export_profiler_trace(
+            prof, self._config(tmp_path), log, rank=0, world_size=1, ranks_per_node=1
+        )
+
+        assert path is not None
+        assert Path(path).exists()

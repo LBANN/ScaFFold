@@ -96,6 +96,41 @@ def wrap_model_ddp(model, device, ps):
     )
 
 
+def export_profiler_trace(prof, config, log, rank, world_size, ranks_per_node):
+    """Write this rank's chrome trace, reporting failures instead of raising.
+
+    A profiling rank reaches this while the others are already heading for the
+    barrier that precedes rank-0 post-processing, so an exception here does not
+    just lose a trace: it kills this rank and leaves every other rank blocked
+    in that barrier until the collective times out. Failures are real (a run
+    with zero training batches never starts the profiler, and export_chrome_trace
+    then raises; the trace can also fill the filesystem), so log them and let
+    the job finish.
+
+    Returns the path written, or None if the trace could not be written.
+    """
+    tracename = (
+        f"torch-{socket.gethostname()}-r{rank}"
+        f"-N{world_size // ranks_per_node}-n{world_size}"
+        f"-ps{config.problem_scale}-e{config.epochs}"
+        f"-nipf{config.n_instances_used_per_fractal}-{int(time.time())}.json"
+    )
+    try:
+        prof.export_chrome_trace(tracename)
+    except Exception as e:
+        log.error(
+            "Could not write PyTorch trace '%s': %s: %s. Continuing so the "
+            "run can finish; a run with zero profiled steps never starts the "
+            "profiler and has no trace to export.",
+            tracename,
+            type(e).__name__,
+            e,
+        )
+        return None
+    log.info("Wrote PyTorch trace '%s'", tracename)
+    return tracename
+
+
 @annotate()
 def main(kwargs_dict: dict = {}):
     #
@@ -261,10 +296,7 @@ def main(kwargs_dict: dict = {}):
         trainer.train(profiler=prof if TORCH_PERF_LOCAL else None)
         end_code_region("train")
     if TORCH_PERF_LOCAL:
-        hostname = socket.gethostname()
-        tracename = f"torch-{hostname}-r{rank}-N{world_size // ranks_per_node}-n{world_size}-ps{config.problem_scale}-e{config.epochs}-nipf{config.n_instances_used_per_fractal}-{int(time.time())}.json"
-        prof.export_chrome_trace(tracename)
-        log.info("Wrote PyTorch trace '%s'", tracename)
+        export_profiler_trace(prof, config, log, rank, world_size, ranks_per_node)
 
     # Results are final here; synchronize before rank-0 post-processing so a
     # post-processing failure on rank 0 cannot strand the other ranks in a
