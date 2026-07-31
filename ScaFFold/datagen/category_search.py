@@ -424,9 +424,20 @@ def main(config: Config) -> None:
     # the ones a fresh run produced.
     attempt_index = read_attempt_counter(fracts_write_dir, rank)
 
-    # Parse existing category files (rank 0 owns saving/dedup). Free indices are
-    # derived from these parsed names -- filling holes, never overwriting.
-    existing_indices = parse_category_indices(fracts_write_dir)
+    # Parse existing category files on rank 0 alone and broadcast the result.
+    # Free indices are derived from these parsed names -- filling holes, never
+    # overwriting -- and, critically, the count derived below gates a loop that
+    # contains collectives. Scanning the shared filesystem independently per
+    # rank lets divergent views (stale metadata caches, a concurrent job, a
+    # partially visible directory) put one rank inside the loop while another is
+    # past it, so the two post mismatched collectives on COMM_WORLD and the job
+    # hangs. One scan, one broadcast, one shared verdict.
+    if rank == 0:
+        existing_indices = parse_category_indices(fracts_write_dir)
+    else:
+        existing_indices = None
+    existing_indices = comm.bcast(existing_indices, root=0)
+
     existing_params = []
     if rank == 0:
         for idx in existing_indices:

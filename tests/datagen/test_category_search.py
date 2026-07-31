@@ -12,8 +12,15 @@
 #
 # SPDX-License-Identifier: (Apache-2.0)
 
-"""Tests for category-search round sizing."""
+"""Tests for category-search round sizing and its work-scan consensus."""
 
+from argparse import Namespace
+from pathlib import Path
+
+import numpy as np
+
+from ScaFFold.datagen import category_search as cs
+from ScaFFold.datagen import layout
 from ScaFFold.datagen.category_search import compute_round_attempts
 
 
@@ -53,3 +60,133 @@ def test_at_least_one_attempt_per_rank_when_work_remains():
     # A positive remaining count always yields at least one attempt per rank so
     # the loop makes progress and can keep learning the acceptance rate.
     assert compute_round_attempts(1, 1024, 10000, 0.99) >= 1
+
+
+# ---------------------------------------------------------------------------
+# R30: the initial work scan is made once on rank 0 and broadcast.
+#
+# ``categories_remaining`` gates a while loop that contains collectives, so it
+# must be identical on every rank. Deriving it from a per-rank filesystem scan
+# lets divergent views (a stale metadata cache, a racing job, a partially
+# visible directory) put one rank inside the loop issuing ``bcast`` while
+# another is past it issuing ``reduce`` -- mismatched collectives on
+# COMM_WORLD, i.e. a hang. This mirrors the fix already applied in
+# ``instance.py``: rank 0 scans, everyone else consumes the broadcast.
+# ---------------------------------------------------------------------------
+
+
+class CategorySearchComm:
+    """Single-process stand-in for COMM_WORLD recording the collective order."""
+
+    def __init__(self, rank=0, size=1, bcast_returns=None):
+        self.rank = rank
+        self.size = size
+        self.calls = []
+        self.bcast_payloads = []
+        self._bcast_returns = list(bcast_returns or [])
+
+    def Get_rank(self):
+        return self.rank
+
+    def Get_size(self):
+        return self.size
+
+    def Barrier(self):
+        self.calls.append("Barrier")
+
+    def bcast(self, obj, root=0):
+        self.calls.append("bcast")
+        self.bcast_payloads.append(obj)
+        if self.rank == root:
+            return obj
+        return self._bcast_returns.pop(0)
+
+    def gather(self, obj, root=0):
+        self.calls.append("gather")
+        return [obj] if self.rank == root else None
+
+    def reduce(self, value, op=None, root=0):
+        self.calls.append("reduce")
+        return value if self.rank == root else None
+
+
+class FakeMPI:
+    """Namespace mimicking ``mpi4py.MPI`` for one ``CategorySearchComm``."""
+
+    def __init__(self, comm):
+        import mpi4py.MPI as real_mpi
+
+        self.COMM_WORLD = comm
+        self.SUM = real_mpi.SUM
+
+
+def _cs_config(fract_base: Path) -> Namespace:
+    return Namespace(
+        fract_base_dir=str(fract_base),
+        n_categories=1,
+        seed=42,
+        variance_threshold=0.15,
+        point_num=60,
+        normalize=1,
+        datagen_from_scratch=False,
+        datagen_batch_size=4,
+        verbose=0,
+    )
+
+
+def _seed_one_category(config: Namespace) -> None:
+    """Write the single category CSV this config asks for."""
+    param_dir = Path(layout.category_param_dir(config))
+    param_dir.mkdir(parents=True, exist_ok=True)
+    params = np.zeros((2, 13), dtype=np.float64)
+    params[:, 0] = params[:, 4] = params[:, 8] = 0.5
+    params[1, 9] = params[1, 10] = params[1, 11] = 0.5
+    params[0, 12] = 0.5
+    np.savetxt(param_dir / "000000.csv", params, delimiter=",")
+
+
+def test_work_scan_is_root_only_and_broadcast(tmp_path, monkeypatch):
+    """A non-root rank never scans; it consumes root's broadcast index list."""
+    config = _cs_config(tmp_path / "fractals")
+    comm = CategorySearchComm(rank=1, size=2, bcast_returns=[[0]])
+    monkeypatch.setattr(cs, "MPI", FakeMPI(comm))
+
+    def no_scan(*_args, **_kwargs):
+        raise AssertionError("non-root rank must not scan the filesystem")
+
+    monkeypatch.setattr(cs, "parse_category_indices", no_scan)
+
+    cs.main(config)
+
+    # Root said category 0 already exists, so this rank has nothing to do and
+    # went straight to the post-loop reductions.
+    assert comm.calls == ["Barrier", "bcast", "reduce", "reduce", "reduce", "reduce"]
+    # It contributed nothing to the scan broadcast (it is not the scanner).
+    assert comm.bcast_payloads[0] is None
+
+
+def test_divergent_fs_views_take_the_same_collective_path(tmp_path, monkeypatch):
+    """Ranks disagreeing about the directory still issue identical collectives.
+
+    Rank 0 sees the finished category; rank 1's own view is empty. Before the
+    fix rank 1 entered the work loop (``bcast``) while rank 0 was already past
+    it (``reduce``). With the scan broadcast, rank 1's view is irrelevant.
+    """
+    # Rank 0: the category is on disk, so its scan finds it.
+    root_config = _cs_config(tmp_path / "root_view")
+    _seed_one_category(root_config)
+    root_comm = CategorySearchComm(rank=0, size=2)
+    monkeypatch.setattr(cs, "MPI", FakeMPI(root_comm))
+    cs.main(root_config)
+
+    # Rank 1: an empty directory (a divergent view), but root broadcast [0].
+    peer_config = _cs_config(tmp_path / "peer_view")
+    peer_comm = CategorySearchComm(rank=1, size=2, bcast_returns=[[0]])
+    monkeypatch.setattr(cs, "MPI", FakeMPI(peer_comm))
+    cs.main(peer_config)
+
+    assert root_comm.bcast_payloads[0] == [0]
+    assert peer_comm.calls == root_comm.calls, (
+        "ranks with divergent filesystem views issued different collectives: "
+        f"rank 0 {root_comm.calls} vs rank 1 {peer_comm.calls}"
+    )
