@@ -970,6 +970,25 @@ class PyTorchTrainer(BaseTrainer):
                 # Reduced sample-weighted total and per-sample mean val loss.
                 val_loss_epoch = val_info[1].item()
                 val_loss_avg = val_loss_epoch / global_val_samples
+
+                # Divergence check. The dice score below is computed from a
+                # hard argmax, so it stays finite even for an all-NaN model
+                # (argmax of NaN logits is 0 and the one-hots are finite) --
+                # the loss is the only value that actually goes non-finite. Bail
+                # out before the CSV row and the checkpoint: continuing would
+                # keep overwriting checkpoint_last.pth with NaN weights (which
+                # then poison the next restart) while the loop's dice threshold
+                # can never be met. Both values come out of the data-parallel
+                # reductions above, so they are identical on every rank and
+                # every rank raises here together, leaving no unmatched
+                # collective behind.
+                if not (math.isfinite(overall_loss) and math.isfinite(val_loss_avg)):
+                    raise ValueError(
+                        f"Non-finite loss at epoch {epoch} "
+                        f"(train_loss={overall_loss}, val_loss={val_loss_avg}): "
+                        "training diverged, aborting before checkpointing."
+                    )
+
                 if not self.config.disable_scheduler:
                     self.scheduler.step()
                 else:

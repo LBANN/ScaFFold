@@ -347,6 +347,54 @@ def test_final_checkpoint_on_convergence(tiny_trainer, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# R03 -- a diverged epoch aborts instead of checkpointing NaN weights
+# ---------------------------------------------------------------------------
+
+
+def test_divergence_aborts_before_poisoning_checkpoint(tiny_trainer, monkeypatch):
+    """Non-finite epoch losses abort the run before any checkpoint is written.
+
+    The dice score is computed from a hard argmax, so an all-NaN model still
+    produces a *finite* dice (argmax of NaN logits is 0 and the one-hots are
+    finite): the dice check can never fire on divergence. Left unguarded, a
+    diverged ``epochs: -1`` run keeps looping on a finite plateau below target
+    while every checkpoint interval overwrites ``checkpoint_last.pth`` with NaN
+    weights, poisoning the next ``--restart``. The reduced losses are the
+    values that actually go non-finite, and being reductions they are identical
+    on every rank, so the check fires on all ranks together.
+    """
+    trainer = tiny_trainer(
+        config_overrides={
+            "checkpoint_interval": 1,
+            "epochs": 3,
+            "target_dice": 0.95,
+        }
+    )
+
+    # A diverged step: NaN loss, and a dice that stays finite.
+    monkeypatch.setattr(
+        trainer,
+        "_run_training_batch",
+        lambda batch, **kw: (1, torch.tensor(float("nan")), torch.tensor(0.0)),
+    )
+
+    def diverged_evaluate(*args, **kwargs):
+        # Exactly what evaluate() returns for an all-NaN model: a tiny but
+        # finite hard-argmax dice sum alongside a NaN validation loss.
+        return (7.4e-10, float("nan"), float("nan"), 2, 2)
+
+    monkeypatch.setattr(trainer_mod, "evaluate", diverged_evaluate)
+
+    trainer.cleanup_or_resume()
+    with pytest.raises(ValueError, match="[Nn]on-finite"):
+        trainer.train()
+
+    # The run died before the diverged epoch could be checkpointed.
+    assert not trainer.checkpoint_manager.last_ckpt_path.exists()
+    assert not trainer.checkpoint_manager.best_ckpt_path.exists()
+
+
+# ---------------------------------------------------------------------------
 # F49 -- GradScaler-skipped steps do not advance the optimizer-step counter
 # ---------------------------------------------------------------------------
 
