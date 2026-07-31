@@ -1119,6 +1119,14 @@ class PyTorchTrainer(BaseTrainer):
                 completed_epochs, val_loss_avg, extras
             )
 
+        # Nothing downstream of the training loop touches the checkpoint
+        # manager, so this is the last chance to observe the outcome of the
+        # run's final (possibly asynchronous) write. Without it a failed final
+        # save would let the process exit successfully with no checkpoint at
+        # all, and the next --restart would resume from a stale epoch or fail
+        # its pre-check.
+        self.checkpoint_manager.finalize_saves()
+
         if epoch_minibatch_times_s:
             minibatch_time_s = statistics.median(epoch_minibatch_times_s)
             adiak_value("minibatch_time_s", minibatch_time_s)

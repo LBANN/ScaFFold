@@ -28,7 +28,9 @@ from __future__ import annotations
 
 import math
 import re
+import textwrap
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -185,6 +187,185 @@ def test_save_errors_not_swallowed(tmp_path, monkeypatch):
 
     with pytest.raises(RuntimeError, match="writer boom"):
         mgr.save_checkpoint(epoch=1, val_loss_avg=0.5)
+
+
+# ---------------------------------------------------------------------------
+# R04 -- async save failures are reported, and the run's LAST save is consumed
+# ---------------------------------------------------------------------------
+
+
+def _failing_torch_save(obj, f, *args, **kwargs):
+    raise RuntimeError("writer boom")
+
+
+def test_async_save_failure_surfaces_at_next_save(tmp_path, monkeypatch):
+    """A background write that failed is reported at the next save, not dropped.
+
+    In async mode ``save_checkpoint`` returns as soon as the CPU snapshot is
+    handed to the writer thread, so the failure can only be observed later.
+    Swallowing it leaves ``last_saved_epoch``/``best_val_loss`` claiming a
+    checkpoint that does not exist on disk.
+    """
+    mgr, _ = _make_manager(tmp_path, async_save=True)
+    monkeypatch.setattr(torch, "save", _failing_torch_save)
+
+    mgr.save_checkpoint(epoch=1, val_loss_avg=0.5)  # write fails in background
+
+    with pytest.raises(RuntimeError, match="writer boom"):
+        mgr.save_checkpoint(epoch=2, val_loss_avg=0.4)
+
+    assert not mgr.last_ckpt_path.exists()
+
+
+def test_async_save_failure_surfaces_at_finalize(tmp_path, monkeypatch):
+    """The run's final save has its outcome consumed before the run ends."""
+    mgr, _ = _make_manager(tmp_path, async_save=True)
+    monkeypatch.setattr(torch, "save", _failing_torch_save)
+
+    mgr.save_checkpoint(epoch=1, val_loss_avg=0.5)
+
+    with pytest.raises(RuntimeError, match="writer boom"):
+        mgr.finalize_saves()
+
+    assert not mgr.last_ckpt_path.exists()
+
+
+def test_final_async_save_failure_fails_the_run(tiny_trainer, monkeypatch):
+    """``train()`` must not return successfully after a failed final save.
+
+    Nothing downstream of the training loop touches the checkpoint manager, so
+    without an explicit wait the child process exits 0 with no checkpoint at
+    all: the benchmark reports success and a later ``--restart`` resumes from a
+    stale epoch or fails its pre-check.
+    """
+    trainer = tiny_trainer(
+        config_overrides={
+            "checkpoint_interval": 1,
+            "epochs": 1,
+            "target_dice": 0.95,
+        }
+    )
+    # The config has no async knob at this scale; drive the manager directly.
+    mgr = trainer.checkpoint_manager
+    mgr.async_save = True
+    mgr.executor = ThreadPoolExecutor(max_workers=1)
+
+    monkeypatch.setattr(
+        trainer,
+        "_run_training_batch",
+        lambda batch, **kw: (1, torch.tensor(0.3), torch.tensor(0.5)),
+    )
+    monkeypatch.setattr(
+        trainer_mod, "evaluate", lambda *a, **k: (0.5 * 2, 0.4 * 2, 0.4, 2, 2)
+    )
+    monkeypatch.setattr(torch, "save", _failing_torch_save)
+
+    trainer.cleanup_or_resume()
+    try:
+        with pytest.raises(RuntimeError, match="writer boom"):
+            trainer.train()
+    finally:
+        mgr.executor.shutdown(wait=True)
+
+    assert not mgr.last_ckpt_path.exists()
+
+
+# ---------------------------------------------------------------------------
+# R05 -- a rank-0 write failure fails every rank with the same error
+# ---------------------------------------------------------------------------
+
+# Two-rank script: rank 0's torch.save fails. Both ranks must come out of
+# save_checkpoint with the SAME real error rather than rank 0 raising the disk
+# error while its peers die (gloo) or stall (NCCL) in an unmatched collective.
+# Kept inline rather than in tests/helpers/rank_scripts/ because it is only
+# meaningful together with the assertions below.
+SAVE_FAIL_RANK_SCRIPT = textwrap.dedent(
+    '''\
+    """Two-rank save-failure rank script (gloo, CPU)."""
+
+    import os
+    import sys
+
+    import torch
+    import torch.distributed as dist
+
+    from ScaFFold.utils.checkpointing import CheckpointManager
+
+    rank = int(os.environ["RANK"])
+    dist.init_process_group(backend="gloo")
+
+    torch.manual_seed(0)
+    mgr = CheckpointManager(
+        model=torch.nn.Linear(64, 64),
+        base_dir=os.environ["CKPT_DIR"],
+        world_rank=rank,
+        dist_enabled=True,
+    )
+
+    if rank == 0:
+        def _boom(obj, f, *args, **kwargs):
+            raise RuntimeError("injected disk failure on rank 0")
+
+        torch.save = _boom
+
+    # Markers are delimited (trailing '.', '<<...>>') because two ranks writing
+    # the same pipe can interleave without a newline between them.
+    try:
+        mgr.save_checkpoint(epoch=1, val_loss_avg=0.5)
+    except BaseException as exc:  # noqa: BLE001 - the point is what we caught
+        print(f"RANK {rank} RAISED {type(exc).__name__}.", flush=True)
+        message = str(exc).replace(chr(10), " ")
+        print(f"RANK {rank} MESSAGE <<{message}>>", flush=True)
+    else:
+        print(f"RANK {rank} NO_RAISE.", flush=True)
+
+    print(f"RANK {rank} DONE.", flush=True)
+    sys.stdout.flush()
+    try:
+        dist.destroy_process_group()
+    except Exception:
+        pass
+    '''
+)
+
+
+@_requires_gloo
+def test_rank0_save_failure_fails_all_ranks(tmp_path):
+    """Under 2 gloo ranks, a rank-0 disk error reaches the peer as itself.
+
+    Rank 0 is the only writer, so raising its error before the broadcast the
+    peers are already waiting in leaves them in an unmatched collective: gloo
+    reports an opaque "Connection closed by peer" and NCCL stalls until the
+    watchdog timeout, in both cases hiding the disk error that actually
+    happened. The write's OUTCOME must be broadcast instead, so both ranks
+    raise the same error together.
+    """
+    ckpt_dir = tmp_path / "checkpoints"
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    script = tmp_path / "save_fail_2rank.py"
+    script.write_text(SAVE_FAIL_RANK_SCRIPT)
+
+    rc, out, err = mpi_runner.torchrun_gloo(
+        str(script), n=2, timeout=90, env={"CKPT_DIR": str(ckpt_dir)}
+    )
+
+    done = set(re.findall(r"RANK (\d+) DONE\.", out))
+    assert rc == 0 and {"0", "1"} <= done, (
+        f"expected both ranks to fail cleanly and finish, rc={rc}\n"
+        f"stdout:\n{out}\nstderr:\n{err[-3000:]}"
+    )
+
+    raised = dict(re.findall(r"RANK (\d+) RAISED (\w+)\.", out))
+    messages = dict(re.findall(r"RANK (\d+) MESSAGE <<(.*?)>>", out))
+    assert set(raised) == {"0", "1"}, f"both ranks must raise\nstdout:\n{out}"
+    assert raised["0"] == raised["1"], (
+        f"ranks raised different error types: {raised}\nstdout:\n{out}"
+    )
+    for rank in ("0", "1"):
+        assert "injected disk failure on rank 0" in messages.get(rank, ""), (
+            f"rank {rank} did not see the real disk error: "
+            f"{messages.get(rank)!r}\nstdout:\n{out}"
+        )
 
 
 # ---------------------------------------------------------------------------

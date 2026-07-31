@@ -25,6 +25,16 @@ import torch
 import torch.distributed as dist
 
 
+class CheckpointSaveError(RuntimeError):
+    """A checkpoint write failed.
+
+    Raised identically on every rank. Only rank 0 writes, but its outcome is
+    broadcast, so the peers report the real disk error instead of the
+    unmatched-collective symptom (an opaque gloo transport error, or an NCCL
+    watchdog timeout minutes later) that a rank-0-only raise produces.
+    """
+
+
 class CheckpointManager:
     """
     Checkpoint Manager for DDP/Single-Process.
@@ -90,6 +100,10 @@ class CheckpointManager:
         # Async handling
         self.executor = None
         self.future = None
+        # The exception behind the most recently reported save failure, kept
+        # only so rank 0 can chain it (and its traceback) onto the
+        # CheckpointSaveError every rank raises.
+        self._save_error_exc: Optional[BaseException] = None
         if self.async_save and self.world_rank == 0:
             # We only need 1 worker for serializing writes
             self.executor = ThreadPoolExecutor(max_workers=1)
@@ -99,44 +113,106 @@ class CheckpointManager:
             self.base_dir.mkdir(parents=True, exist_ok=True)
 
     def cleanup(self, train_from_scratch: bool) -> None:
-        """Clear existing checkpoints if training from scratch."""
-        # Ensure any pending async saves are finished before deleting
-        self.wait_for_save()
+        """Clear existing checkpoints if training from scratch.
 
-        if not train_from_scratch:
-            self._barrier()
-            return
+        Rank-symmetric, like every other collective point here: any pending
+        async write is drained and its outcome broadcast, so a failure raises
+        on all ranks together (see ``save_checkpoint``).
+        """
+        # Ensure any pending async save is finished before deleting.
+        error = self._drain_pending_save()
 
-        # Drop the cached state that described the run being deleted. Both
-        # fields are seeded from disk (or a previous save), so keeping them
-        # would let a deleted run's best gate this run's is_best decisions --
-        # the fresh run would then never write a best checkpoint until it beat
-        # a score no file backs any more, leaving it with no best-checkpoint
-        # fallback.
-        self.best_val_loss = math.inf
-        self.last_saved_epoch = None
+        if train_from_scratch:
+            # Drop the cached state that described the run being deleted. Both
+            # fields are seeded from disk (or a previous save), so keeping them
+            # would let a deleted run's best gate this run's is_best decisions
+            # -- the fresh run would then never write a best checkpoint until
+            # it beat a score no file backs any more, leaving it with no
+            # best-checkpoint fallback.
+            self.best_val_loss = math.inf
+            self.last_saved_epoch = None
 
-        if self.world_rank == 0:
-            for p in (self.last_ckpt_path, self.best_ckpt_path):
-                if p.exists():
-                    try:
-                        p.unlink()
-                        self._log(f"Removed existing checkpoint: {p}")
-                    except Exception as e:
-                        self._log(f"Failed to remove {p}: {e}")
+            if self.world_rank == 0:
+                self._remove_checkpoint_files()
+
+        error = self._broadcast_obj(error)
         self._barrier()
+        if error is not None:
+            self._raise_save_error(error)
+
+    def _remove_checkpoint_files(self) -> None:
+        """Delete this run's checkpoint files (rank 0 only)."""
+        for p in (self.last_ckpt_path, self.best_ckpt_path):
+            if p.exists():
+                try:
+                    p.unlink()
+                    self._log(f"Removed existing checkpoint: {p}")
+                except Exception as e:
+                    self._log(f"Failed to remove {p}: {e}")
 
     def wait_for_save(self):
-        """Blocks until the background save (if any) is complete."""
-        if self.future is not None:
-            # check if running
-            if not self.future.done():
-                self._log("Waiting for background checkpoint save to complete...")
-            try:
-                self.future.result()  # Blocks and raises exceptions if any occurred
-            except Exception as e:
-                self._log(f"Background save failed with error: {e}")
-            self.future = None
+        """Block until the background save (if any) is complete.
+
+        The writer's exception is re-raised rather than logged and dropped: a
+        save that could not complete has to surface, otherwise the manager
+        state (and the process exit code) claims a checkpoint that is not on
+        disk. The future is consumed exactly once, so the failure is reported
+        at exactly one point.
+
+        Callers that are inside a collective region must not let this
+        propagate directly -- use ``_drain_pending_save`` instead, per the
+        collective invariant documented on ``save_checkpoint``.
+        """
+        if self.future is None:
+            return
+        # Clear the handle *before* blocking on it so a failed write is
+        # reported once and does not re-raise at some later, arbitrary point.
+        future, self.future = self.future, None
+        if not future.done():
+            self._log("Waiting for background checkpoint save to complete...")
+        future.result()  # Blocks and re-raises whatever the writer raised
+
+    def _drain_pending_save(self) -> Optional[str]:
+        """Consume the in-flight async save, reporting failure without raising.
+
+        Returns a description of the writer's failure, or ``None``. Only rank 0
+        ever has a pending write, so raising here directly would leave the
+        peers blocked in the next collective; callers broadcast this result and
+        raise on every rank together.
+        """
+        try:
+            self.wait_for_save()
+        except Exception as e:
+            self._save_error_exc = e
+            return f"{type(e).__name__}: {e}"
+        return None
+
+    def _raise_save_error(self, description: str) -> None:
+        """Raise a broadcast save failure on this rank.
+
+        Rank 0 chains the original exception so its traceback survives; the
+        peers never saw it and raise the same message on its own.
+        """
+        cause, self._save_error_exc = self._save_error_exc, None
+        raise CheckpointSaveError(
+            f"Checkpoint save failed on rank 0: {description}"
+        ) from cause
+
+    def finalize_saves(self) -> None:
+        """Consume the outcome of the run's last save before the run ends.
+
+        Nothing touches the manager after the training loop, so an
+        asynchronous write that failed there would never be observed: the
+        process would exit successfully having written no checkpoint (or left
+        a stale one), the benchmark would report success, and a later
+        ``--restart`` would resume from the wrong epoch or fail its pre-check.
+        Rank-symmetric, like ``save_checkpoint``.
+        """
+        error = self._drain_pending_save()
+        error = self._broadcast_obj(error)
+        self._barrier()
+        if error is not None:
+            self._raise_save_error(error)
 
     def snapshot_training_state(self) -> Dict[str, Any]:
         """Capture mutable in-memory training state without writing a checkpoint."""
@@ -184,7 +260,10 @@ class CheckpointManager:
         With ``require_checkpoint`` (an explicit ``--restart``), a missing
         checkpoint raises instead of silently starting over.
         """
-        self.wait_for_save()  # Safety: don't load while writing
+        # Safety: don't load while writing. A failure from that write is
+        # folded into the decision broadcast below rather than raised here, so
+        # rank 0 never abandons its peers inside the broadcast.
+        error = self._drain_pending_save()
 
         # 1. Rank 0 is the sole reader: it selects the newest readable
         # checkpoint and deserializes it once, then broadcasts the loaded
@@ -193,10 +272,16 @@ class CheckpointManager:
         # read of one (multi-GB) file from the shared filesystem on restart --
         # a restart I/O storm that serializes on the parallel FS. Peer ranks
         # therefore never open the checkpoint files at all.
-        result = self._select_and_load() if self.world_rank == 0 else None
+        result = None
+        if self.world_rank == 0:
+            result = (
+                ("save_failed", error) if error is not None else self._select_and_load()
+            )
         status, payload = self._broadcast_obj(result)
 
         # 2. Every rank acts on the same decision rank 0 reached.
+        if status == "save_failed":
+            self._raise_save_error(payload)
         if status == "empty":
             if require_checkpoint:
                 # An explicit restart must resume real state; silently
@@ -310,22 +395,55 @@ class CheckpointManager:
         """
         Save checkpoint.
         If async_save is True, this returns immediately after CPU transfer.
+
+        Collective invariant: every rank posts exactly one ``_broadcast_obj``
+        followed by exactly one ``_barrier`` on every path through this method,
+        failures included. Rank 0 is the sole writer, but it never raises
+        before those collectives: what gets broadcast is the write's *outcome*
+        -- ``is_best`` on success, or an error description on failure,
+        including a *previous* asynchronous write whose failure is surfaced
+        here, at the next collective point. Every rank then raises the same
+        ``CheckpointSaveError`` together. Raising on rank 0 before the
+        broadcast would strand the peers in an unmatched collective, where a
+        plain disk error resurfaces as a gloo transport error or an NCCL
+        watchdog timeout that hides the real cause.
         """
-        is_best = False
+        # Non-zero ranks contribute nothing; their placeholder is overwritten
+        # by rank 0's outcome in the broadcast below (and is a harmless no-op
+        # in the degenerate non-distributed case).
+        outcome = ("ok", False)
         if self.world_rank == 0:
+            outcome = self._rank0_save(epoch, val_loss_avg, extras)
+
+        status, payload = self._broadcast_obj(outcome)
+
+        # Barrier: ensure Rank 0 has finished the "Snapshot" phase before anyone continues.
+        # Even in async mode, we must wait for the CPU transfer to finish.
+        self._barrier()
+
+        if status == "error":
+            self._raise_save_error(payload)
+        return payload
+
+    def _rank0_save(self, epoch, val_loss_avg, extras):
+        """Perform rank 0's write and REPORT its outcome; never raises.
+
+        Returns ``("ok", is_best)`` or ``("error", description)``. The caller
+        broadcasts that outcome so every rank fails together -- see the
+        collective invariant on ``save_checkpoint``.
+        """
+        try:
+            # 1. Wait for previous async save to prevent OOM or race. If that
+            # write failed, this is where it surfaces.
+            if self.async_save:
+                self.wait_for_save()
+
             # Decide is_best from the cached best loss (single source of truth),
             # not by re-reading checkpoint_best.pth from disk. The cache is
             # seeded once at construction and updated below, so the decision
             # never races the background writer that may still be replacing the
             # best checkpoint in async mode.
-            if val_loss_avg < self.best_val_loss:
-                is_best = True
-                self.best_val_loss = val_loss_avg
-
-        if self.world_rank == 0:
-            # 1. Wait for previous async save to prevent OOM or race
-            if self.async_save:
-                self.wait_for_save()
+            is_best = val_loss_avg < self.best_val_loss
 
             model_to_save = (
                 self.model.module if hasattr(self.model, "module") else self.model
@@ -349,10 +467,6 @@ class CheckpointManager:
             }
             if extras:
                 state_dict.update(extras)
-
-            # Record the epoch being written so callers can tell whether the
-            # last completed epoch has already been checkpointed.
-            self.last_saved_epoch = epoch
 
             # 2. Save Trigger
             if self.async_save:
@@ -380,13 +494,19 @@ class CheckpointManager:
                     self.log,
                 )
 
-        # Broadcast result (for logging elsewhere)
-        is_best = self._broadcast_obj(is_best)
-
-        # Barrier: ensure Rank 0 has finished the "Snapshot" phase before anyone continues.
-        # Even in async mode, we must wait for the CPU transfer to finish.
-        self._barrier()
-        return is_best
+            # Only now claim the save: the bytes are on disk (sync) or handed
+            # to the writer (async). Recording the epoch lets callers tell
+            # whether the last completed epoch has already been checkpointed.
+            # An async write that fails later aborts the run at the next
+            # collective point, so this optimistic state is never observed by
+            # a run that keeps going.
+            if is_best:
+                self.best_val_loss = val_loss_avg
+            self.last_saved_epoch = epoch
+            return ("ok", is_best)
+        except Exception as e:
+            self._save_error_exc = e
+            return ("error", f"{type(e).__name__}: {e}")
 
     @staticmethod
     def _atomic_save(state_dict, path):
