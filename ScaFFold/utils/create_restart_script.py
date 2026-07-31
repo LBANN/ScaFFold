@@ -27,6 +27,21 @@ from typing import List, Union
 # were active in the generating run. Names mirror ScaFFold.utils.perf_measure.
 _PROFILING_ENV_VARS = ("PROFILE_TORCH", "CALI_CONFIG")
 
+# Launcher variables carrying the total rank count, in the same priority order
+# as ScaFFold.utils.distributed.get_world_size. The rank side and the restart
+# generator must recognize the same set, or a job launched under a launcher
+# only one of them knows about (e.g. Cray PALS) gets a restart script for the
+# wrong number of ranks.
+_WORLD_SIZE_ENV_VARS = (
+    "WORLD_SIZE",
+    "MV2_COMM_WORLD_SIZE",
+    "OMPI_COMM_WORLD_SIZE",
+    "PMI_SIZE",
+    "PALS_NRANKS",
+    "SLURM_NTASKS",
+    "FLUX_JOB_SIZE",
+)
+
 
 def _rewrite_config_and_add_restart(cli_args: List[str]) -> List[str]:
     """
@@ -243,8 +258,11 @@ def _sniff_launch_shape(env: Mapping[str, str]) -> tuple[int | None, int, int]:
     Reads, in priority order:
       1. Flux (FLUX_JOB_SIZE is total tasks, FLUX_JOB_NNODES is node count),
       2. Slurm (SLURM_NTASKS / SLURM_NPROCS total tasks, SLURM_*NODES nodes),
-      3. generic launcher hints for total rank count: torchrun's WORLD_SIZE,
-         Open MPI's OMPI_COMM_WORLD_SIZE, and PMI's PMI_SIZE.
+      3. generic launcher hints for the total rank count, in the same order
+         and covering the same variables as
+         ``ScaFFold.utils.distributed.get_world_size``: keeping the two in
+         sync is what stops a restart script from relaunching the job at the
+         wrong scale.
 
     ``nodes`` is None when the environment does not report a node count.
     ``world_size`` is the best available total-rank estimate (>= 1).
@@ -260,7 +278,7 @@ def _sniff_launch_shape(env: Mapping[str, str]) -> tuple[int | None, int, int]:
         total_tasks = int(env.get("SLURM_NTASKS") or env.get("SLURM_NPROCS") or 1)
     else:
         # No scheduler: fall back to generic launcher hints for the rank count.
-        for key in ("WORLD_SIZE", "OMPI_COMM_WORLD_SIZE", "PMI_SIZE"):
+        for key in _WORLD_SIZE_ENV_VARS:
             val = env.get(key)
             if val:
                 total_tasks = int(val)

@@ -25,6 +25,7 @@ generating-process sniffing sees exactly the intended state.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -45,8 +46,10 @@ _LAUNCHER_ENV_VARS = (
     "SLURM_JOB_NUM_NODES",
     "SLURM_NNODES",
     "WORLD_SIZE",
+    "MV2_COMM_WORLD_SIZE",
     "OMPI_COMM_WORLD_SIZE",
     "PMI_SIZE",
+    "PALS_NRANKS",
 )
 
 # Profiling variables re-exported only when set in the generating run.
@@ -257,3 +260,48 @@ def test_run_dir_placeholder_is_substituted(monkeypatch, tmp_path):
 
     assert "__RUN_DIR__" not in script
     assert '--run-dir "$RUN_DIR"' in script
+
+
+# ---------------------------------------------------------------------------
+# R17: launch-shape sniffing must match the rank side
+# ---------------------------------------------------------------------------
+
+# Every variable ``ScaFFold.utils.distributed.get_world_size`` honors. The
+# restart generator must derive the same world size from each of them, or a
+# restart script silently relaunches the job at the wrong scale.
+_WORLD_SIZE_ENV_VARS = (
+    "WORLD_SIZE",
+    "MV2_COMM_WORLD_SIZE",
+    "OMPI_COMM_WORLD_SIZE",
+    "PMI_SIZE",
+    "PALS_NRANKS",
+    "SLURM_NTASKS",
+    "FLUX_JOB_SIZE",
+)
+
+
+@pytest.mark.parametrize("var", _WORLD_SIZE_ENV_VARS)
+def test_sniffed_world_size_matches_rank_side(monkeypatch, var):
+    """The generator and ``get_world_size`` agree on every launcher variable."""
+    from ScaFFold.utils.distributed import get_world_size
+
+    _isolate_env(monkeypatch)
+    for other in _WORLD_SIZE_ENV_VARS:
+        monkeypatch.delenv(other, raising=False)
+    monkeypatch.setenv(var, "8")
+
+    _, _, sniffed = crs._sniff_launch_shape(os.environ)
+
+    assert sniffed == 8, f"{var} not recognized by the restart generator"
+    assert sniffed == get_world_size()
+
+
+def test_pals_job_gets_a_multirank_restart_script(monkeypatch, tmp_path):
+    """A Cray PALS launch (PALS_NRANKS) emits the multi-rank template."""
+    _isolate_env(monkeypatch)
+    monkeypatch.setenv("PALS_NRANKS", "8")
+
+    script = _generate(monkeypatch, tmp_path / "run")
+
+    assert "torchrun-hpc" in script
+    assert 'exec "${PY[@]}"' not in script

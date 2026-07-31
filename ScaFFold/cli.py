@@ -441,8 +441,10 @@ def main():
         with open(benchmark_run_dir / "config.yaml", "w") as file:
             yaml.dump(combined_config, file)
 
-        # 4. Generate/Update the restart script in the directory
-        create_restart_script(benchmark_run_dir)
+        # 4. Generate/Update the restart script in the directory. The
+        # communicator size is ground truth for the job scale; environment
+        # sniffing is only the fallback for callers that lack it.
+        create_restart_script(benchmark_run_dir, world_size=comm.Get_size())
 
     comm.Barrier()
     combined_config = comm.bcast(combined_config, root=0)

@@ -185,3 +185,36 @@ def test_no_launcher_env_is_not_a_mismatch(monkeypatch, tmp_path):
     )
 
     assert len(calls["benchmark"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# R17: the restart script is generated at the true job scale
+# ---------------------------------------------------------------------------
+
+
+def test_restart_script_gets_the_mpi_world_size(monkeypatch, tmp_path):
+    """The CLI passes its communicator size to the restart-script generator.
+
+    Without it the generator falls back to sniffing the environment, which
+    misses launcher variables the rank side honors (e.g. PALS_NRANKS) and
+    silently emits a single-process restart script for a multi-rank job.
+    """
+    recorded = {}
+
+    def _recorder(run_dir, world_size=None):
+        recorded["run_dir"] = run_dir
+        recorded["world_size"] = world_size
+        return Path(run_dir) / "restart.sh"
+
+    monkeypatch.setattr(cli, "create_restart_script", _recorder)
+    monkeypatch.setenv("WORLD_SIZE", "4")
+    monkeypatch.setenv("RANK", "0")
+    cfg = write_config(tmp_path)
+
+    run_cli(
+        monkeypatch,
+        ["scaffold", "benchmark", "-c", str(cfg)],
+        comm=_FakeComm(rank=0, size=4),
+    )
+
+    assert recorded["world_size"] == 4
