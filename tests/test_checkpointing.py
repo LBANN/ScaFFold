@@ -26,6 +26,7 @@ they need neither a GPU nor a process group.
 
 from __future__ import annotations
 
+import math
 import re
 import time
 from pathlib import Path
@@ -242,6 +243,44 @@ def test_async_best_decision_not_racy(tmp_path, monkeypatch):
     final_best = torch.load(mgr.best_ckpt_path, map_location="cpu", weights_only=False)
     assert final_best["epoch"] == 3
     assert final_best["val_loss_avg"] == pytest.approx(0.2)
+
+
+# ---------------------------------------------------------------------------
+# R02 -- a from-scratch cleanup drops the deleted run's best, not just its files
+# ---------------------------------------------------------------------------
+
+
+def test_cleanup_from_scratch_resets_best(tmp_path):
+    """``cleanup(train_from_scratch=True)`` resets the cached best-loss state.
+
+    The manager seeds ``best_val_loss`` from ``checkpoint_best.pth`` at
+    construction so a resumed run does not call its first epoch "best". When
+    the same directory is then wiped for a fresh run, that cached score
+    outlives the file it came from: every ``is_best`` decision of the new run
+    is gated by a deleted run's score, so no ``checkpoint_best.pth`` is written
+    until the retrain beats it -- leaving the run with no best-checkpoint
+    fallback at all.
+    """
+    mgr, _ = _make_manager(tmp_path)
+    mgr.save_checkpoint(epoch=1, val_loss_avg=0.01)
+    assert mgr.best_ckpt_path.exists()
+
+    # A driver reusing the run directory: the new manager seeds from disk.
+    mgr2, _ = _make_manager(tmp_path)
+    assert mgr2.best_val_loss == pytest.approx(0.01)
+    mgr2.save_checkpoint(epoch=2, val_loss_avg=0.9)
+    assert mgr2.last_saved_epoch == 2
+
+    mgr2.cleanup(train_from_scratch=True)
+
+    assert not mgr2.last_ckpt_path.exists()
+    assert not mgr2.best_ckpt_path.exists()
+    assert mgr2.best_val_loss == math.inf
+    assert mgr2.last_saved_epoch is None
+
+    # The fresh run's first epoch is its best, and a best checkpoint exists.
+    assert mgr2.save_checkpoint(epoch=1, val_loss_avg=0.5) is True
+    assert mgr2.best_ckpt_path.exists()
 
 
 # ---------------------------------------------------------------------------

@@ -107,6 +107,15 @@ class CheckpointManager:
             self._barrier()
             return
 
+        # Drop the cached state that described the run being deleted. Both
+        # fields are seeded from disk (or a previous save), so keeping them
+        # would let a deleted run's best gate this run's is_best decisions --
+        # the fresh run would then never write a best checkpoint until it beat
+        # a score no file backs any more, leaving it with no best-checkpoint
+        # fallback.
+        self.best_val_loss = math.inf
+        self.last_saved_epoch = None
+
         if self.world_rank == 0:
             for p in (self.last_ckpt_path, self.best_ckpt_path):
                 if p.exists():
