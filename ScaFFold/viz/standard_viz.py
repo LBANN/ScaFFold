@@ -27,6 +27,10 @@ def main(config: RunConfig):
     figures_path = Path(config.run_dir) / "figures"
     figures_path.mkdir(parents=True, exist_ok=True)
 
+    # pyplot keeps a strong reference to every figure until it is closed, and a
+    # sweep calls this once per combination in the same process, so an unclosed
+    # figure is retained (canvas included) for the rest of the run.
+    figures = []
     try:
         epochs = []
         train_loss = []
@@ -53,7 +57,7 @@ def main(config: RunConfig):
         legend_loc = (0, -0.17)
 
         # Plot training loss
-        plt.figure()
+        figures.append(plt.figure())
         plt.plot(epochs, train_loss, label="Train Loss", linewidth=line_thickness)
         plt.xlabel("Epoch", fontsize=fontsize)
         plt.ylabel("Train loss", fontsize=fontsize)
@@ -63,9 +67,10 @@ def main(config: RunConfig):
         plt.legend(loc="upper left", bbox_to_anchor=legend_loc, fontsize=legend_fontsize)
         plt.grid(True, axis="y")
         plt.savefig(figures_path / "train_loss.png", dpi=300, bbox_inches="tight")
+        plt.close(figures[-1])
 
         # Plot validation dice
-        plt.figure()
+        figures.append(plt.figure())
         plt.plot(epochs, val_dice, label="Val Dice Score", linewidth=line_thickness)
         plt.xlabel("Epoch", fontsize=fontsize)
         plt.ylabel("Val dice score", fontsize=fontsize)
@@ -74,10 +79,11 @@ def main(config: RunConfig):
         plt.legend(loc="upper left", bbox_to_anchor=legend_loc, fontsize=legend_fontsize)
         plt.grid(True, axis="y")
         plt.savefig(figures_path / "val_dice.png", dpi=300, bbox_inches="tight")
+        plt.close(figures[-1])
 
         # Plot validation loss if available
         if val_loss:
-            plt.figure()
+            figures.append(plt.figure())
             plt.plot(epochs, val_loss, label="Val Loss", linewidth=line_thickness)
             plt.xlabel("Epoch", fontsize=fontsize)
             plt.ylabel("Val loss", fontsize=fontsize)
@@ -86,5 +92,12 @@ def main(config: RunConfig):
             plt.legend(loc="upper left", bbox_to_anchor=legend_loc, fontsize=legend_fontsize)
             plt.grid(True, axis="y")
             plt.savefig(figures_path / "val_loss.png", dpi=300, bbox_inches="tight")
+            plt.close(figures[-1])
     except Exception as e:
         logger.error(f"Failed to generate figures: {e}")
+    finally:
+        # Errors here are logged and swallowed, so the close has to be
+        # unconditional: a failure between figure() and savefig() would
+        # otherwise leak exactly the figure nobody goes looking for.
+        for figure in figures:
+            plt.close(figure)

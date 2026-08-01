@@ -57,6 +57,50 @@ class TestFiguresDir:
         assert (run_dir / "figures" / "train_loss.png").exists()
 
 
+class TestFigureLifetime:
+    """R43: standard_viz closes every figure it opens.
+
+    ``worker.main`` calls ``standard_viz.main`` in-process once per sweep
+    combination, and pyplot keeps a strong reference to every unclosed figure,
+    so the canvases (and their Figure/Axes/Line objects) accumulate for the
+    whole sweep -- 36 live figures / 42 MiB after 12 combinations, plus
+    matplotlib's max_open_warning from the seventh on.
+    """
+
+    def _config(self, tmp_path, name):
+        run_dir = tmp_path / name
+        run_dir.mkdir()
+        (run_dir / "train_stats.csv").write_text(
+            "epoch,overall_loss,val_dice,val_loss_avg\n1,0.9,0.40,0.8\n2,0.5,0.70,0.4\n"
+        )
+        return SimpleNamespace(
+            run_dir=str(run_dir), vol_size=32, n_categories=5, unet_layers=2
+        )
+
+    def test_no_figures_left_open(self, tmp_path):
+        """Repeated calls (a sweep) leave no figure behind."""
+        plt.close("all")
+        for i in range(3):
+            standard_viz.main(self._config(tmp_path, f"run{i}"))
+            assert plt.get_fignums() == [], f"figures leaked after call {i}"
+
+    def test_no_figures_left_open_when_plotting_fails(self, tmp_path, monkeypatch):
+        """A failure between figure() and savefig() does not strand a figure.
+
+        ``main`` logs and swallows plotting errors, so without an unconditional
+        close the leak survives exactly the case it is hardest to notice.
+        """
+        plt.close("all")
+
+        def boom(*args, **kwargs):
+            raise OSError("[Errno 28] No space left on device")
+
+        monkeypatch.setattr(plt, "savefig", boom)
+        standard_viz.main(self._config(tmp_path, "failing_run"))
+
+        assert plt.get_fignums() == []
+
+
 class TestDiceFigure:
     """F70: Validation Dice figure saved as val_dice.png, not val_loss.png."""
 
