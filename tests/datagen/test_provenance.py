@@ -92,12 +92,19 @@ def test_commit_survives_a_non_repo_working_directory(tmp_path, monkeypatch):
     assert gd._git_commit_short(LOG) == expected
 
 
-def test_non_repo_install_reports_no_commit_id(tmp_path):
+def test_non_repo_install_reports_no_commit_id(tmp_path, monkeypatch):
     """An installed (non-git) ScaFFold still degrades gracefully.
 
     Provenance is best-effort: when the source tree is not a checkout there is
     no commit to record, and reuse simply is not gated on one.
+
+    "Not a checkout" has to be made true of the *whole path*, not just the leaf:
+    git walks upwards until it finds a repository, so with ``--basetemp`` inside
+    a ScaFFold checkout this directory inherits that checkout's HEAD and the
+    test fails on where it was run rather than on what it tests. The ceiling
+    stops the walk at ``tmp_path``.
     """
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
     not_a_repo = tmp_path / "site-packages" / "ScaFFold" / "datagen"
     not_a_repo.mkdir(parents=True)
 
