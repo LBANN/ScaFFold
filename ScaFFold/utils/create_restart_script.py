@@ -15,6 +15,7 @@
 # restart_script.py
 from __future__ import annotations
 
+import math
 import os
 import shlex
 import stat
@@ -22,6 +23,8 @@ import sys
 from collections.abc import Mapping
 from pathlib import Path
 from typing import List, Union
+
+from ScaFFold.utils.distributed import get_local_size
 
 # Profiling toggles that must be reproduced on restart -- but only when they
 # were active in the generating run. Names mirror ScaFFold.utils.perf_measure.
@@ -299,6 +302,11 @@ def create_restart_script(run_dir: str | Path, world_size: int | None = None) ->
     torchrun, Open MPI, PMI). The multi-rank torchrun-hpc template is emitted
     whenever the resulting world size is greater than one; the local
     single-process template is used only for a world size of one.
+
+    The node count comes from the scheduler when it reports one (Flux, Slurm);
+    otherwise it is derived from the per-node rank count
+    ``ScaFFold.utils.distributed.get_local_size`` reads, so a PALS or torchrun
+    job is not relaunched with every rank crammed onto one node.
     """
     run_dir = Path(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -339,8 +347,24 @@ def create_restart_script(run_dir: str | Path, world_size: int | None = None) ->
     if use_torchrun:
         # Calculate tasks per node for torchrun (-n arg).
         if nodes is None:
-            nodes = 1
-        tasks_per_node = max(1, total_tasks // nodes)
+            # No scheduler reported a node count: this is a PALS or plain
+            # torchrun launch. Assuming one node put the job's whole rank count
+            # on a single node (an 8-rank job across 2 nodes came back as
+            # NODES=1 TASKS_PER_NODE=8), which either oversubscribes one node or
+            # is rejected outright. The rank side's ``get_local_size`` reads the
+            # same launchers' per-node variables, so ask it how many ranks share
+            # this node and derive the node count from that. ``required=True``
+            # distinguishes "one rank per node" from "nothing reported a
+            # per-node count", where the historical single-node assumption is
+            # still the best guess available.
+            try:
+                local_size = get_local_size(required=True)
+            except RuntimeError:
+                local_size = total_tasks
+            tasks_per_node = max(1, min(local_size, total_tasks))
+            nodes = math.ceil(total_tasks / tasks_per_node)
+        else:
+            tasks_per_node = max(1, total_tasks // nodes)
 
         script = _render_torchrun_hpc_restart(
             py_array_decl, nodes, tasks_per_node, env_setup
