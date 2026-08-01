@@ -235,6 +235,63 @@ def test_resume_rejects_truncated(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# R36: a category's IFS parameters are parsed once, not once per instance
+# ---------------------------------------------------------------------------
+
+
+def test_category_params_parsed_once_per_category(tmp_path, monkeypatch):
+    """``main`` parses each category CSV once per rank, not once per work item.
+
+    The parse used to sit inside the per-item loop, so a full generation read
+    and re-parsed the same small CSV 145 times per category off the shared
+    filesystem. Work items for a category are contiguous in the block
+    partition, so a one-entry cache collapses that to one parse per category.
+    """
+    fract_base = tmp_path / "fractals"
+    point_num = 60
+    n_categories = 2
+    missing_per_category = 3
+
+    config = _make_config(fract_base, point_num=point_num)
+    config.n_categories = n_categories
+
+    param_dir = Path(layout.category_param_dir(config))
+    param_dir.mkdir(parents=True)
+    instance_root = Path(layout.instance_dir(config))
+    rng = np.random.default_rng(0)
+    for category in range(n_categories):
+        np.savetxt(
+            param_dir / f"{category:06d}.csv", _contractive_params(), delimiter=","
+        )
+        # Pre-seed all but a few instances so the run stays fast; the ones left
+        # missing are what the loop (and the parse) actually iterates over.
+        inst_dir = instance_root / f"{category:06d}"
+        inst_dir.mkdir(parents=True)
+        for i in range(missing_per_category, 145):
+            np.save(inst_dir / f"{category:06d}_{i:04d}.npy", rng.random((10, 3)))
+
+    parses = []
+    real_genfromtxt = np.genfromtxt
+
+    def counting_genfromtxt(fname, *args, **kwargs):
+        parses.append(Path(str(fname)).name)
+        return real_genfromtxt(fname, *args, **kwargs)
+
+    monkeypatch.setattr(inst.np, "genfromtxt", counting_genfromtxt)
+    inst.main(config)
+
+    category_parses = [name for name in parses if name[0].isdigit()]
+    # Every missing instance was generated ...
+    for category in range(n_categories):
+        for i in range(missing_per_category):
+            assert (
+                instance_root / f"{category:06d}" / f"{category:06d}_{i:04d}.npy"
+            ).exists()
+    # ... from n_categories parses, not one per (category, instance) item.
+    assert sorted(category_parses) == ["000000.csv", "000001.csv"]
+
+
+# ---------------------------------------------------------------------------
 # F62: mask scanner requires exactly one file per id
 # ---------------------------------------------------------------------------
 

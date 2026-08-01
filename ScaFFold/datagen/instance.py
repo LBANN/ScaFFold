@@ -346,14 +346,26 @@ def main(config: Config):
 
     start_time = time.time()
 
+    # One-entry cache of the most recently parsed category CSV. The work list
+    # is built category-major and block-sliced, so every rank's items for a
+    # given category are contiguous: a single entry is enough to turn the
+    # per-item re-parse (145 identical reads of the same small file off the
+    # shared filesystem, per category) into one parse per category per rank.
+    # ``generate_instance_points`` copies before scaling, so sharing the parsed
+    # array across instances cannot leak weights from one item into the next.
+    cached_category = None
+    params = None
+
     for i, category_instance_pair in enumerate(instances_to_generate_for_this_rank):
         category, instance = category_instance_pair
-        category_IFS_params = IFS_param_csv_names[category]
-        params = np.genfromtxt(
-            f"{fracts_read_dir}/{category_IFS_params}",
-            dtype=DEFAULT_NP_DTYPE,
-            delimiter=",",
-        )
+        if category != cached_category:
+            category_IFS_params = IFS_param_csv_names[category]
+            params = np.genfromtxt(
+                f"{fracts_read_dir}/{category_IFS_params}",
+                dtype=DEFAULT_NP_DTYPE,
+                delimiter=",",
+            )
+            cached_category = category
         weights = weights_all[instance]
 
         # Generate a validated, weighted point cloud. Weighting can turn a
