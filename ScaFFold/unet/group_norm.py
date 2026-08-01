@@ -121,8 +121,9 @@ def _raise_recompile_limit():
     """Lift Dynamo's per-function recompile cap to cover every UNet GN shape.
 
     Only ever raises it, so a caller that deliberately set a larger limit keeps
-    theirs.  ``cache_size_limit`` is the older spelling of ``recompile_limit``;
-    set whichever exists.
+    theirs -- but note the converse: a limit deliberately set *smaller* than
+    ours is clobbered up to ``_MIN_RECOMPILE_LIMIT``. ``cache_size_limit`` is
+    the older spelling of ``recompile_limit``; set whichever exists.
     """
     config = torch._dynamo.config
     for name in ("recompile_limit", "cache_size_limit"):

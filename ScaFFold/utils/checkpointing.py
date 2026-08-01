@@ -663,7 +663,10 @@ class CheckpointManager:
         tmp_path = dst.with_name(f"{dst.name}.tmp.{os.getpid()}")
         try:
             with open(src, "rb") as fsrc, open(tmp_path, "wb") as fdst:
-                shutil.copyfileobj(fsrc, fdst)
+                # A large buffer keeps the syscall count low on parallel
+                # filesystems (the default 64 KiB means ~1k read/write pairs
+                # per 64 MiB checkpoint).
+                shutil.copyfileobj(fsrc, fdst, length=16 * 1024 * 1024)
                 fdst.flush()
                 os.fsync(fdst.fileno())
             os.replace(tmp_path, dst)
@@ -688,9 +691,13 @@ class CheckpointManager:
             # Save 'last' atomically.
             cls._atomic_save(state_dict, last_path)
             # 'best' is byte-identical to the 'last' just committed, so copy
-            # that file instead of pickling and fsyncing the same state a
-            # second time (double the serialization CPU and double the bytes
-            # pushed at the shared filesystem on every improving epoch).
+            # that file instead of pickling the same state a second time. The
+            # saving is the serialization CPU (pickle + zip of the full state
+            # dict); the filesystem traffic is roughly a wash -- the copy
+            # writes the same bytes and adds a read (measured ~1.02x faster on
+            # Lustre). Trade-off: 'best' is now a byte copy of 'last', so a
+            # silently corrupted 'last' write would propagate into 'best'
+            # rather than being an independent serialization.
             #
             # There is no concurrent writer to race: checkpoint writes are
             # serialized through a single writer -- the caller's thread in sync
