@@ -713,6 +713,71 @@ class PyTorchTrainer(BaseTrainer):
         minibatch_time_s = statistics.median(minibatch_times.cpu().tolist())
         return minibatch_time_s
 
+    def _warmup_ragged_batches(self, batch):
+        """Warm the narrower final batch each loader ends its epoch with.
+
+        Warmup runs only the *leading* batches of the train loader, which are
+        all ``local_batch_size`` wide, and neither loader drops its last batch.
+        So when a rank's sample count is not a multiple of the batch size, the
+        final batch of every epoch presents a set of convolution problems
+        nothing has ever run: with ``cudnn.benchmark`` on, its algorithm search
+        (MIOpen find) then happens inside the *first timed epoch* -- a one-off
+        stall measured at 95 s that lands in ``epoch_duration``, i.e. straight
+        in the FOM denominator, while staying invisible to the per-minibatch
+        timer (which excludes partial batches).
+
+        One extra iteration per distinct ragged size fixes that, cut from a
+        batch warmup already fetched so no additional I/O is needed. The
+        validation shapes are covered by the same (training) step: the forward
+        convolutions are what validation shares, and this runs inside warmup's
+        snapshot/restore envelope, so the extra step cannot affect training.
+        ``local_batch_size = 1`` never has a ragged batch and does no extra work.
+
+        The set of sizes is agreed across ranks first. The training shards are
+        padded to equal length, so their remainder is already identical
+        everywhere, but validation is sharded *unpadded* on purpose (F-series:
+        an unbiased SUM-reduced metric), so per-rank counts -- and their
+        remainders -- differ. A rank that decided on its own would run a step
+        its peers did not, and the collectives inside that step (the gradient
+        all-reduce, the sharded loss reductions) would deadlock.
+        """
+        if batch is None:
+            return
+        local_batch_size = self.config.local_batch_size
+        available = batch["image"].shape[0]
+
+        ragged_sizes = {len(self.train_sampler) % local_batch_size}
+        local_val_ragged = torch.tensor(
+            [len(self.val_sampler) % local_batch_size], device=self.device
+        )
+        gathered_val_ragged = [
+            torch.empty_like(local_val_ragged) for _ in range(self.world_size)
+        ]
+        torch.distributed.all_gather(gathered_val_ragged, local_val_ragged)
+        ragged_sizes.update(int(size.item()) for size in gathered_val_ragged)
+
+        # The batches already run are all ``available`` wide, and ``available``
+        # is itself rank-invariant (the padded training shards give every rank
+        # the same leading batch size), so this loop is identical on all ranks.
+        warmed = {0, available}
+        for ragged in sorted(ragged_sizes):
+            if ragged in warmed:
+                continue
+            if ragged > available:
+                self.log.debug(
+                    f"  warmup: cannot build a {ragged}-sample batch from a "
+                    f"{available}-sample batch; skipping that shape"
+                )
+                continue
+            warmed.add(ragged)
+            self.log.debug(
+                f"  warmup: running the ragged batch shape ({ragged} samples)"
+            )
+            self._run_training_batch(
+                {key: value[:ragged] for key, value in batch.items()},
+                log_prefix=f"warmup ragged ({ragged}): ",
+            )
+
     def warmup(self):
         """Run warmup iterations before the main training loop."""
         warmup_batches = self.config.warmup_batches
@@ -735,10 +800,12 @@ class PyTorchTrainer(BaseTrainer):
         self.optimizer.zero_grad(set_to_none=True)
 
         try:
+            last_batch = None
             for batch_idx, batch in enumerate(self.train_loader):
                 if batch_idx >= max_batches:
                     break
 
+                last_batch = batch
                 self._run_training_batch(
                     batch,
                     log_prefix="warmup: ",
@@ -748,6 +815,8 @@ class PyTorchTrainer(BaseTrainer):
                 self.log.debug(
                     f"  warmup: batch {batch_idx} completed in {batch_t_end - start_warmup} seconds"
                 )
+
+            self._warmup_ragged_batches(last_batch)
 
             self.val_loader.sampler.set_epoch(0)
 

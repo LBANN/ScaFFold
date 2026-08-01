@@ -188,3 +188,130 @@ def test_training_batch_gathers_mem_only_first_batch():
     # first-batch predicate.
     assert "gather_mem_stats=True" not in src
     assert "first_batch" in src
+
+
+# ---------------------------------------------------------------------------
+# R41: warmup covers the ragged final batch
+#
+# Warmup only ever runs the *leading* batches of the train loader, which are
+# all local_batch_size wide, and neither loader drops its last batch. When a
+# rank's sample count is not a multiple of the batch size, the narrower final
+# batch is therefore a set of convolution shapes nothing has warmed, and with
+# cudnn.benchmark on the algorithm search for it runs inside the first *timed*
+# epoch (measured: 95 s) -- straight into epoch_duration, the FOM denominator.
+# ---------------------------------------------------------------------------
+
+
+def _stub_warmup_steps(trainer, monkeypatch, *, mutate=False):
+    """Record the batch sizes warmup runs; optionally mutate model state.
+
+    The real training step is hardwired through DistConv and cannot run on the
+    CPU ``ps=None`` fixture, so the step itself is stubbed; what is under test
+    is which batches warmup feeds it.
+    """
+    import ScaFFold.utils.trainer as tr
+
+    sizes = []
+
+    def fake_training_batch(batch, **kwargs):
+        sizes.append(int(batch["image"].shape[0]))
+        if mutate:
+            with torch.no_grad():
+                for param in trainer.model.parameters():
+                    param.add_(1.0)
+        return int(batch["image"].shape[0]), torch.tensor(0.0), torch.tensor(0.0)
+
+    monkeypatch.setattr(trainer, "_run_training_batch", fake_training_batch)
+    monkeypatch.setattr(tr, "evaluate", lambda *args, **kwargs: (0.0, 0.0))
+    return sizes
+
+
+def test_warmup_covers_the_ragged_train_batch(tiny_trainer, monkeypatch):
+    # 5 local training samples at local_batch_size 2: every epoch ends with a
+    # 1-sample batch that the leading warmup batches never present.
+    trainer = tiny_trainer(
+        n_train=5,
+        n_val=4,
+        config_overrides={"local_batch_size": 2, "warmup_batches": 2},
+    )
+    sizes = _stub_warmup_steps(trainer, monkeypatch)
+
+    trainer.warmup()
+
+    assert sizes == [2, 2, 1]
+
+
+def test_warmup_adds_no_extra_batch_when_shards_divide_evenly(
+    tiny_trainer, monkeypatch
+):
+    # local_batch_size 1 can never produce a ragged batch: no extra work.
+    trainer = tiny_trainer(
+        n_train=4,
+        n_val=2,
+        config_overrides={"local_batch_size": 1, "warmup_batches": 2},
+    )
+    sizes = _stub_warmup_steps(trainer, monkeypatch)
+
+    trainer.warmup()
+
+    assert sizes == [1, 1]
+
+
+def test_warmup_covers_a_ragged_validation_batch(tiny_trainer, monkeypatch):
+    # Training divides evenly (4 / 2) but validation does not (3 / 2), so the
+    # 1-sample shape still has to be warmed.
+    trainer = tiny_trainer(
+        n_train=4,
+        n_val=3,
+        config_overrides={"local_batch_size": 2, "warmup_batches": 2},
+    )
+    sizes = _stub_warmup_steps(trainer, monkeypatch)
+
+    trainer.warmup()
+
+    assert sizes == [2, 2, 1]
+
+
+def test_warmup_ragged_sizes_are_agreed_across_ranks(tiny_trainer, monkeypatch):
+    # Validation is sharded unpadded, so peers can end their epoch with a
+    # different partial size. Every rank must run the same extra steps or the
+    # collectives inside them diverge; the peer's remainder (2) is gathered and
+    # warmed here even though this rank's own is 1.
+    import torch.distributed as dist
+
+    trainer = tiny_trainer(
+        n_train=6,
+        n_val=4,
+        config_overrides={"local_batch_size": 3, "warmup_batches": 2},
+    )
+    sizes = _stub_warmup_steps(trainer, monkeypatch)
+    trainer.world_size = 2
+
+    def fake_all_gather(tensor_list, tensor, *args, **kwargs):
+        tensor_list[0].copy_(tensor)
+        tensor_list[1].fill_(2)
+
+    monkeypatch.setattr(dist, "all_gather", fake_all_gather)
+
+    trainer.warmup()
+
+    assert sizes == [3, 3, 1, 2]
+
+
+def test_warmup_rolls_back_state_including_the_ragged_batch(tiny_trainer, monkeypatch):
+    # The extra ragged iteration stays inside warmup's snapshot/restore
+    # envelope, so nothing it touches survives into training.
+    trainer = tiny_trainer(
+        n_train=5,
+        n_val=4,
+        config_overrides={"local_batch_size": 2, "warmup_batches": 2},
+    )
+    sizes = _stub_warmup_steps(trainer, monkeypatch, mutate=True)
+    before = {k: v.detach().clone() for k, v in trainer.model.state_dict().items()}
+
+    trainer.warmup()
+
+    assert sizes == [2, 2, 1]
+    after = trainer.model.state_dict()
+    for name, tensor in before.items():
+        assert torch.equal(after[name], tensor), name
