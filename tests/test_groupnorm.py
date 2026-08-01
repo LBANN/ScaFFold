@@ -12,19 +12,28 @@
 #
 # SPDX-License-Identifier: (Apache-2.0)
 
-"""Tests for the compiled GroupNorm fast path (``ScaFFold.unet.group_norm``).
+"""Tests for the GroupNorm fast paths (``ScaFFold.unet.group_norm``).
 
 The optimization must be invisible everywhere except in the profile: the same
 state dict as a stock ``nn.GroupNorm`` model (checkpoints stay interchangeable
-in both directions), the same numbers within reduction-order noise, and an
-eager fallback for every input the compiled kernel cannot or should not take
-(CPU, unknown tensor subclasses, a broken compiler).  DistConv's ``DCTensor``
-is not in that list: ``forward`` unwraps it to its local shard around the
-compiled kernel, so the wrapped production path is served too.  That unwrap is
-*not* the bare attribute read DistConv's own dispatch does -- dispatch runs
-below autograd, where a bare read is safe, while ``forward`` runs above it and
-must go through DistConv's ``_ToTensor``/``_FromTensor`` pair to keep the graph
-connected.
+in both directions), the same numbers within reduction-order noise, and a
+fallback for every input the fast kernels cannot or should not take (CPU,
+unknown tensor subclasses, a broken Triton or Inductor install).  The ladder is
+Triton -> compiled -> eager, and a failure at any rung latches that rung off and
+drops to the next, never to the bottom.
+
+DistConv's ``DCTensor`` is not in the rejection list: ``forward`` unwraps it to
+its local shard around both fast kernels, so the wrapped production path is
+served too.  That unwrap is *not* the bare attribute read DistConv's own
+dispatch does -- dispatch runs below autograd, where a bare read is safe, while
+``forward`` runs above it and must go through DistConv's
+``_ToTensor``/``_FromTensor`` pair to keep the graph connected.
+
+The ReLU that used to follow every GroupNorm now lives inside it
+(``activation="relu"``), fused into the Triton store and applied explicitly on
+the other two paths.  ``DoubleConv`` keeps an ``nn.Identity`` in the vacated
+``nn.Sequential`` slot, so the state dict does not move by one key -- which is
+what the checkpoint tests here pin.
 """
 
 from __future__ import annotations
@@ -51,39 +60,61 @@ _GROUPS = 8
 
 @pytest.fixture(autouse=True)
 def _restore_compile_state():
-    """Keep per-test overrides of the module-level compile state contained."""
-    previous = gn_mod.set_compile_enabled(None)
-    failed = gn_mod._compile_failed
+    """Keep per-test overrides of the module-level routing state contained."""
+    previous_compile = gn_mod.set_compile_enabled(None)
+    previous_triton = gn_mod.set_triton_enabled(None)
+    compile_failed = gn_mod._compile_failed
+    triton_failed = gn_mod._triton_failed
     yield
-    gn_mod._compile_override = previous
-    gn_mod._compile_failed = failed
+    gn_mod._compile_override = previous_compile
+    gn_mod._triton_override = previous_triton
+    gn_mod._compile_failed = compile_failed
+    gn_mod._triton_failed = triton_failed
 
 
-def _make_unet(seed: int, group_norm_cls=None):
-    """Build the worker.py-shaped UNet, optionally with a different norm class."""
+def _make_unet(seed: int):
+    """Build the worker.py-shaped UNet."""
     torch.manual_seed(seed)
-    if group_norm_cls is None:
-        return UNet(
-            n_channels=_N_CHANNELS,
-            n_classes=_N_CLASSES,
-            trilinear=False,
-            layers=2,
-            group_norm_groups=_GROUPS,
-        )
-    import ScaFFold.unet.unet_parts as parts
+    return UNet(
+        n_channels=_N_CHANNELS,
+        n_classes=_N_CLASSES,
+        trilinear=False,
+        layers=2,
+        group_norm_groups=_GROUPS,
+    )
 
-    original = parts.FastGroupNorm
-    parts.FastGroupNorm = group_norm_cls
-    try:
-        return UNet(
-            n_channels=_N_CHANNELS,
-            n_classes=_N_CLASSES,
-            trilinear=False,
-            layers=2,
-            group_norm_groups=_GROUPS,
-        )
-    finally:
-        parts.FastGroupNorm = original
+
+def _make_plain_unet(seed: int):
+    """The pre-fusion build: stock ``nn.GroupNorm`` followed by ``nn.ReLU``.
+
+    Built by *converting* a normal UNet rather than by patching the norm class
+    at construction time, because the fusion moved the ReLU into the norm: a
+    class swap alone would leave ``DoubleConv``'s ``nn.Identity`` placeholders
+    in place and produce a model with no activations at all, which would make
+    every numeric comparison below vacuous.  Converting reproduces exactly the
+    module graph this branch replaced -- ``nn.GroupNorm`` where the fast norm
+    sits, an in-place ``nn.ReLU`` where the placeholder sits -- and consumes no
+    RNG (``nn.GroupNorm`` initializes to ones/zeros), so the parameters are
+    bit-identical to what ``_make_unet(seed)`` draws.
+    """
+    model = _make_unet(seed)
+    for parent in [m for m in model.modules() if isinstance(m, nn.Sequential)]:
+        for index, child in enumerate(list(parent)):
+            if isinstance(child, FastGroupNorm):
+                plain = nn.GroupNorm(
+                    child.num_groups,
+                    child.num_channels,
+                    eps=child.eps,
+                    affine=child.affine,
+                )
+                if child.affine:
+                    with torch.no_grad():
+                        plain.weight.copy_(child.weight)
+                        plain.bias.copy_(child.bias)
+                parent[index] = plain
+            elif isinstance(child, nn.Identity):
+                parent[index] = nn.ReLU(inplace=True)
+    return model
 
 
 def _make_input(seed: int = 0, channels: int = _N_CHANNELS, size: int = _N):
@@ -103,7 +134,7 @@ def test_state_dict_matches_plain_groupnorm_model():
     parameter inventory of the model may not shift by even one key.
     """
     new_model = _make_unet(seed=0)
-    old_model = _make_unet(seed=0, group_norm_cls=nn.GroupNorm)
+    old_model = _make_plain_unet(seed=0)
 
     new_sd = new_model.state_dict()
     old_sd = old_model.state_dict()
@@ -126,7 +157,7 @@ def test_checkpoint_round_trip_both_directions(tmp_path):
     script).  After each load the two models must agree bit for bit.
     """
     new_model = _make_unet(seed=0)
-    old_model = _make_unet(seed=1, group_norm_cls=nn.GroupNorm)
+    old_model = _make_plain_unet(seed=1)
     x = _make_input(seed=3)
 
     old_path = tmp_path / "old.pth"
@@ -159,6 +190,119 @@ def test_unet_uses_fast_group_norm():
     norms = [m for m in model.modules() if isinstance(m, nn.GroupNorm)]
     assert norms, "UNet should contain GroupNorm layers"
     assert all(isinstance(m, FastGroupNorm) for m in norms)
+
+
+def test_state_dict_bytes_identical_to_plain_groupnorm_model():
+    """Not just the same keys: the serialized checkpoint must be byte identical.
+
+    ``test_state_dict_matches_plain_groupnorm_model`` compares names, shapes and
+    dtypes; this compares the actual bytes ``torch.save`` writes, which is the
+    thing that has to stay interchangeable.  It is the direct guard on the
+    ``nn.ReLU`` -> ``nn.Identity`` swap: ``nn.Sequential`` names its children by
+    position, so *removing* the activation slot rather than holding it open
+    would renumber ``3.weight`` and ``4.weight``/``4.bias`` and silently
+    invalidate every checkpoint on disk.
+    """
+    import io
+
+    new_model = _make_unet(seed=0)
+    old_model = _make_plain_unet(seed=0)
+
+    def blob(model):
+        buffer = io.BytesIO()
+        torch.save(model.state_dict(), buffer)
+        return buffer.getvalue()
+
+    assert blob(new_model) == blob(old_model)
+
+
+def test_double_conv_keeps_the_activation_slots():
+    """The fused build keeps six positional slots, with nothing in the spares.
+
+    Pins both halves of the fusion design: the ReLU is *in* the norm
+    (``activation == "relu"`` at positions 1 and 4) and its old slots (2 and 5)
+    are parameterless placeholders rather than deletions.
+    """
+    from ScaFFold.unet.unet_parts import DoubleConv
+
+    block = DoubleConv(3, 16, _GROUPS)
+    children = list(block.double_conv)
+    assert len(children) == 6
+    for norm_index, spare_index in ((1, 2), (4, 5)):
+        norm = children[norm_index]
+        assert isinstance(norm, FastGroupNorm)
+        assert norm.activation == "relu"
+        spare = children[spare_index]
+        assert isinstance(spare, nn.Identity)
+        assert list(spare.parameters()) == []
+        assert list(spare.buffers()) == []
+    # And the positional key numbering is exactly the pre-fusion one.
+    assert list(block.state_dict().keys()) == [
+        "double_conv.0.weight",
+        "double_conv.1.weight",
+        "double_conv.1.bias",
+        "double_conv.3.weight",
+        "double_conv.4.weight",
+        "double_conv.4.bias",
+    ]
+
+
+def test_double_conv_output_matches_the_explicit_relu_build():
+    """Folding the ReLU into the norm may not change a single bit of the output.
+
+    The fused module applies the ReLU itself on every path, so on CPU (eager)
+    the block must reproduce ``conv -> GroupNorm -> ReLU`` exactly, gradients
+    included.
+    """
+    from ScaFFold.unet.unet_parts import DoubleConv
+
+    torch.manual_seed(4)
+    fused = DoubleConv(3, 16, _GROUPS)
+    reference = DoubleConv(3, 16, _GROUPS)
+    reference.load_state_dict(fused.state_dict())
+    for index in (1, 4):
+        reference.double_conv[index].activation = None
+    for index in (2, 5):
+        reference.double_conv[index] = nn.ReLU(inplace=True)
+
+    x_fused = _make_input(seed=8, channels=3, size=8).requires_grad_(True)
+    x_reference = x_fused.detach().clone().requires_grad_(True)
+
+    out_fused = fused(x_fused)
+    out_reference = reference(x_reference)
+    assert torch.equal(out_fused, out_reference)
+    # A block whose activation silently vanished would still pass an
+    # output-equality test against another activation-free block, so assert the
+    # ReLU is really there.
+    assert (out_fused < 0).sum() == 0
+    assert out_fused.max() > 0
+
+    out_fused.pow(2).sum().backward()
+    out_reference.pow(2).sum().backward()
+    assert torch.equal(x_fused.grad, x_reference.grad)
+    for (name, a), (_, b) in zip(
+        fused.named_parameters(), reference.named_parameters()
+    ):
+        assert torch.equal(a.grad, b.grad), name
+
+
+def test_activation_argument_is_validated():
+    """An unknown activation must fail at construction, not at the first step."""
+    with pytest.raises(ValueError, match="activation"):
+        FastGroupNorm(_GROUPS, 16, activation="gelu")
+
+
+def test_supported_activations_match_the_kernels():
+    """The module's activation list may not drift from the kernel's.
+
+    ``group_norm`` spells the tuple out rather than importing it (importing the
+    kernel module has to stay off the CPU path), so nothing but this test stops
+    the two copies from diverging into a runtime ``ValueError`` from inside the
+    custom op.
+    """
+    from ScaFFold.unet import triton_group_norm as triton_mod
+
+    assert set(gn_mod.SUPPORTED_ACTIVATIONS) <= set(triton_mod.SUPPORTED_ACTIVATIONS)
 
 
 # ---------------------------------------------------------------------------
@@ -245,6 +389,144 @@ def test_compile_failure_falls_back_to_eager(monkeypatch, caplog):
     assert gn_mod._use_compiled(torch.randn(1, 8, 4, 4, 4)) is False
 
 
+def test_triton_failure_falls_back_to_the_compiled_kernel(monkeypatch, caplog):
+    """A broken Triton install drops to *compiled*, not all the way to eager.
+
+    The distinction is worth 10x on the shapes that dominate the step, so the
+    ladder must have three rungs and not two.  Simulated by forcing the Triton
+    predicate on and making its kernel raise; the compiled stand-in must then be
+    the one that answers, exactly once, with the Triton path latched off.
+    """
+    compiled_calls = []
+
+    def _raises(*args, **kwargs):
+        raise RuntimeError("simulated Triton failure")
+
+    def _recording(input, num_groups, weight, bias, eps):
+        compiled_calls.append(type(input))
+        return nn.functional.group_norm(input, num_groups, weight, bias, eps)
+
+    monkeypatch.setattr(gn_mod, "_use_triton", lambda *a, **kw: True)
+    monkeypatch.setattr(gn_mod, "_get_triton_module", _raises)
+    monkeypatch.setattr(gn_mod, "_use_compiled", lambda _input: True)
+    monkeypatch.setattr(gn_mod, "_get_compiled_group_norm", lambda: _recording)
+    gn_mod._triton_failed = False
+    gn_mod._compile_failed = False
+
+    fast = FastGroupNorm(_GROUPS, 64)
+    x = _make_input(seed=44, channels=64, size=8)
+    with caplog.at_level(logging.WARNING, logger=gn_mod.__name__):
+        out = fast(x)
+
+    assert compiled_calls == [torch.Tensor], "compiled kernel was not the fallback"
+    assert torch.equal(
+        out, nn.functional.group_norm(x, _GROUPS, fast.weight, fast.bias)
+    )
+    assert any(
+        "falling back to the compiled kernel" in r.message for r in caplog.records
+    )
+    assert gn_mod._triton_failed is True
+    assert gn_mod._compile_failed is False
+    # Latched off: the predicate now refuses even a would-be eligible tensor.
+    monkeypatch.undo()
+    assert gn_mod._use_triton(torch.randn(1, 8, 4, 4, 4), 8, None, None, None) is False
+
+
+@pytest.mark.parametrize("rung", ["triton", "compiled"])
+def test_checkpoint_recompute_stop_is_re_raised(monkeypatch, rung):
+    """``_StopRecomputationError`` is control flow, not a kernel failure.
+
+    ``torch.utils.checkpoint``'s non-reentrant recompute stops itself by raising
+    it from a saved-tensor *pack hook*, i.e. from inside whichever op is saving
+    a tensor at that moment -- which, now that the ReLU is fused and nothing
+    follows GroupNorm in a ``DoubleConv``, is this module.  A blanket
+    ``except Exception`` would swallow it, latch the fast kernel off and drop the
+    whole model to eager mid-run.  (Observed exactly that on
+    ``test_gpu_activation_checkpointing_matches_eager`` before the re-raise.)
+    """
+    import torch.utils.checkpoint as checkpoint_mod
+
+    stop = checkpoint_mod._StopRecomputationError
+
+    def _raises(*args, **kwargs):
+        raise stop()
+
+    if rung == "triton":
+        monkeypatch.setattr(gn_mod, "_use_triton", lambda *a, **kw: True)
+        monkeypatch.setattr(gn_mod, "_get_triton_module", _raises)
+    else:
+        monkeypatch.setattr(gn_mod, "_use_compiled", lambda _input: True)
+        monkeypatch.setattr(gn_mod, "_get_compiled_group_norm", lambda: _raises)
+    gn_mod._triton_failed = False
+    gn_mod._compile_failed = False
+
+    fast = FastGroupNorm(_GROUPS, 16)
+    with pytest.raises(stop):
+        fast(_make_input(seed=45, channels=16, size=4))
+    assert gn_mod._triton_failed is False
+    assert gn_mod._compile_failed is False
+
+
+def test_cpu_activation_checkpointing_keeps_the_fast_path(monkeypatch):
+    """End-to-end version of the above, on the real model.
+
+    The fast path is forced on for CPU tensors (with the stock kernel standing
+    in for the compiled one, so only the *routing* is under test) and the model
+    is run with activation checkpointing.  Gradients must match the
+    non-checkpointed run and the fast path must still be live afterwards -- a
+    swallowed recompute-stop shows up as a latched-off kernel here.
+    """
+    monkeypatch.setattr(gn_mod, "_use_compiled", lambda t: type(t) is torch.Tensor)
+    monkeypatch.setattr(
+        gn_mod, "_get_compiled_group_norm", lambda: nn.functional.group_norm
+    )
+    gn_mod._compile_failed = False
+
+    x = _make_input(seed=46).requires_grad_(True)
+
+    def grads(checkpointing):
+        model = _make_unet(seed=0)
+        if checkpointing:
+            model.use_checkpointing()
+        model.zero_grad(set_to_none=True)
+        model(x).pow(2).sum().backward()
+        return {n: p.grad.detach().clone() for n, p in model.named_parameters()}
+
+    direct = grads(False)
+    checkpointed = grads(True)
+    assert gn_mod._compile_failed is False, "recompute-stop was swallowed"
+    for name in direct:
+        assert torch.allclose(direct[name], checkpointed[name]), name
+
+
+def test_triton_rejects_unknown_tensor_subclasses():
+    """``is_supported`` only asks ``isinstance``, so the type check lives here.
+
+    A ``__torch_dispatch__`` wrapper other than DCTensor has unknown semantics
+    and must keep the stock kernel, exactly as it does for the compiled path --
+    but ``triton_group_norm.is_supported`` would happily accept one, so
+    ``_use_triton`` has to reject it itself rather than delegating.
+    """
+
+    class _Wrapper(torch.Tensor):
+        pass
+
+    plain = torch.randn(1, 8, 4, 4, 4)
+    assert gn_mod._use_triton(plain, 8, None, None, None) is False  # CPU
+    assert gn_mod._use_triton(plain.as_subclass(_Wrapper), 8, None, None, None) is False
+
+
+def test_triton_env_opt_out_skips_the_kernel_module_entirely(monkeypatch):
+    """``SCAFFOLD_GROUPNORM_TRITON=0`` is checked before anything is imported."""
+
+    def _boom():
+        raise AssertionError("the kernel module must not be imported when opted out")
+
+    monkeypatch.setattr(gn_mod, "_get_triton_module", _boom)
+    gn_mod.set_triton_enabled(False)
+    assert gn_mod._use_triton(torch.randn(1, 8, 4, 4, 4), 8, None, None, None) is False
+
+
 @pytest.mark.parametrize(
     "value,expected",
     [
@@ -270,6 +552,116 @@ def test_env_var_unset_means_auto(monkeypatch):
     monkeypatch.delenv(gn_mod.COMPILE_ENV_VAR, raising=False)
     gn_mod.set_compile_enabled(None)
     assert gn_mod._compile_override is None
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        ("0", False),
+        ("false", False),
+        ("OFF", False),
+        ("no", False),
+        ("1", True),
+        ("true", True),
+        ("On", True),
+        ("yes", True),
+        ("maybe", None),
+    ],
+)
+def test_triton_env_var_controls_the_fast_path(monkeypatch, value, expected):
+    """``SCAFFOLD_GROUPNORM_TRITON`` is parsed exactly like its compile twin."""
+    monkeypatch.setenv(gn_mod.TRITON_ENV_VAR, value)
+    gn_mod.set_triton_enabled(None)
+    assert gn_mod._triton_override is expected
+
+
+def test_triton_env_var_unset_means_auto(monkeypatch):
+    """Unset means "on wherever is_supported accepts" -- the production default."""
+    monkeypatch.delenv(gn_mod.TRITON_ENV_VAR, raising=False)
+    gn_mod.set_triton_enabled(None)
+    assert gn_mod._triton_override is None
+
+
+def test_triton_env_var_garbage_warns(monkeypatch, caplog):
+    """An unparsable value is ignored *loudly*, like the compile variable."""
+    monkeypatch.setenv(gn_mod.TRITON_ENV_VAR, "sometimes")
+    with caplog.at_level(logging.WARNING, logger=gn_mod.__name__):
+        gn_mod.set_triton_enabled(None)
+    assert any(gn_mod.TRITON_ENV_VAR in r.message for r in caplog.records)
+    assert gn_mod._triton_override is None
+
+
+def test_set_triton_enabled_returns_the_previous_setting(monkeypatch):
+    """The save/restore contract tests rely on, matching set_compile_enabled."""
+    monkeypatch.delenv(gn_mod.TRITON_ENV_VAR, raising=False)
+    gn_mod.set_triton_enabled(None)
+    assert gn_mod.set_triton_enabled(False) is None
+    assert gn_mod.set_triton_enabled(True) is False
+    assert gn_mod.set_triton_enabled(None) is True
+    assert gn_mod._triton_override is None
+
+
+def test_cpu_never_imports_triton(fresh_python):
+    """A CPU-only process must not import triton, nor the kernel module.
+
+    Two separate costs, both of which the CPU unit suite would otherwise pay on
+    every run: ``import triton`` (seconds, and it is not installed everywhere),
+    and importing ``ScaFFold.unet.triton_group_norm``, which registers two
+    dispatcher ops and an autograd formula at import time.  ``_use_triton``
+    rejects non-CUDA tensors *before* it touches the module, which is what this
+    pins -- run in a fresh interpreter because the test session itself has long
+    since imported the kernel module for the kernel's own tests.
+    """
+    out = fresh_python(
+        "import sys\n"
+        "import torch\n"
+        "from ScaFFold.unet.unet_model import UNet\n"
+        "m = UNet(n_channels=3, n_classes=2, trilinear=False, layers=1, "
+        "group_norm_groups=8)\n"
+        "with torch.no_grad():\n"
+        "    m(torch.randn(1, 3, 16, 16, 16))\n"
+        "print('triton', 'triton' in sys.modules)\n"
+        "print('kernel', 'ScaFFold.unet.triton_group_norm' in sys.modules)\n"
+    )
+    assert "triton False" in out, out
+    assert "kernel False" in out, out
+
+
+def test_cpu_activation_is_applied_on_the_eager_path():
+    """``activation="relu"`` is a promise of the module, not of the kernel."""
+    fast = FastGroupNorm(_GROUPS, 16, activation="relu")
+    plain = nn.GroupNorm(_GROUPS, 16)
+    with torch.no_grad():
+        plain.weight.copy_(fast.weight)
+        plain.bias.copy_(fast.bias)
+    x = _make_input(seed=41, channels=16, size=8)
+    assert torch.equal(fast(x), torch.relu(plain(x)))
+
+
+def test_cpu_activation_none_leaves_the_output_alone():
+    """The default stays a bare GroupNorm -- no accidental global activation."""
+    fast = FastGroupNorm(_GROUPS, 16)
+    x = _make_input(seed=42, channels=16, size=8)
+    assert torch.equal(
+        fast(x), nn.functional.group_norm(x, _GROUPS, fast.weight, fast.bias)
+    )
+
+
+def test_activation_does_not_allocate_a_second_output():
+    """The absorbed ReLU keeps ``nn.ReLU(inplace=True)``'s memory behaviour.
+
+    The old ``nn.Sequential`` spelling mutated the GroupNorm output in place;
+    an out-of-place ``F.relu`` here would add a full activation-sized allocation
+    at all 22 sites.  Checked by handing the module a stand-in kernel whose
+    output we still hold: the ReLU must have rewritten *that* tensor.
+    """
+    fast = FastGroupNorm(_GROUPS, 16, activation="relu")
+    x = _make_input(seed=43, channels=16, size=4)
+    produced = nn.functional.group_norm(x, _GROUPS, fast.weight, fast.bias, fast.eps)
+    assert (produced < 0).any(), "test input must have negatives to clamp"
+    out = fast._activate(produced)
+    assert out.data_ptr() == produced.data_ptr()
+    assert (produced < 0).sum() == 0
 
 
 def test_recompile_limit_is_raised_never_lowered():
@@ -530,8 +922,9 @@ def test_gpu_dctensor_matches_eager_dctensor(dc_cuda, autocast, layout):
     Both layouts are covered because production requests ``channels_last_3d``
     (worker.py) and, with ``PYTORCH_MIOPEN_SUGGEST_NHWC=1`` set as it is there,
     the convolutions really do hand GroupNorm channels-last activations.  Only
-    parity is asserted, not the output layout: both routes return contiguous
-    today regardless of the input layout.
+    parity is asserted, not the output layout: both routes compared here return
+    contiguous regardless of the input layout (the Triton kernel, which does
+    not, is pinned off below and covered by its own tests).
     """
     distconv, ps = dc_cuda
     device = torch.device("cuda")
@@ -550,6 +943,9 @@ def test_gpu_dctensor_matches_eager_dctensor(dc_cuda, autocast, layout):
         return t._tensor if isinstance(t, distconv.DCTensor) else t
 
     def run(compiled):
+        # This test is about the compiled rung of the ladder, which the Triton
+        # one would otherwise pre-empt on the channels-last parametrization.
+        gn_mod.set_triton_enabled(False)
         gn_mod.set_compile_enabled(compiled)
         inp = x.clone().requires_grad_(True)
         fast.zero_grad(set_to_none=True)
@@ -612,6 +1008,9 @@ def test_gpu_compiled_matches_eager(shape, autocast):
         fast.bias.normal_(0.0, 0.1, generator=generator)
 
     def run(compiled):
+        # Compiled-rung test: the inputs here are contiguous, which the Triton
+        # kernel declines anyway, but pin it off so the routing cannot drift.
+        gn_mod.set_triton_enabled(False)
         gn_mod.set_compile_enabled(compiled)
         inp = x.clone().requires_grad_(True)
         fast.zero_grad(set_to_none=True)
@@ -649,6 +1048,7 @@ def test_gpu_steady_state_does_not_recompile():
     """
     from torch._dynamo.utils import counters
 
+    gn_mod.set_triton_enabled(False)  # this is the compiled rung's guard set
     gn_mod.set_compile_enabled(True)
     device = torch.device("cuda")
     fast = FastGroupNorm(_GROUPS, 64).to(device)
@@ -687,6 +1087,7 @@ def test_gpu_activation_checkpointing_matches_eager():
     tolerance = 5e-2
 
     def grads(compiled, checkpointing):
+        gn_mod.set_triton_enabled(False)
         gn_mod.set_compile_enabled(compiled)
         model = _make_unet(seed=0).to(device)
         if checkpointing:
@@ -711,3 +1112,232 @@ def test_gpu_activation_checkpointing_matches_eager():
     assert not gn_mod._compile_failed
     assert_agrees(compiled, eager, "checkpointed grad")
     assert_agrees(compiled_nockpt, compiled, "grad")
+
+
+# ---------------------------------------------------------------------------
+# GPU behavior: the Triton rung
+# ---------------------------------------------------------------------------
+
+
+def _channels_last(t):
+    return t.is_contiguous(memory_format=torch.channels_last_3d)
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize("activation", [None, "relu"])
+@pytest.mark.parametrize("autocast", [False, True])
+def test_gpu_triton_matches_eager(activation, autocast):
+    """The Triton kernel is the default for channels-last input and matches eager.
+
+    ``(1, 64, 32^3)`` channels-last is the production shape family at unit-test
+    size.  Three claims at once: the routing really picks Triton when nothing is
+    forced (the output comes back channels-last, which is the one thing *only*
+    that path does -- eager and Inductor both return contiguous); the values and
+    gradients match the eager reference within reduction-order noise; and the
+    fused activation equals an explicit ReLU on the eager result.
+    """
+    device = torch.device("cuda")
+    generator = torch.Generator(device=device).manual_seed(11)
+    x = torch.randn(1, 64, 32, 32, 32, device=device, generator=generator).to(
+        memory_format=torch.channels_last_3d
+    )
+    grad_out = torch.randn(*x.shape, device=device, generator=generator)
+
+    fast = FastGroupNorm(_GROUPS, 64, activation=activation).to(device)
+    with torch.no_grad():
+        fast.weight.normal_(1.0, 0.1, generator=generator)
+        fast.bias.normal_(0.0, 0.1, generator=generator)
+
+    def run(triton):
+        gn_mod.set_triton_enabled(triton)
+        gn_mod.set_compile_enabled(False)  # eager reference, not Inductor
+        inp = x.clone().requires_grad_(True)
+        fast.zero_grad(set_to_none=True)
+        with torch.autocast("cuda", dtype=torch.bfloat16, enabled=autocast):
+            out = fast(inp)
+        out.backward(grad_out.to(out.dtype))
+        return (
+            out.detach(),
+            inp.grad.detach().clone(),
+            fast.weight.grad.detach().clone(),
+            fast.bias.grad.detach().clone(),
+        )
+
+    eager = run(False)
+    triton = run(None)  # None = the production default, i.e. no override at all
+    assert not gn_mod._triton_failed
+
+    assert _channels_last(triton[0]), "Triton path was not taken (output not NDHWC)"
+    # ... and the control: stock GroupNorm really does return contiguous here,
+    # so the assertion above is a discriminating signal and not a tautology.
+    assert not _channels_last(eager[0])
+    _assert_close(triton[0], eager[0], 1e-5, "output")
+    _assert_close(triton[1], eager[1], 1e-4, "d_input")
+    _assert_close(triton[2], eager[2], 1e-4, "d_weight")
+    _assert_close(triton[3], eager[3], 1e-4, "d_bias")
+    # Autocast's fp32 policy for GroupNorm must survive the swap.
+    assert triton[0].dtype == eager[0].dtype
+    if activation == "relu":
+        assert (triton[0] < 0).sum() == 0
+        assert triton[0].max() > 0
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize("activation", [None, "relu"])
+def test_gpu_triton_dctensor_matches_eager_and_stays_wrapped(dc_cuda, activation):
+    """The production configuration: DCTensor in, DCTensor out, NDHWC preserved.
+
+    worker.py wraps every activation in a DCTensor even at
+    ``dc_num_shards=[1,1,1]``, so this -- not the plain-tensor case -- is the
+    path the benchmark actually runs.  A producing convolution sits in front so
+    that the DCTensor handed to GroupNorm is a genuine intermediate: the unwrap
+    has to be the autograd-aware one or the gradient never reaches the conv.
+    """
+    distconv, ps = dc_cuda
+    device = torch.device("cuda")
+    generator = torch.Generator(device=device).manual_seed(53)
+    x = torch.randn(1, 64, 16, 16, 16, device=device, generator=generator).to(
+        memory_format=torch.channels_last_3d
+    )
+
+    fast = FastGroupNorm(_GROUPS, 64, activation=activation).to(device)
+    producer = nn.Conv3d(64, 64, 1, bias=False).to(
+        device, memory_format=torch.channels_last_3d
+    )
+    with torch.no_grad():
+        fast.weight.normal_(1.0, 0.1, generator=generator)
+        fast.bias.normal_(0.0, 0.1, generator=generator)
+
+    def plain(t):
+        return t._tensor if isinstance(t, distconv.DCTensor) else t
+
+    def run(triton):
+        gn_mod.set_triton_enabled(triton)
+        gn_mod.set_compile_enabled(False)
+        inp = x.clone().requires_grad_(True)
+        fast.zero_grad(set_to_none=True)
+        producer.zero_grad(set_to_none=True)
+        out = fast(producer(distconv.DCTensor.from_shard(inp, ps)))
+        assert isinstance(out, distconv.DCTensor), "DCTensor did not survive"
+        local = distconv.distconv._ToTensor.apply(out)
+        local.float().pow(2).sum().backward()
+        assert inp.grad is not None, "gradient never reached the input"
+        assert producer.weight.grad is not None, "gradient never reached the producer"
+        return (
+            local.detach().clone(),
+            inp.grad.detach().clone(),
+            plain(producer.weight.grad).detach().clone(),
+            plain(fast.weight.grad).detach().clone(),
+            plain(fast.bias.grad).detach().clone(),
+        )
+
+    eager = run(False)
+    triton = run(None)
+    assert not gn_mod._triton_failed
+    assert _channels_last(triton[0]), "Triton path was not taken (output not NDHWC)"
+
+    _assert_close(triton[0], eager[0], 1e-5, "output")
+    for index, what in (
+        (1, "d_input"),
+        (2, "d_producer"),
+        (3, "d_weight"),
+        (4, "d_bias"),
+    ):
+        _assert_close(triton[index], eager[index], 1e-4, what)
+
+
+@pytest.mark.gpu
+def test_gpu_unet_keeps_the_channels_last_chain(monkeypatch):
+    """The whole point: GroupNorm stops breaking the layout chain in the model.
+
+    Before this kernel, every one of the model's GroupNorms consumed
+    ``channels_last_3d`` and emitted contiguous, forcing the next convolution to
+    convert back -- 22 breaks per scale-8 forward.  A hook census asserts that
+    every ``FastGroupNorm`` invocation now takes NDHWC in *and* hands NDHWC out.
+
+    Needs ``PYTORCH_MIOPEN_SUGGEST_NHWC=1`` in the environment for the
+    convolutions to emit channels-last at all; without it there is nothing to
+    preserve and the test skips rather than passing vacuously.
+    """
+    device = torch.device("cuda")
+    model = _make_unet(seed=0).to(device, memory_format=torch.channels_last_3d)
+    x = _make_input(seed=9).to(device).contiguous(memory_format=torch.channels_last_3d)
+
+    census = []
+
+    def hook(module, inputs, output):
+        census.append((_channels_last(inputs[0]), _channels_last(output)))
+
+    for module in model.modules():
+        if isinstance(module, FastGroupNorm):
+            module.register_forward_hook(hook)
+
+    gn_mod.set_triton_enabled(None)
+    with torch.autocast("cuda", dtype=torch.bfloat16), torch.no_grad():
+        model(x)
+
+    assert census, "no GroupNorm ran"
+    if not any(seen_in for seen_in, _ in census):
+        pytest.skip(
+            "convolutions did not emit channels_last_3d; set "
+            "PYTORCH_MIOPEN_SUGGEST_NHWC=1 (the production setting)"
+        )
+    breaks = [i for i, (seen_in, seen_out) in enumerate(census) if seen_in != seen_out]
+    assert not breaks, f"GroupNorm broke the layout chain at sites {breaks}"
+    assert all(seen_out for _, seen_out in census)
+
+
+@pytest.mark.gpu
+def test_gpu_unet_triton_matches_the_compiled_build(monkeypatch):
+    """Whole-model gradients with the Triton kernel vs. without it.
+
+    Compared as relative L2 per parameter against the noise floor
+    ``test_gpu_activation_checkpointing_matches_eager`` documents: with
+    ``cudnn.benchmark`` on and bf16 autocast, two *eager* runs of this model
+    differ by ~4e-3 relative.  Anything of that order is the model's own
+    nondeterminism; a genuinely wrong kernel would be O(1).
+
+    Skips (rather than passing vacuously) when the convolutions are not emitting
+    channels-last, since the Triton kernel would then never engage.
+    """
+    device = torch.device("cuda")
+    x = _make_input(seed=9).to(device).contiguous(memory_format=torch.channels_last_3d)
+    tolerance = 5e-2
+
+    engaged = []
+    original = FastGroupNorm._triton_forward
+
+    def spy(self, local):
+        engaged.append(tuple(local.shape))
+        return original(self, local)
+
+    monkeypatch.setattr(FastGroupNorm, "_triton_forward", spy)
+
+    def grads(triton):
+        gn_mod.set_triton_enabled(triton)
+        gn_mod.set_compile_enabled(True)
+        model = _make_unet(seed=0).to(device, memory_format=torch.channels_last_3d)
+        model.zero_grad(set_to_none=True)
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            out = model(x)
+        out.float().pow(2).mean().backward()
+        return {n: p.grad.detach().clone() for n, p in model.named_parameters()}
+
+    without = grads(False)
+    assert not engaged
+    with_triton = grads(None)
+    if not engaged:
+        pytest.skip(
+            "Triton kernel never engaged; set PYTORCH_MIOPEN_SUGGEST_NHWC=1 "
+            "(the production setting) so the convolutions emit channels-last"
+        )
+    assert not gn_mod._triton_failed
+
+    worst = 0.0
+    for name, reference in without.items():
+        reference = reference.float()
+        error = (with_triton[name].float() - reference).norm().item()
+        relative = error / max(reference.norm().item(), 1e-12)
+        worst = max(worst, relative)
+        assert relative < tolerance, f"grad {name}: rel L2 {relative:.3e}"
+    assert worst < tolerance
