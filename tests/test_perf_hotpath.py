@@ -298,6 +298,36 @@ def test_warmup_ragged_sizes_are_agreed_across_ranks(tiny_trainer, monkeypatch):
     assert sizes == [3, 3, 1, 2]
 
 
+def test_warmup_ragged_all_gather_is_posted_even_without_a_batch(
+    tiny_trainer, monkeypatch
+):
+    # The ragged-size agreement is a collective: a rank whose warmup fetched
+    # no batch at all (empty train loader) must still post the all_gather, or
+    # its peers block in it. The no-batch early return has to come after the
+    # gather, even though such a rank then runs no extra step itself.
+    import torch.distributed as dist
+
+    trainer = tiny_trainer(
+        n_train=4,
+        n_val=3,
+        config_overrides={"local_batch_size": 2, "warmup_batches": 2},
+    )
+    sizes = _stub_warmup_steps(trainer, monkeypatch)
+    gathers = []
+
+    def fake_all_gather(tensor_list, tensor, *args, **kwargs):
+        gathers.append(int(tensor.item()))
+        for out in tensor_list:
+            out.copy_(tensor)
+
+    monkeypatch.setattr(dist, "all_gather", fake_all_gather)
+
+    trainer._warmup_ragged_batches(None)
+
+    assert gathers, "rank skipped the ragged-size all_gather when batch was None"
+    assert sizes == []
+
+
 def test_warmup_rolls_back_state_including_the_ragged_batch(tiny_trainer, monkeypatch):
     # The extra ragged iteration stays inside warmup's snapshot/restore
     # envelope, so nothing it touches survives into training.

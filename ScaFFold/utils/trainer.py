@@ -741,11 +741,15 @@ class PyTorchTrainer(BaseTrainer):
         its peers did not, and the collectives inside that step (the gradient
         all-reduce, the sharded loss reductions) would deadlock.
         """
-        if batch is None:
-            return
         local_batch_size = self.config.local_batch_size
-        available = batch["image"].shape[0]
 
+        # Agree on the ragged sizes FIRST. The all_gather below is a
+        # collective: every rank must post it even when its own warmup fetched
+        # no batch at all (``batch is None``), or its peers block in the
+        # gather. Batch availability is rank-invariant in practice (padded
+        # training shards give every rank the same loader length), but the
+        # collective pattern must not depend on local loader state, so the
+        # no-batch early return comes after the gather.
         ragged_sizes = {len(self.train_sampler) % local_batch_size}
         local_val_ragged = torch.tensor(
             [len(self.val_sampler) % local_batch_size], device=self.device
@@ -755,6 +759,10 @@ class PyTorchTrainer(BaseTrainer):
         ]
         torch.distributed.all_gather(gathered_val_ragged, local_val_ragged)
         ragged_sizes.update(int(size.item()) for size in gathered_val_ragged)
+
+        if batch is None:
+            return
+        available = batch["image"].shape[0]
 
         # The batches already run are all ``available`` wide, and ``available``
         # is itself rank-invariant (the padded training shards give every rank
