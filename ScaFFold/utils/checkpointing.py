@@ -15,6 +15,7 @@
 import math
 import os
 import random
+import shutil
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -630,6 +631,32 @@ class CheckpointManager:
                 pass
             raise
 
+    @staticmethod
+    def _atomic_copy(src, dst):
+        """Copy an already-committed checkpoint onto another name atomically.
+
+        Same discipline as ``_atomic_save`` -- copy into a temp file in the
+        same directory, fsync it, then ``os.replace`` -- so ``dst`` is never
+        observed half-written and a crash mid-copy cannot damage the previous
+        good file there.
+        """
+        src = Path(src)
+        dst = Path(dst)
+        tmp_path = dst.with_name(f"{dst.name}.tmp.{os.getpid()}")
+        try:
+            with open(src, "rb") as fsrc, open(tmp_path, "wb") as fdst:
+                shutil.copyfileobj(fsrc, fdst)
+                fdst.flush()
+                os.fsync(fdst.fileno())
+            os.replace(tmp_path, dst)
+        except Exception:
+            try:
+                if tmp_path.exists():
+                    tmp_path.unlink()
+            except OSError:
+                pass
+            raise
+
     @classmethod
     def _write_to_disk(cls, state_dict, last_path, best_path, is_best, log):
         """Worker function to perform actual disk I/O.
@@ -642,10 +669,20 @@ class CheckpointManager:
         try:
             # Save 'last' atomically.
             cls._atomic_save(state_dict, last_path)
-            # Save 'best' atomically (re-serialize rather than copy a file that
-            # a concurrent writer might still be replacing).
+            # 'best' is byte-identical to the 'last' just committed, so copy
+            # that file instead of pickling and fsyncing the same state a
+            # second time (double the serialization CPU and double the bytes
+            # pushed at the shared filesystem on every improving epoch).
+            #
+            # There is no concurrent writer to race: checkpoint writes are
+            # serialized through a single writer -- the caller's thread in sync
+            # mode, or the one-worker ThreadPoolExecutor in async mode, whose
+            # previous write ``_rank0_save`` drains before submitting the next
+            # -- and only rank 0 ever writes. So this very thread performed the
+            # ``os.replace`` onto ``last_path`` a moment ago and nothing else
+            # can be replacing it now.
             if is_best:
-                cls._atomic_save(state_dict, best_path)
+                cls._atomic_copy(last_path, best_path)
         except Exception:
             if log is not None:
                 log.error("Saving checkpoint failed:\n%s", traceback.format_exc())

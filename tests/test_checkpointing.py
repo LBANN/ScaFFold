@@ -519,6 +519,77 @@ def test_init_sweeps_orphaned_tmp_files(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# R08 -- an improving epoch serializes the state dict once, not twice
+# ---------------------------------------------------------------------------
+
+
+def _count_torch_saves(monkeypatch):
+    """Count ``torch.save`` calls made by the checkpoint writer."""
+    calls = []
+    real_save = torch.save
+
+    def counting_save(obj, f, *args, **kwargs):
+        calls.append(str(getattr(f, "name", f)))
+        return real_save(obj, f, *args, **kwargs)
+
+    monkeypatch.setattr(torch, "save", counting_save)
+    return calls
+
+
+def test_best_checkpoint_copied_not_reserialized(tmp_path, monkeypatch):
+    """The best checkpoint reuses the bytes just written to 'last'.
+
+    An improving epoch used to pickle *and fsync* the identical state dict a
+    second time, doubling both the serialization CPU and the checkpoint bytes
+    pushed at the shared filesystem. Copying the file that was just committed
+    costs one read (usually from page cache) and one write instead.
+    """
+    mgr, model = _make_manager(tmp_path)
+    saves = _count_torch_saves(monkeypatch)
+
+    assert mgr.save_checkpoint(epoch=1, val_loss_avg=0.5) is True
+    assert len(saves) == 1
+    assert saves == [str(mgr.last_ckpt_path) + f".tmp.{os.getpid()}"]
+
+    # A second improving epoch: still exactly one serialization.
+    saves.clear()
+    assert mgr.save_checkpoint(epoch=2, val_loss_avg=0.25) is True
+    assert len(saves) == 1
+
+    # A non-improving epoch writes 'last' only and leaves 'best' alone.
+    best_bytes = mgr.best_ckpt_path.read_bytes()
+    saves.clear()
+    assert mgr.save_checkpoint(epoch=3, val_loss_avg=0.9) is False
+    assert len(saves) == 1
+    assert mgr.best_ckpt_path.read_bytes() == best_bytes
+
+    # And the best checkpoint is still a real, loadable checkpoint holding the
+    # epoch-2 state -- byte-identical to the 'last' file it was copied from.
+    monkeypatch.undo()
+    best = torch.load(mgr.best_ckpt_path, map_location="cpu", weights_only=False)
+    assert best["epoch"] == 2
+    assert best["val_loss_avg"] == pytest.approx(0.25)
+    for name, tensor in model.state_dict().items():
+        assert torch.equal(best["model_state_dict"][name], tensor)
+
+
+def test_best_copy_failure_is_not_silent(tmp_path, monkeypatch):
+    """A failed best-checkpoint copy surfaces and leaves no partial file."""
+    mgr, _ = _make_manager(tmp_path)
+
+    def boom(*args, **kwargs):
+        raise OSError("[Errno 28] No space left on device")
+
+    monkeypatch.setattr("ScaFFold.utils.checkpointing.shutil.copyfileobj", boom)
+
+    with pytest.raises(CheckpointSaveError, match="No space left on device"):
+        mgr.save_checkpoint(epoch=1, val_loss_avg=0.5)
+
+    assert not mgr.best_ckpt_path.exists()
+    assert list(tmp_path.glob("checkpoint_*.tmp.*")) == []
+
+
+# ---------------------------------------------------------------------------
 # VA-1/VA-2/VA-3 -- the remaining rank-0 filesystem windows are fenced
 #
 # Rank 0 is the only rank that touches the run directory, and it does so while
