@@ -18,8 +18,6 @@ from pathlib import Path
 
 import yaml
 
-import ScaFFold.paths
-
 
 def require_positive_int(name: str, value: int) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or value < 1:
@@ -89,7 +87,6 @@ class Config:
             "dataset_dir",
             "fract_base_dir",
             "job_name",
-            "library_root",
             "n_categories",
             "problem_scale",
             "unet_bottleneck_dim",
@@ -209,7 +206,6 @@ class Config:
 
     def __init__(self, config_dict, strict=True):
         self._validate_keys(config_dict, strict)
-        self.library_root = str(ScaFFold.paths.scaffold_root).rstrip("/") + "/ScaFFold/"
         self.base_run_dir = str(Path(config_dict["base_run_dir"]).resolve())
         self.dataset_dir = str(
             Path(config_dict.get("dataset_dir", "datasets/")).resolve()

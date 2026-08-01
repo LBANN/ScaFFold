@@ -5,7 +5,6 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools]
 package-data = { "ScaFFold" = [
     "package_data/weights_ins145.csv",
-    "fractals/var0.15/3DIFS_param/*",
     "configs/*",
 ] }
 include-package-data = true

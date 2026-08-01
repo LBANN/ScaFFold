@@ -54,7 +54,9 @@ The model is trained from a random initialization until convergence, which is de
 1. If running the benchmark for the first time, or running with different fractal parameters (`n_categories`, `variance_threshold`) than previously, generate fractal classes and instances:  
     `scaffold generate_fractals -c ScaFFold/configs/benchmark_default.yml`
 
-    Note that the benchmark ships with an initial set of 50 fractal classes.
+    Fractal category libraries are generated deterministically from the
+    configured seed (under `fract_base_dir/var<...>/seed<...>/`) and reused by
+    later runs with the same seed.
 
 1. Once fractal generation completes, run the benchmark:  
     `torchrun-hpc -N 1 -n 4 --gpus-per-proc 1 $(which scaffold) benchmark -c ScaFFold/configs/benchmark_default.yml`
