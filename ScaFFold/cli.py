@@ -121,8 +121,22 @@ def missing_checkpoint_error(combined_config):
     Reports the first problem found rather than raising, so the caller can make
     this a rank-0 decision and broadcast the verdict instead of letting every
     rank stat the shared filesystem and possibly disagree.
+
+    The directory checked is the *resolved* benchmark run dir -- the one this
+    launch will actually train in -- and not the raw ``run_dir`` key. The two
+    can differ: a config.yaml dumped by a restarted run carries that run's
+    ``run_dir``, so reusing it as a base config had this check stat another
+    run's checkpoints, pass, and let the job die hours later with its dataset
+    already generated. ``resolve_run_dir`` keeps the two in agreement; this
+    prefers the resolved value so they cannot drift apart again.
     """
-    checkpoint_dir = Path(combined_config["run_dir"]) / combined_config.get(
+    run_dir = combined_config.get("benchmark_run_dir") or combined_config.get("run_dir")
+    if not run_dir:
+        return (
+            "Restart requested but no run directory was resolved. Pass "
+            "'--run-dir <path>' (or set run_dir in the config file)."
+        )
+    checkpoint_dir = Path(run_dir) / combined_config.get(
         "checkpoint_dir", "checkpoints"
     )
     expected_checkpoints = (
@@ -140,20 +154,34 @@ def resolve_run_dir(args_dict, combined_config):
 
     The semantics are fixed and unambiguous:
 
-    * ``--run-dir DIR`` (with or without ``--restart``): resume in that exact
-      directory. ``train_from_scratch`` is forced off and ``restart`` on so the
-      downstream benchmark driver takes its restart path.
-    * ``--restart`` without ``--run-dir``: rejected with a clear error. The run
-      directory to resume must be named explicitly; the most recent directory
-      is never guessed.
-    * neither flag: create a fresh timestamped directory under ``base_run_dir``,
+    * a run directory (``--run-dir DIR``, or ``run_dir`` in the config file),
+      with or without a restart flag: resume in that exact directory.
+      ``train_from_scratch`` is forced off and ``restart`` on so the downstream
+      benchmark driver takes its restart path.
+    * a restart requested with no run directory anywhere: rejected with a clear
+      error, before any directory is created. The directory to resume must be
+      named explicitly; the most recent one is never guessed.
+    * neither: create a fresh timestamped directory under ``base_run_dir``,
       retrying with a numeric suffix on a same-second name collision.
 
-    ``combined_config['benchmark_run_dir']`` is set in every path so the driver
-    can always read it. Returns ``(benchmark_run_dir: Path, restarting: bool)``.
+    Both keys are read from the *merged* config, not from the command line
+    alone. A config file is a first-class source for them -- the generated
+    ``restart.sh`` replays a dumped ``config.yaml``, which carries both -- and
+    an absent ``--restart`` cannot outrank a file that sets it, because an
+    unset ``store_true`` flag is indistinguishable from its default. Reading
+    only the command line here let the two disagree: a config-file restart
+    created a *fresh* run directory and only then failed for want of a run dir,
+    and a stale ``run_dir`` inherited from a reused ``config.yaml`` was left in
+    the config for the restart pre-check to stat while training happened
+    somewhere else entirely.
+
+    The resolved answer is written back to ``benchmark_run_dir``, ``restart``
+    and ``run_dir``, so every later reader -- the pre-check, the dumped
+    ``config.yaml``, the benchmark driver -- sees exactly what was decided here.
+    Returns ``(benchmark_run_dir: Path, restarting: bool)``.
     """
-    restart_flag = bool(args_dict.get("restart"))
-    run_dir_arg = args_dict.get("run_dir")
+    restart_flag = bool(combined_config.get("restart") or args_dict.get("restart"))
+    run_dir_arg = combined_config.get("run_dir") or args_dict.get("run_dir")
 
     if run_dir_arg is not None:
         benchmark_run_dir = Path(run_dir_arg)
@@ -163,9 +191,10 @@ def resolve_run_dir(args_dict, combined_config):
         restarting = True
     elif restart_flag:
         raise ValueError(
-            "--restart requires --run-dir: pass the directory of the run to "
-            "resume (e.g. '--restart --run-dir <path>'). The most recent run "
-            "directory is not resolved automatically."
+            "A restart was requested (--restart, or restart: true in the "
+            "config file) but no run directory was given: pass the directory "
+            "of the run to resume (e.g. '--restart --run-dir <path>'). The "
+            "most recent run directory is not resolved automatically."
         )
     else:
         base_run_dir = Path(combined_config["base_run_dir"])
@@ -179,10 +208,15 @@ def resolve_run_dir(args_dict, combined_config):
         )
         restarting = False
 
+    # Write the resolution back, so nothing downstream can re-derive a
+    # different answer from the raw inputs. ``run_dir`` is cleared for a fresh
+    # run: left set, a value inherited from a reused config.yaml names a
+    # directory this run has nothing to do with.
     combined_config["benchmark_run_dir"] = str(benchmark_run_dir)
+    combined_config["restart"] = restarting
+    combined_config["run_dir"] = str(benchmark_run_dir) if restarting else None
     if restarting:
         combined_config["train_from_scratch"] = False
-        combined_config["restart"] = True
     return benchmark_run_dir, restarting
 
 
@@ -528,10 +562,11 @@ def main():
     # caches). A rank that decided for itself would either abort alone --
     # stranding its peers in benchmark.py's timeout-less barrier -- or keep
     # running after rank 0 had already aborted.
+    # Only the benchmark subcommand has run directories or checkpoints, so it
+    # is the only one this applies to: fractal generation reading a benchmark's
+    # config.yaml must not be judged on that run's restart state.
     restart_precheck_error = None
-    if combined_config.get("restart", False):
-        if not combined_config.get("run_dir"):
-            raise ValueError("--restart requires --run-dir")
+    if args.command == "benchmark" and combined_config.get("restart", False):
         if rank == 0:
             restart_precheck_error = missing_checkpoint_error(combined_config)
     restart_precheck_error = comm.bcast(restart_precheck_error, root=0)

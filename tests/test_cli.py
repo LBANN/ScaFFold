@@ -315,6 +315,81 @@ def test_restart_precheck_failure_raises_on_every_rank(monkeypatch, tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# VC-1: the restart state is resolved once, before anything acts on it.
+#
+# ``restart`` and ``run_dir`` can come from the config file as well as the
+# command line (the generated restart.sh replays a dumped config.yaml, which
+# carries both), and an absent ``--restart`` cannot outrank a file that sets
+# it. Resolving the run directory from the command line alone while the
+# pre-check read the merged config made the two disagree.
+# ---------------------------------------------------------------------------
+
+
+def test_yaml_restart_without_run_dir_fails_before_creating_a_run_dir(
+    monkeypatch, tmp_path
+):
+    """``restart: true`` with no run dir aborts without claiming a directory.
+
+    The run directory was resolved from the command line, which said nothing
+    about a restart, so a fresh timestamped directory was created and populated
+    -- and only then did the merged config's ``restart`` trip the pre-check.
+    """
+    cfg = write_config(tmp_path, {"restart": True})
+
+    with pytest.raises(ValueError, match="run directory"):
+        run_cli(monkeypatch, ["scaffold", "benchmark", "-c", str(cfg)])
+
+    assert not (tmp_path / "runs").exists(), "a run dir was created before the abort"
+
+
+def test_reused_restart_config_resolves_to_one_run_dir(monkeypatch, tmp_path):
+    """A config.yaml from a restarted run cannot split the run across two dirs.
+
+    Reusing such a file as a base config left ``run_dir`` pointing at the run
+    it was dumped by while a *fresh* directory was created to train in. The
+    pre-check then passed on the old run's checkpoints, and the job died hours
+    later with its dataset already generated. Whatever the file resolves to,
+    the directory the pre-check judges and the directory the run uses must be
+    the same one.
+    """
+    cfg = write_config(tmp_path)
+    _, first = run_cli(monkeypatch, ["scaffold", "benchmark", "-c", str(cfg)])
+    first_run = Path(first["benchmark"][0]["benchmark_run_dir"])
+    _make_checkpoint(first_run)
+
+    # Restart it once, so its config.yaml records the restart state.
+    run_cli(monkeypatch, _restart_argv(first_run / "config.yaml", first_run))
+    runs_before = sorted(p.name for p in (tmp_path / "runs").iterdir())
+
+    # Now reuse that config.yaml as a plain base config, with no flags at all.
+    _, reused = run_cli(
+        monkeypatch, ["scaffold", "benchmark", "-c", str(first_run / "config.yaml")]
+    )
+
+    (config,) = reused["benchmark"]
+    assert config["run_dir"] == config["benchmark_run_dir"], (
+        "the pre-check's run_dir and the run's directory disagree"
+    )
+    assert Path(config["benchmark_run_dir"]) == first_run
+    assert sorted(p.name for p in (tmp_path / "runs").iterdir()) == runs_before
+
+
+def test_fresh_run_records_no_restart_state(monkeypatch, tmp_path):
+    """A fresh run's config.yaml carries no restart state to inherit."""
+    cfg = write_config(tmp_path)
+
+    _, calls = run_cli(monkeypatch, ["scaffold", "benchmark", "-c", str(cfg)])
+
+    (config,) = calls["benchmark"]
+    assert config["restart"] is False
+    assert config["run_dir"] is None
+    dumped = yaml.safe_load(
+        (Path(config["benchmark_run_dir"]) / "config.yaml").read_text()
+    )
+    assert dumped["restart"] is False and dumped["run_dir"] is None
+
+
+# ---------------------------------------------------------------------------
 # R19: generate_fractals is not a benchmark run
 # ---------------------------------------------------------------------------
 
