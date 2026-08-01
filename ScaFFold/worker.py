@@ -227,6 +227,15 @@ def main(kwargs_dict: dict = {}):
     )
 
     model = model.to(device, memory_format=torch.channels_last_3d)
+    if config.activation_checkpointing:
+        # Has to happen before the DDP wrap: afterwards the model is only
+        # reachable as ``model.module``, and the wrapper does not forward the
+        # method.
+        log.info(
+            "activation_checkpointing TRUE -- recomputing block activations in "
+            "the backward pass instead of storing them"
+        )
+        model.use_checkpointing()
     # Wrap with DistConvDDP that corrects gradient scaling for dc submesh
     model = wrap_model_ddp(model, device, ps)
     # Store ps for use in the training loop

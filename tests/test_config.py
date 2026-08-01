@@ -98,6 +98,39 @@ def test_invalid_type_message_names_type(tmp_path):
         config_utils.load_config(str(path), "bogus")
 
 
+def test_activation_checkpointing_is_a_real_option():
+    """R44: activation checkpointing is reachable from a config, defaulting off.
+
+    The U-Net has always had ``use_checkpointing``, but with no config key and
+    no caller it could not be turned on: any attempt was rejected as an unknown
+    key.
+    """
+    cfg = config_utils.Config(dict(BASE))
+    assert cfg.activation_checkpointing is False
+    assert (
+        config_utils.Config({**BASE, "activation_checkpointing": 1})
+    ).activation_checkpointing is True
+    assert (
+        config_utils.Config({**BASE, "activation_checkpointing": True})
+    ).activation_checkpointing is True
+    assert (
+        config_utils.Config({**BASE, "activation_checkpointing": 0})
+    ).activation_checkpointing is False
+
+
+@pytest.mark.parametrize("value", [2, -1, "yes", 0.0])
+def test_activation_checkpointing_rejects_non_flag_values(value):
+    """Anything that is not a 0/1 (or bool) toggle is rejected by name."""
+    with pytest.raises(ValueError, match="activation_checkpointing"):
+        config_utils.Config({**BASE, "activation_checkpointing": value})
+
+
+def test_activation_checkpointing_documented_in_the_default_config():
+    """The shipped config is the parameter reference, so the key lives there."""
+    text = (CONFIG_DIR / "benchmark_default.yml").read_text()
+    assert "activation_checkpointing:" in text
+
+
 def test_async_save_is_real_option():
     """async_save is an accepted, defaulted option (consumed by the trainer)."""
     cfg = config_utils.Config(dict(BASE))

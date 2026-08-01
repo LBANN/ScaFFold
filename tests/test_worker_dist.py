@@ -172,21 +172,21 @@ def test_ddp_wrap_cpu_uses_none(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_worker_singleton_smoke(monkeypatch, tiny_config, tiny_dataset):
-    """worker.main completes end to end as a one-rank gloo job on CPU.
+def _run_singleton_worker(
+    monkeypatch, tiny_config, tiny_dataset, *, port, config_overrides=None
+):
+    """Run ``worker.main`` as a one-rank gloo job on CPU; return (rc, trainer).
 
-    ScaFFold always runs distributed; the supported singleton case is a
-    one-rank launch. The worker initializes the (gloo) process group itself,
-    builds a real unsharded ParallelStrategy, and tears the group down before
-    rank-0 post-processing.
+    Training itself is stubbed (one synthetic epoch row so post-processing has
+    data), so what this exercises is the worker's own setup path.
     """
     monkeypatch.setenv("MASTER_ADDR", "127.0.0.1")
-    monkeypatch.setenv("MASTER_PORT", "29513")
+    monkeypatch.setenv("MASTER_PORT", str(port))
     # Force the CPU path so initialize_dist selects gloo: this test must not
     # depend on a working GPU/NCCL stack.
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
 
-    cfg = tiny_config()
+    cfg = tiny_config(**(config_overrides or {}))
     kwargs = dict(vars(cfg))
     kwargs.update(
         {
@@ -213,7 +213,20 @@ def test_worker_singleton_smoke(monkeypatch, tiny_config, tiny_dataset):
 
     monkeypatch.setattr(worker_mod.PyTorchTrainer, "train", fake_train)
     result = worker_mod.main(kwargs_dict=kwargs)
-    trainer = seen.get("trainer")
+    return result, seen.get("trainer")
+
+
+def test_worker_singleton_smoke(monkeypatch, tiny_config, tiny_dataset):
+    """worker.main completes end to end as a one-rank gloo job on CPU.
+
+    ScaFFold always runs distributed; the supported singleton case is a
+    one-rank launch. The worker initializes the (gloo) process group itself,
+    builds a real unsharded ParallelStrategy, and tears the group down before
+    rank-0 post-processing.
+    """
+    result, trainer = _run_singleton_worker(
+        monkeypatch, tiny_config, tiny_dataset, port=29513
+    )
 
     assert result == 0
     assert trainer is not None
@@ -227,6 +240,34 @@ def test_worker_singleton_smoke(monkeypatch, tiny_config, tiny_dataset):
     assert trainer.config.global_batch_size == trainer.config.local_batch_size
     # The worker destroyed the process group before rank-0 post-processing.
     assert not torch.distributed.is_initialized()
+
+
+# ---------------------------------------------------------------------------
+# R44: the activation-checkpointing config flag reaches the model
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("flag, expected", [(0, False), (1, True)])
+def test_activation_checkpointing_flag_reaches_the_model(
+    monkeypatch, tiny_config, tiny_dataset, flag, expected
+):
+    """``activation_checkpointing: 1`` turns the U-Net's flag on.
+
+    ``use_checkpointing`` had no caller at all, and it has to be invoked
+    *before* the DDP wrap: afterwards the model is only reachable through
+    ``.module``, which is exactly why this asserts on the wrapped model's
+    inner module.
+    """
+    _result, trainer = _run_singleton_worker(
+        monkeypatch,
+        tiny_config,
+        tiny_dataset,
+        port=29520 + flag,
+        config_overrides={"activation_checkpointing": flag},
+    )
+
+    model = getattr(trainer.model, "module", trainer.model)
+    assert model.checkpointing is expected
 
 
 # ---------------------------------------------------------------------------

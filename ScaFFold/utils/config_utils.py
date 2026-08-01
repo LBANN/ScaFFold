@@ -27,6 +27,19 @@ def require_positive_int(name: str, value: int) -> int:
     return value
 
 
+def require_flag(name: str, value) -> bool:
+    """Validate an on/off config toggle written as 0/1 (or a YAML boolean).
+
+    ``bool(value)`` would quietly accept ``2``, ``-1`` or ``"no"`` (all true),
+    so a mistyped toggle would enable the feature it was meant to disable.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    raise ValueError(f"{name} must be 0, 1, or a boolean; got {value!r}")
+
+
 def validate_unet_dims(problem_scale, unet_bottleneck_dim) -> int:
     """Check that ``problem_scale``/``unet_bottleneck_dim`` describe a real U-Net.
 
@@ -105,6 +118,7 @@ class Config:
             "normalize",
             "group_norm_groups",
             "warmup_batches",
+            "activation_checkpointing",
             "ce_weight_sample_fraction",
             "dataset_reuse_enforce_commit_id",
             "target_dice",
@@ -163,6 +177,7 @@ class Config:
             "loss_freq",
             "group_norm_groups",
             "warmup_batches",
+            "activation_checkpointing",
             "ce_weight_sample_fraction",
             "target_dice",
             "checkpoint_interval",
@@ -252,6 +267,10 @@ class Config:
         self.normalize = config_dict["normalize"]
         self.group_norm_groups = config_dict.get("group_norm_groups", 8)
         self.warmup_batches = config_dict.get("warmup_batches")
+        self.activation_checkpointing = require_flag(
+            "activation_checkpointing",
+            config_dict.get("activation_checkpointing", 0),
+        )
         self.ce_weight_sample_fraction = config_dict.get(
             "ce_weight_sample_fraction", 0.1
         )

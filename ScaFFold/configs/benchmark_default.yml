@@ -39,5 +39,6 @@ loss_freq: 1                       # Number of epochs between logging the overal
 normalize: 1                       # Cateogry search normalization parameter
 group_norm_groups: 8              # Number of groups used by GroupNorm in the UNet blocks.
 warmup_batches: 64                 # How many warmup batches per rank to run before training.
+activation_checkpointing: 0        # If 1, recompute UNet block activations during the backward pass instead of storing them: less memory, more compute.
 ce_weight_sample_fraction: 0.1     # Fraction of training masks to sample when estimating background vs foreground CE weights.
 dataset_reuse_enforce_commit_id: 0 # Enforce matching commit IDs for dataset reuse.
