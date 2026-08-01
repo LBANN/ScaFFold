@@ -284,7 +284,9 @@ def test_restart_precheck_follows_the_broadcast_decision(monkeypatch, tmp_path):
         "verbose": 0,
     }
 
-    comm = _FakeComm(rank=1, size=2, bcast_returns=[rank0_config, None])
+    # Rank 0 broadcasts, in order: no config error, the config, no pre-check
+    # error.
+    comm = _FakeComm(rank=1, size=2, bcast_returns=[None, rank0_config, None])
     _, calls = run_cli(monkeypatch, _restart_argv(cfg, run_dir), comm=comm)
 
     assert len(calls["benchmark"]) == 1
@@ -309,7 +311,7 @@ def test_restart_precheck_failure_raises_on_every_rank(monkeypatch, tmp_path):
     }
     rank0_error = "Restart requested but no checkpoint was found. Expected /nope."
 
-    comm = _FakeComm(rank=1, size=2, bcast_returns=[rank0_config, rank0_error])
+    comm = _FakeComm(rank=1, size=2, bcast_returns=[None, rank0_config, rank0_error])
     with pytest.raises(FileNotFoundError, match="no checkpoint"):
         run_cli(monkeypatch, _restart_argv(cfg, run_dir), comm=comm)
 
@@ -539,6 +541,66 @@ def test_cli_override_bottleneck_out_of_range_rejected(monkeypatch, tmp_path):
     message = str(excinfo.value)
     assert "unet_bottleneck_dim" in message
     assert "problem_scale" in message
+
+
+# ---------------------------------------------------------------------------
+# VC-2: a rank-0 config failure is broadcast, not left to the barrier.
+#
+# Rank 0 builds the whole job's config while every peer waits in a barrier, so
+# anything that raises in there -- the config-file validation, the recomputed
+# bottleneck check, the run-dir resolution -- has to travel to the peers as a
+# decision. Otherwise the user gets a hang instead of the error message.
+# ---------------------------------------------------------------------------
+
+
+def test_config_failure_is_broadcast_before_the_barrier(monkeypatch, tmp_path):
+    """Rank 0 posts its collectives and broadcasts the error it hit."""
+    cfg = write_config(tmp_path)
+    comm = _FakeComm(rank=0, size=2)
+
+    with pytest.raises(ValueError):
+        run_cli(
+            monkeypatch,
+            [
+                "scaffold",
+                "benchmark",
+                "-c",
+                str(cfg),
+                "--problem-scale",
+                "4",
+                "--unet-bottleneck-dim",
+                "4",
+            ],
+            comm=comm,
+        )
+
+    # The peers' barrier was matched, and what they receive names the failure.
+    assert comm.barriers == 1
+    errors = [
+        payload
+        for payload in comm.broadcast
+        if isinstance(payload, tuple) and payload[0] == "ValueError"
+    ]
+    assert errors, f"no error sentinel was broadcast: {comm.broadcast}"
+    assert "unet_bottleneck_dim" in errors[0][1]
+
+
+def test_peer_raises_the_broadcast_config_error(monkeypatch, tmp_path):
+    """A peer rebuilds rank 0's error instead of running with no config."""
+    cfg = write_config(tmp_path)
+    rank0_error = ("ValueError", "unet_bottleneck_dim (4) must be < problem_scale (4)")
+
+    comm = _FakeComm(rank=1, size=2, bcast_returns=[rank0_error])
+    with pytest.raises(ValueError, match="unet_bottleneck_dim"):
+        run_cli(monkeypatch, ["scaffold", "benchmark", "-c", str(cfg)], comm=comm)
+
+
+def test_unknown_error_types_degrade_to_runtime_error():
+    """A non-builtin exception type is still reported, as a RuntimeError."""
+    assert type(cli.rebuild_error("FileNotFoundError", "gone")) is FileNotFoundError
+    rebuilt = cli.rebuild_error("SomeSiteSpecificError", "boom")
+    assert isinstance(rebuilt, RuntimeError)
+    assert "SomeSiteSpecificError" in str(rebuilt) and "boom" in str(rebuilt)
 
 
 # ---------------------------------------------------------------------------

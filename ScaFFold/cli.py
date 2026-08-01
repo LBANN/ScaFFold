@@ -13,6 +13,7 @@
 # SPDX-License-Identifier: (Apache-2.0)
 
 import argparse
+import builtins
 import socket
 import sys
 from datetime import datetime
@@ -218,6 +219,142 @@ def resolve_run_dir(args_dict, combined_config):
     if restarting:
         combined_config["train_from_scratch"] = False
     return benchmark_run_dir, restarting
+
+
+def rebuild_error(type_name, message):
+    """Rebuild rank 0's configuration error on a peer that never saw it.
+
+    Only the type name and message cross the wire: an arbitrary exception
+    object may not survive a pickle round trip, and a failure to unpickle on
+    the receiving side would turn the error being reported back into the hang
+    it was reported to avoid. Builtin exception types are rebuilt as
+    themselves, so a caller's ``except ValueError`` still catches what rank 0
+    raised; anything else degrades to ``RuntimeError`` naming the original
+    type.
+    """
+    cls = getattr(builtins, type_name, None)
+    if isinstance(cls, type) and issubclass(cls, Exception):
+        return cls(message)
+    return RuntimeError(f"{type_name}: {message}")
+
+
+def build_run_config(args, parsers, log, world_size):
+    """Build the job-wide config, and lay down the benchmark's run directory.
+
+    Rank-0-only work: it reads and merges the config files, applies the
+    command-line overrides, validates the result, and -- for the benchmark
+    subcommand -- resolves the run directory, dumps the configs into it and
+    writes its restart script. Returns the merged config the caller broadcasts.
+
+    Raises whatever the validation or the filesystem raises; the caller runs
+    this inside a guard and broadcasts the outcome, since every peer is already
+    waiting in the barrier that follows.
+    """
+    log.debug("args = %s", args)
+
+    # --config may be a single path (generate_fractals) or a list of
+    # paths (benchmark, action="append"): base config plus overrides.
+    config_paths = args.config if isinstance(args.config, list) else [args.config]
+    merged_dict = config_utils.load_config_files(config_paths)
+    # Validate the merged result and derive dependent settings. Every run
+    # parameter must be single-valued; a list is rejected here by name.
+    bench_config = config_utils.Config(merged_dict)
+    bench_config_dict = vars(bench_config)
+    cli_args = vars(args)
+    # Downstream consumers expect a single config path (e.g. to copy it
+    # into the run dir); keep the base config there.
+    cli_args["config"] = config_paths[0]
+
+    # Combine configs, in increasing order of precedence:
+    # argparse default < config file < explicit command-line flag.
+    combined_config = bench_config_dict.copy()
+    # Config only keeps the keys it consumes; the auxiliary keys it accepts
+    # (verbose, datagen_batch_size, ...) never become attributes, so put
+    # the file's values back first. Without this they are absent below and
+    # the argparse default overwrites what the user wrote in the config.
+    for key, value in merged_dict.items():
+        combined_config.setdefault(key, value)
+
+    explicit_cli = explicit_cli_keys(args, parsers)
+    for key, value in cli_args.items():
+        if key == "command":
+            continue
+        if key not in combined_config:
+            combined_config[key] = value
+        elif key in explicit_cli and value is not None:
+            log.info(
+                "Overriding '%s=%s' with '%s=%s'",
+                key,
+                combined_config[key],
+                key,
+                value,
+            )
+            combined_config[key] = value
+    # The subcommand is always owned by the command line.
+    combined_config["command"] = cli_args["command"]
+
+    # Recalculate unet_layers to capture any CLI overrides. The overridden
+    # pair has to be re-validated: Config only saw the config-file values.
+    config_utils.validate_unet_dims(
+        combined_config["problem_scale"], combined_config["unet_bottleneck_dim"]
+    )
+    combined_config["unet_layers"] = (
+        combined_config["problem_scale"] - combined_config["unet_bottleneck_dim"]
+    )
+    config_utils.require_positive_int("n_categories", combined_config["n_categories"])
+
+    # Resolve paths to absolute, matching Config() behavior
+    if "base_run_dir" in combined_config and combined_config["base_run_dir"]:
+        combined_config["base_run_dir"] = str(
+            Path(combined_config["base_run_dir"]).resolve()
+        )
+
+    if "dataset_dir" in combined_config and combined_config["dataset_dir"]:
+        combined_config["dataset_dir"] = str(
+            Path(combined_config["dataset_dir"]).resolve()
+        )
+
+    if "fract_base_dir" in combined_config and combined_config["fract_base_dir"]:
+        combined_config["fract_base_dir"] = str(
+            Path(combined_config["fract_base_dir"]).resolve()
+        )
+
+    # Calculate these variables after override
+    combined_config["vol_size"] = pow(2, combined_config["problem_scale"])
+    combined_config["point_num"] = int(combined_config["vol_size"] ** 3 / 256)
+
+    # The run directory, its config dumps and its restart script belong to
+    # the benchmark subcommand alone. Fractal generation writes nothing
+    # there, and the restart script it used to get replayed
+    # `generate_fractals --restart --run-dir ...` -- flags that subparser
+    # rejects, so the script could only ever exit 2.
+    if args.command == "benchmark":
+        # Resolve the run directory and whether this launch resumes a run.
+        # This sets combined_config["benchmark_run_dir"] on every path, and
+        # writes the resolved restart/run_dir back into the config.
+        benchmark_run_dir, restarting = resolve_run_dir(cli_args, combined_config)
+        if restarting:
+            log.info("Resuming in existing directory: %s", benchmark_run_dir)
+
+        # Add scheduler metadata and machine name to config.yaml
+        combined_config["scheduler_metadata"] = collect_scheduler_metadata()
+        combined_config["machine_name"] = socket.gethostname()
+
+        # Dump configs (Overwrite is okay/desired on restart to capture new job IDs)
+        overrides = {
+            k: v for k, v in cli_args.items() if v is not None and k != "command"
+        }
+        with open(benchmark_run_dir / "overrides.yaml", "w") as file:
+            yaml.dump(overrides, file)
+        with open(benchmark_run_dir / "config.yaml", "w") as file:
+            yaml.dump(combined_config, file)
+
+        # 4. Generate/Update the restart script in the directory. The
+        # communicator size is ground truth for the job scale; environment
+        # sniffing is only the fallback for callers that lack it.
+        create_restart_script(benchmark_run_dir, world_size=world_size)
+
+    return combined_config
 
 
 def main():
@@ -446,114 +583,31 @@ def main():
             "resume (e.g. '--restart --run-dir <path>')."
         )
 
+    # Rank 0 builds the config for the whole job while every other rank waits
+    # in the barrier below. Everything in there can fail on user input (an
+    # unknown config key, an out-of-range bottleneck, a restart with no run
+    # dir) or on the filesystem, and a rank-0-only raise leaves the peers
+    # blocked in that barrier -- a hang instead of the error message the user
+    # needs. The outcome is therefore broadcast, exactly like the restart
+    # pre-check below, and every rank raises the same error together.
+    config_error = None
+    rank0_error = None
     if rank == 0:
-        log.debug("args = %s", args)
-
-        # --config may be a single path (generate_fractals) or a list of
-        # paths (benchmark, action="append"): base config plus overrides.
-        config_paths = args.config if isinstance(args.config, list) else [args.config]
-        merged_dict = config_utils.load_config_files(config_paths)
-        # Validate the merged result and derive dependent settings. Every run
-        # parameter must be single-valued; a list is rejected here by name.
-        bench_config = config_utils.Config(merged_dict)
-        bench_config_dict = vars(bench_config)
-        cli_args = vars(args)
-        # Downstream consumers expect a single config path (e.g. to copy it
-        # into the run dir); keep the base config there.
-        cli_args["config"] = config_paths[0]
-
-        # Combine configs, in increasing order of precedence:
-        # argparse default < config file < explicit command-line flag.
-        combined_config = bench_config_dict.copy()
-        # Config only keeps the keys it consumes; the auxiliary keys it accepts
-        # (verbose, datagen_batch_size, ...) never become attributes, so put
-        # the file's values back first. Without this they are absent below and
-        # the argparse default overwrites what the user wrote in the config.
-        for key, value in merged_dict.items():
-            combined_config.setdefault(key, value)
-
-        explicit_cli = explicit_cli_keys(args, (active_parser, parser))
-        for key, value in cli_args.items():
-            if key == "command":
-                continue
-            if key not in combined_config:
-                combined_config[key] = value
-            elif key in explicit_cli and value is not None:
-                log.info(
-                    "Overriding '%s=%s' with '%s=%s'",
-                    key,
-                    combined_config[key],
-                    key,
-                    value,
-                )
-                combined_config[key] = value
-        # The subcommand is always owned by the command line.
-        combined_config["command"] = cli_args["command"]
-
-        # Recalculate unet_layers to capture any CLI overrides. The overridden
-        # pair has to be re-validated: Config only saw the config-file values.
-        config_utils.validate_unet_dims(
-            combined_config["problem_scale"], combined_config["unet_bottleneck_dim"]
-        )
-        combined_config["unet_layers"] = (
-            combined_config["problem_scale"] - combined_config["unet_bottleneck_dim"]
-        )
-        config_utils.require_positive_int(
-            "n_categories", combined_config["n_categories"]
-        )
-
-        # Resolve paths to absolute, matching Config() behavior
-        if "base_run_dir" in combined_config and combined_config["base_run_dir"]:
-            combined_config["base_run_dir"] = str(
-                Path(combined_config["base_run_dir"]).resolve()
+        try:
+            combined_config = build_run_config(
+                args, (active_parser, parser), log, comm.Get_size()
             )
-
-        if "dataset_dir" in combined_config and combined_config["dataset_dir"]:
-            combined_config["dataset_dir"] = str(
-                Path(combined_config["dataset_dir"]).resolve()
-            )
-
-        if "fract_base_dir" in combined_config and combined_config["fract_base_dir"]:
-            combined_config["fract_base_dir"] = str(
-                Path(combined_config["fract_base_dir"]).resolve()
-            )
-
-        # Calculate these variables after override
-        combined_config["vol_size"] = pow(2, combined_config["problem_scale"])
-        combined_config["point_num"] = int(combined_config["vol_size"] ** 3 / 256)
-
-        # The run directory, its config dumps and its restart script belong to
-        # the benchmark subcommand alone. Fractal generation writes nothing
-        # there, and the restart script it used to get replayed
-        # `generate_fractals --restart --run-dir ...` -- flags that subparser
-        # rejects, so the script could only ever exit 2.
-        if args.command == "benchmark":
-            # Resolve the run directory and whether this launch resumes a run.
-            # This sets combined_config["benchmark_run_dir"] on every path and,
-            # when resuming, forces train_from_scratch off / restart on.
-            benchmark_run_dir, restarting = resolve_run_dir(vars(args), combined_config)
-            if restarting:
-                log.info("Resuming in existing directory: %s", benchmark_run_dir)
-
-            # Add scheduler metadata and machine name to config.yaml
-            combined_config["scheduler_metadata"] = collect_scheduler_metadata()
-            combined_config["machine_name"] = socket.gethostname()
-
-            # Dump configs (Overwrite is okay/desired on restart to capture new job IDs)
-            overrides = {
-                k: v for k, v in cli_args.items() if v is not None and k != "command"
-            }
-            with open(benchmark_run_dir / "overrides.yaml", "w") as file:
-                yaml.dump(overrides, file)
-            with open(benchmark_run_dir / "config.yaml", "w") as file:
-                yaml.dump(combined_config, file)
-
-            # 4. Generate/Update the restart script in the directory. The
-            # communicator size is ground truth for the job scale; environment
-            # sniffing is only the fallback for callers that lack it.
-            create_restart_script(benchmark_run_dir, world_size=comm.Get_size())
+        except Exception as e:
+            combined_config = None
+            rank0_error = e
+            config_error = (type(e).__name__, str(e))
 
     comm.Barrier()
+    config_error = comm.bcast(config_error, root=0)
+    if config_error is not None:
+        # Rank 0 re-raises the original (keeping its traceback); the peers
+        # rebuild it from what crossed the wire.
+        raise rank0_error if rank0_error is not None else rebuild_error(*config_error)
     combined_config = comm.bcast(combined_config, root=0)
 
     # Restart pre-check. Like every other decision here it is made once, on
