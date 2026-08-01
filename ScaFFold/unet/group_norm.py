@@ -30,8 +30,9 @@ compiled path is used only when it is safe and worthwhile, and every rejection
 falls back to stock eager ``F.group_norm``:
 
 * non-CUDA tensors (the CPU test suite never pays compile latency),
-* tensor subclasses such as DistConv's ``DCTensor``, whose ``__torch_dispatch__``
-  wrapper Dynamo cannot trace,
+* tensor subclasses, whose ``__torch_dispatch__`` wrappers Dynamo cannot trace
+  -- except DistConv's ``DCTensor``, which is unwrapped to its local shard
+  around the compiled kernel instead (see ``FastGroupNorm.forward``),
 * an already-compiled enclosing region (the functional call inlines instead),
 * an explicit opt-out via ``SCAFFOLD_GROUPNORM_COMPILE=0``,
 * any failure inside ``torch.compile`` -- logged once, then eager forever after.
@@ -45,6 +46,7 @@ exactly as they do with the eager one, so no determinism gate is needed.
 
 import logging
 import os
+import sys
 
 import torch
 import torch.nn as nn
@@ -153,13 +155,11 @@ def _use_compiled(input):
     """Whether this particular input should take the compiled path."""
     if _compile_failed or _compile_override is False:
         return False
-    # Tensor subclasses (DistConv's DCTensor) route their ops through
-    # __torch_dispatch__, which Dynamo cannot trace; eager keeps the wrapper's
-    # semantics -- including which of its outputs come back wrapped -- exactly
-    # as they are today.  worker.py wraps activations in DCTensor even at
-    # dc_num_shards=[1,1,1], so this fast path engages once that wrap is
-    # skipped for the unsharded case (or whenever the model is driven with
-    # plain tensors, as the tests and the standalone benchmarks do).
+    # Tensor subclasses route their ops through __torch_dispatch__, which
+    # Dynamo cannot trace.  DistConv's DCTensor never reaches this check --
+    # forward() peeks at its local shard instead -- so anything rejected here
+    # is an unknown wrapper, and eager keeps its semantics exactly as they
+    # are today.
     if type(input) is not torch.Tensor:
         return False
     # CPU GroupNorm is not the bottleneck and compiling it would put a
@@ -172,21 +172,61 @@ def _use_compiled(input):
     return True
 
 
+def _dctensor_ops(input):
+    """The ``distconv.distconv`` module when ``input`` is a DCTensor, else None.
+
+    Resolved through ``sys.modules`` instead of an import: a DCTensor can only
+    exist if DistConv is already imported, and this module must stay importable
+    (and the CPU suite runnable) without DistConv installed.
+    """
+    distconv = sys.modules.get("distconv.distconv")
+    if distconv is not None and isinstance(input, distconv.DCTensor):
+        return distconv
+    return None
+
+
 class FastGroupNorm(nn.GroupNorm):
     """``nn.GroupNorm`` that runs its GPU forward through ``torch.compile``.
 
     Identical state: ``weight``/``bias`` of shape ``(num_channels,)``, no
     buffers, so state dicts are interchangeable with plain ``nn.GroupNorm``
     in both directions.
+
+    DistConv's ``DCTensor`` gets the compiled kernel too: its generic
+    ``__torch_dispatch__`` has no GroupNorm-specific handling -- it unwraps to
+    the local shard, runs the stock aten kernels, and rewraps the outputs, so
+    statistics are per-shard and no communication happens at any shard count.
+    ``forward`` moves that same unwrap up in front of the compiled kernel,
+    preserving those semantics exactly (DCTensor in -> DCTensor out) while
+    keeping the fast kernel Dynamo's inability to trace the wrapper would
+    otherwise forfeit.  It cannot copy dispatch's *mechanism*, though: dispatch
+    runs below autograd, where reading ``_tensor`` directly is safe, whereas
+    this runs above it, so the unwrap has to go through DistConv's
+    ``_ToTensor``/``_FromTensor`` autograd pair or the graph back to the
+    producing convolution is severed.
     """
 
     def forward(self, input):
-        # super().forward() is the stock kernel; deferring to it keeps the eager
-        # path identical to nn.GroupNorm's by construction.
-        if not _use_compiled(input):
+        distconv = _dctensor_ops(input)
+        # The eligibility checks look at the local shard for a DCTensor (the
+        # peek is a plain attribute read, no autograd involvement) and at the
+        # tensor itself otherwise.
+        local_view = input._tensor if distconv is not None else input
+        if not _use_compiled(local_view):
+            # super().forward() is the stock kernel; deferring to it keeps the
+            # eager path identical to nn.GroupNorm's by construction.
             return super().forward(input)
         global _compile_failed
         try:
+            if distconv is not None:
+                # _ToTensor is the autograd-aware unwrap DistConv itself uses;
+                # DCTensor.from_shard is the public spelling of _FromTensor.
+                # (There is no public unwrap yet -- upstream ask.)
+                local = distconv._ToTensor.apply(input)
+                out = _get_compiled_group_norm()(
+                    local, self.num_groups, self.weight, self.bias, self.eps
+                )
+                return distconv.DCTensor.from_shard(out, input._parallel_strategy)
             return _get_compiled_group_norm()(
                 input, self.num_groups, self.weight, self.bias, self.eps
             )
