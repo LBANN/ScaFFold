@@ -1337,3 +1337,186 @@ def test_welford_correction_recovers_rstd_in_a_single_tile_reduction(groups, see
         f"rstd rel err {err:.3e} at mu/sigma=1e6 with G={groups}: the tile mean "
         f"correction is not doing its job"
     )
+
+
+# ---------------------------------------------------------------------------
+# 12. the fused finalize and the capped elementwise grid
+# ---------------------------------------------------------------------------
+#
+# ``_stats_finalize``/``_bwd_finalize``/``_dwdb_reduce`` are no longer their own
+# launches: each is recomputed inside the elementwise kernel that consumes it.
+# Two consequences need pinning.
+#
+# * The elementwise grid is capped at ``GNConfig.elem_progs`` and each program
+#   *strides* over its share of the tiles, so that the fused finalize costs
+#   ``nprog_elem * nsplit`` and not ``nblk_elem * nsplit`` reads.  No scale-8
+#   shape and no shape in either suite reaches that path with the shipped
+#   table -- ``nprog_elem == nblk_elem`` at every small shape -- so it has to be
+#   reached deliberately.
+# * The cap is a *performance* knob.  If it could change a single bit of the
+#   output it would break the module's reproducibility contract, since it is
+#   the one plan field that does not follow from the shape alone.
+
+
+@contextlib.contextmanager
+def _forced_config(channels, spatial, **overrides):
+    """Temporarily install a tiling config for one ``(channels, spatial)`` key.
+
+    ``default_config`` keys the frozen table by ``(num_channels, cube-root
+    spatial extent)``, so the spatial extent has to be a perfect cube here.
+    Restores the previous entry (or its absence) and clears the plan cache on
+    the way out, so no other test can see it.
+    """
+    edge = round(spatial ** (1.0 / 3.0))
+    assert edge**3 == spatial, "forced configs need a cube spatial extent"
+    key = (channels, edge)
+    cfg = tgn.GNConfig(*tgn.default_config(channels, spatial).key())
+    for name, value in overrides.items():
+        assert hasattr(cfg, name), name
+        setattr(cfg, name, value)
+    sentinel = object()
+    saved = tgn._TUNED.get(key, sentinel)
+    tgn._TUNED[key] = cfg
+    tgn._plan.cache_clear()
+    try:
+        yield cfg
+    finally:
+        if saved is sentinel:
+            del tgn._TUNED[key]
+        else:
+            tgn._TUNED[key] = saved
+        tgn._plan.cache_clear()
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize(
+    "shape,groups",
+    [
+        ((1, 64, 16, 16, 16), 8),
+        ((2, 64, 16, 16, 16), 8),  # N > 1: the stride is per (blk, n) program
+        ((1, 20, 8, 8, 8), 5),  # capped grid *and* a padded channel axis
+    ],
+)
+@pytest.mark.parametrize("elem_progs", [1, 3, 8])
+@pytest.mark.parametrize("activation", [None, "relu"])
+def test_capped_elementwise_grid_strides_over_its_tiles(
+    shape, groups, elem_progs, activation
+):
+    """Fewer elementwise programs than tiles: each must cover several tiles.
+
+    A grid-stride loop that got its start, stride or trip count wrong leaves
+    part of the output (and of ``d_input``) unwritten -- which, since both are
+    ``torch.empty``, surfaces as plausible stale numbers rather than as a
+    crash.  ``elem_progs=1`` is the extreme: one program per sample walks every
+    tile, so it also pins that the fused statistics are hoisted out of the loop
+    correctly rather than being recomputed per iteration from stale state.
+    """
+    spatial = shape[2] * shape[3] * shape[4]
+    with _forced_config(shape[1], spatial, elem_tile=1024, elem_progs=elem_progs):
+        plan = tgn._plan(shape[0], shape[1], spatial, groups, 0)
+        assert plan.nprog_elem == min(plan.nblk_elem, elem_progs)
+        assert plan.nprog_elem < plan.nblk_elem, (
+            f"the cap has to actually bite: nprog={plan.nprog_elem} "
+            f"nblk={plan.nblk_elem}"
+        )
+        _parity(
+            shape,
+            groups,
+            activation,
+            seed=abs(hash((shape, elem_progs))) % 997,
+            label=f"{shape} elem_progs={elem_progs}",
+        )
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize(
+    "shape,groups", [((2, 64, 16, 16, 16), 8), ((1, 20, 8, 8, 8), 5)]
+)
+def test_elementwise_grid_cap_is_bitwise_neutral(shape, groups):
+    """``elem_progs`` may not change a single bit of any output.
+
+    It is the only field of ``_Plan`` that is a free parameter rather than a
+    consequence of the shape, and the module promises bitwise reproducibility.
+    That promise holds only because the elementwise kernels carry nothing
+    across loop iterations: the fused finalize is computed once per program
+    from the *same* partials with the *same* tile shape, and the tile bodies
+    are pure elementwise.  If tuning this knob ever moved a result, the frozen
+    table would have become part of the numerical contract.
+    """
+    spatial = shape[2] * shape[3] * shape[4]
+    x, weight, bias, grad_out = _make(shape, groups, seed=11)
+    results = []
+    for elem_progs in (0, 1, 5, 64, 4096):
+        with _forced_config(shape[1], spatial, elem_tile=1024, elem_progs=elem_progs):
+            xi = x.detach().clone().requires_grad_(True)
+            wi = weight.detach().clone().requires_grad_(True)
+            bi = bias.detach().clone().requires_grad_(True)
+            y = triton_group_norm(xi, groups, wi, bi, EPS)
+            y.backward(grad_out)
+            results.append(
+                (y.detach().clone(), xi.grad.clone(), wi.grad.clone(), bi.grad.clone())
+            )
+    for elem_progs, got in zip((1, 5, 64, 4096), results[1:]):
+        for name, a, b in zip(("y", "dx", "dweight", "dbias"), got, results[0]):
+            assert torch.equal(a, b), (
+                f"elem_progs={elem_progs} changed {name} bitwise; the grid cap "
+                f"is supposed to be a pure performance knob"
+            )
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize(
+    "shape,groups,elem_progs",
+    [
+        ((1, 64, 16, 16, 16), 8, 0),
+        ((1, 64, 16, 16, 16), 8, 3),
+        ((2, 96, 8, 8, 8), 6, 2),  # padded channel axis, N > 1, capped grid
+    ],
+)
+def test_fused_finalize_publishes_the_statistics(shape, groups, elem_progs):
+    """``mean``/``rstd`` are published by program 0 of the *normalize* kernel.
+
+    There is no separate finalize launch any more: every elementwise program
+    re-derives the statistics from the split-K Welford partials, and program 0
+    is the one that stores them for the backward pass.  A wrong publishing
+    program, a wrong partials index, or a group-mask slip in that fused
+    reduction would hand the backward garbage while leaving the forward -- which
+    uses its own locally computed copy -- perfectly correct.  So check the
+    published tensors directly against float64.
+    """
+    spatial = shape[2] * shape[3] * shape[4]
+    with _forced_config(shape[1], spatial, elem_tile=1024, elem_progs=elem_progs):
+        x, weight, bias, _grad = _make(shape, groups, seed=3)
+        _y, mean, rstd = torch.ops.scaffold_gn.group_norm(
+            x, groups, weight, bias, EPS, None, None
+        )
+        flat = x.double().reshape(shape[0], groups, -1)
+        mean64 = flat.mean(-1)
+        var64 = ((flat - mean64[..., None]) ** 2).mean(-1)
+        assert _rel(mean, mean64) <= FP32_TOL
+        assert _rel(rstd, 1.0 / torch.sqrt(var64 + EPS)) <= FP32_TOL
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize(
+    "shape,groups", [((2, 2048, 1, 1, 1), 8), ((1, 1024, 2, 1, 1), 8)]
+)
+def test_dweight_blocks_are_covered_when_there_are_more_of_them_than_tiles(
+    shape, groups
+):
+    """The dweight/dbias reduction rides in ``_dx_kernel``'s first NDW programs.
+
+    Those blocks are per-*channel*, the elementwise tiles are per-*voxel*, and
+    nothing makes the first outnumber the second: at ``(2, 2048, 1, 1, 1)``
+    there is one elementwise tile and eight dweight blocks.  The grid is
+    ``max(nprog_elem, dwdb_progs)`` for exactly that reason, and a grid of
+    ``nprog_elem`` alone would silently leave 7/8 of ``d_weight`` unwritten.
+    """
+    spatial = shape[2] * shape[3] * shape[4]
+    plan = tgn._plan(shape[0], shape[1], spatial, groups, 0)
+    assert plan.dwdb_progs > plan.nprog_elem, (
+        f"case is supposed to have more dweight blocks ({plan.dwdb_progs}) than "
+        f"elementwise programs ({plan.nprog_elem})"
+    )
+    assert plan.grid_dx == plan.dwdb_progs
+    _parity(shape, groups, seed=13)

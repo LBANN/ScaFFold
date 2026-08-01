@@ -37,19 +37,26 @@ Measured on one MI300A (228 CUs), fp32, ``num_groups=8``, median of 20, the six
 scale-8 UNet GroupNorm shapes, fwd / fwd+bwd in ms::
 
     shape             this      compiled-CL   compiled-CONT   eager-CL fwd
-    [1,64,256^3]    4.28/11.61   19.51/77.01    4.77/11.85      151.2
-    [1,128,128^3]   1.19/ 3.20    7.23/24.64    1.22/ 3.07       36.5
+    [1,64,256^3]    4.23/11.39   19.51/77.01    4.77/11.85      151.2
+    [1,128,128^3]   1.15/ 3.00    7.23/24.64    1.22/ 3.07       36.5
     [1,256,64^3]    0.35/ 0.97    2.27/ 7.42    0.34/ 0.84        9.1
-    [1,512,32^3]    0.14/ 0.59    0.19/ 1.03    0.11/ 0.33        1.7
-    [1,1024,16^3]   0.13/ 0.59    0.10/ 0.39    0.07/ 0.33        0.4
-    [1,2048,8^3]    0.13/ 0.58    0.08/ 0.40    0.07/ 0.33        0.1
+    [1,512,32^3]    0.14/ 0.57    0.19/ 1.03    0.11/ 0.33        1.7
+    [1,1024,16^3]   0.11/ 0.57    0.10/ 0.39    0.07/ 0.33        0.4
+    [1,2048,8^3]    0.11/ 0.57    0.08/ 0.40    0.07/ 0.33        0.1
 
-Over the 22 scale-8 call sites that is **442.8 -> 69.0 ms/step** of GroupNorm
+Over the 22 scale-8 call sites that is **442.8 -> 67.1 ms/step** of GroupNorm
 fwd+bwd against today's production path (compiled GroupNorm on channels-last
-input), i.e. **374 ms/step recovered**, and a dead heat with compiled GroupNorm
+input), i.e. **376 ms/step recovered**, and a dead heat with compiled GroupNorm
 on *contiguous* input (66.4 ms/step) while additionally not breaking the
 layout chain.  The three smallest shapes lose on host dispatch, not on GPU
 work -- see :func:`select_strategy`.
+
+The ``this`` column and the rollup were re-measured after the launch folding
+below (2+2 kernels instead of 3+4, retuned jointly); the same measurement of
+the unfused chain in the same process gives 4.26/11.59, 1.19/3.21, 0.35/1.01,
+0.14/0.63, 0.13/0.63, 0.13/0.62 and a 69.5 ms/step rollup, i.e. **-3.4% over
+the 22 sites** and -1.7% to -9.5% per shape.  The other three columns are from
+the earlier sweep and are unchanged.
 
 Public API
 ==========
@@ -130,10 +137,53 @@ Group statistics span ``S * C/G`` elements (134M at the largest UNet shape), so
 one pass cannot produce them.  Split-K partial reductions land at a fixed
 scratch index and are combined by a fixed-order tree::
 
-    fwd:  stats_partial -> stats_finalize -> normalize            (3 kernels)
-    bwd:  bwd_partial   -> bwd_finalize   -> dwdb_reduce -> dx    (4 kernels)
+    fwd:  stats_partial -> normalize    (2 kernels)
+    bwd:  bwd_partial   -> dx           (2 kernels)
 
 Traffic (``B = numel * itemsize``): 3B forward, 5B backward.
+
+Each pass is **two** launches, not the three and four an unfused split-K chain
+needs: the two finalize passes and the dweight/dbias row reduction are folded
+into the elementwise kernel that consumes them.  ``_normalize_kernel``
+re-derives ``mean``/``rstd`` from the split-K partials itself (and program 0
+stores them for the backward); ``_dx_kernel`` re-derives ``c1``/``c2`` the same
+way and its first ``ceil(C/BLOCK_C)`` programs also do the dweight/dbias
+reduction.  Folding plus the retuning below is worth 8.0-9.5% of fwd+bwd at the
+four smallest shapes, which are host-dispatch bound, 4.9-6.8% at the two middle
+ones and 1.7% at the largest.
+
+The catch, and the reason the tuning table was re-derived rather than inherited:
+**the fusion and the tiling are one problem, not two.**  A fused finalize is
+recomputed by every elementwise *program*, so its cost is
+``nprog_elem * nsplit`` triples of redundant (L2-resident) traffic.  Keeping the
+unfused table's ``nsplit_target=2048`` at ``[1,64,256^3]``, whose flat
+elementwise grid is 131072 programs, asks for 25.7 GB of redundant reads
+against a 4.3 GB tensor and costs **+34% of fwd+bwd** (+70% of the forward).
+Two things fix it, both of them in ``GNConfig``: the elementwise grid is capped
+at ``elem_progs`` programs which then stride over the tiles (so the redundancy
+is bounded by the *grid*, not by the tile count), and ``nsplit_target`` is
+retuned per shape against that cap.  With both, the same shape is 1-2% *faster*
+than the unfused chain.  Do not change one without re-running the other; the
+coordinate-descent tuner is ``review/gn-dctensor/kernel-opt/tune.py``.
+
+Why not one launch per pass
+---------------------------
+A device-scope software barrier (int32 atomics with volatile loads, no float
+atomics, so still bitwise deterministic) collapses each pass to a single
+launch and was measured at 2.3-2.6x on the four smallest shapes.  It is
+deliberately **not** used.  A grid barrier requires every workgroup to be
+co-resident, which caps the grid at the CU count (228 here); the kernel then
+tops out at 0.5-0.9 TB/s against split-K's 2.7, so it loses catastrophically
+the moment the shape is bandwidth-bound rather than dispatch-bound --
+**18.0 ms against 3.0 ms at [1,128,128^3]**, and it does not compile at all at
+``[1,64,256^3]``.  Serving both regimes therefore means shipping two kernel
+families plus a crossover rule, for a whole-model gain of ~3% (65.7 -> 63.6
+ms/step at scale 8); and under CUDA-graph capture, where launch count is free,
+the ten small-shape sites are already only 1.05 ms of a 64.1 ms/step total, so
+the gain is zero.  Hand-rolled inter-workgroup synchronisation is not a good
+trade for 3% in a benchmark whose value depends on being trustworthy and
+reproducible.  The measurements are in
+``review/gn-dctensor/triton-small/RESULTS.md``.
 
 Numerics: Welford, not ``E[x^2]-E[x]^2``
 ========================================
@@ -238,7 +288,7 @@ Layouts
   and streaming voxels -- i.e. a second family of four kernels.  The payoff is
   small: on contiguous input Inductor's compiled GroupNorm already reaches
   89-92% of this device's measured streaming roofline (RESULTS.md 4) -- and the
-  table above confirms it, 66.4 ms/step against this kernel's 69.0 -- so a
+  table above confirms it, 66.4 ms/step against this kernel's 67.1 -- so a
   native NCDHW kernel could win ~10% there, against the 6.4x it wins on
   channels-last input.  If a mixed-layout model ever makes that 10% matter, the
   place to add it is the strategy hook below.
@@ -262,10 +312,11 @@ Fused activation
 ================
 ``activation="relu"`` folds the ReLU into the forward store.  In a store-bound
 kernel that is free (one ``tl.maximum``) and it removes an entire 2B streaming
-pass.  Measured against ``F.relu(triton_group_norm(x))``: 38% off the forward
-and 35% off fwd+bwd at ``[1,64,256^3]`` (6.94 -> 4.29 ms and 18.27 -> 11.80
-ms), 37%/33% at ``[1,128,128^3]``, tapering to ~11% at the launch-bound
-shapes.
+pass.  Measured against ``F.relu(triton_group_norm(x))``: 39% off the forward
+and 35% off fwd+bwd at ``[1,64,256^3]`` (6.83 -> 4.20 ms and 17.82 -> 11.61
+ms), 38%/35% at ``[1,128,128^3]``, 34%/30% at ``[1,256,64^3]``, tapering to
+21%/9% at ``[1,512,32^3]`` and below, where the call is host bound and there is
+less streaming pass to remove.
 
 The backward gates the incoming gradient on the sign of the **pre-activation**
 value, which it *recomputes* from the saved ``(x, mean, rstd, weight, bias)``
@@ -289,11 +340,49 @@ fake/meta kernel and ``register_autograd``.  Consequences:
   it, and rewrap, so a DCTensor goes in and a DCTensor comes out with the graph
   intact.  As with the rest of DistConv today, statistics are per-shard.
 
-Going through the dispatcher costs ~35 us of host time per forward call
-(measured against calling ``_forward``/``_backward`` directly), which is
-invisible at the three largest shapes and is roughly two kernel launches at the
-three smallest.  That is the price of composing, and it is the same order as
-the launch overhead those shapes already pay; see :func:`select_strategy`.
+Where the host time goes, and what is left
+==========================================
+Composing has a price, and at the launch-bound shapes it is now the *dominant*
+cost.  Peeling the layers at ``[1,2048,8^3]``, steady-state wall clock per
+fwd+bwd (median of 200, min of 7 rounds; GPU work is 0.030 ms)::
+
+    kernels + this file's Python (_forward/_backward called directly)  0.145 ms
+    + torch.library dispatcher (both custom ops)                      +0.054 ms
+    + autograd (register_autograd node, save_for_backward, ctx)       +0.338 ms
+    = triton_group_norm(x).backward(dy)                                0.537 ms
+
+    for scale: an *empty* python torch.autograd.Function, fwd+bwd      0.065 ms
+
+So **63% of the call is the autograd layer** and 10% is the dispatcher -- both
+of them the cost of being a real dispatcher op that ``torch.compile`` and
+``DCTensor`` can see, which is the whole point of registering it that way.  Of
+the 0.145 ms this file is responsible for, 0.030 ms is GPU and the remaining
+0.115 ms is four launches plus the allocations, plan lookup and argument
+binding around them: launching every kernel twice measures the marginal cost of
+a whole invocation site at **35 us**, so the four of them are ~0.14 ms of host
+work that the GPU work does not cover.
+
+Two things were considered for that 0.14 ms and rejected:
+
+* **Bypassing ``JITFunction.run`` for a cached ``CompiledKernel`` handle**
+  (8.68 us -> 3.94 us per launch on this node) would recover ~19 us, i.e. 3.3%
+  of the call.  It buys that by asserting that Triton's specialization key --
+  including 16-byte pointer alignment -- is a pure function of the shape.  It is
+  not: this module accepts channels-last *views with a storage offset* and
+  non-contiguous affine parameters, both of which the test suite exercises, and
+  a stale specialization there is a wrong answer rather than a crash.  3.3% on
+  the host-bound shapes only is not worth a silent-miscompute failure mode.
+* **Caching the scratch buffers** across calls saves ~1.7 us per allocation,
+  ~20 us here, and makes the buffers shared mutable state across call sites --
+  correct on one stream, wrong on two, and this module has no way to know.
+
+What that leaves: the kernels are at 95-98% of the streaming roofline at the
+two largest shapes and the fused chain is 1.7-6.8% faster than the unfused one
+there, so there is no meaningful GPU headroom left.  At the launch-bound
+shapes the remaining 0.4 ms is torch's own plumbing, and the two ways to remove
+it are both outside this file: CUDA-graph capture of the training step (which
+takes the ten small scale-8 sites to ~1.05 ms/step of GPU time in total), or a
+C++ autograd node.
 
 Triton is imported lazily, on the first call that actually reaches the kernel,
 so importing this module (or running the CPU test suite) costs nothing.
@@ -335,7 +424,17 @@ class GNConfig:
     ``stats_tile``/``elem_tile`` are *element* budgets per program (the spatial
     block is ``tile // channels_per_voxel``, rounded down to a power of two);
     ``nsplit_target`` is the total number of split-K partials wanted across the
-    batch, so the per-sample split count is ``nsplit_target // N``.
+    batch, so the per-sample split count is ``nsplit_target // N``;
+    ``elem_progs`` caps the elementwise grid, each program then striding over
+    ``ceil(nblk_elem / elem_progs)`` tiles (0 = one program per tile).
+
+    These are **not** independent knobs, and in particular they stopped being
+    independent when the finalize passes were folded into the elementwise
+    kernels: each elementwise *program* now re-reads all ``nsplit`` split-K
+    partials, so the redundant traffic is ``min(nblk_elem, elem_progs) *
+    nsplit`` triples.  Raising ``nsplit_target`` for stats-kernel occupancy and
+    lowering ``elem_progs`` for redundancy pull against each other and were
+    tuned together; see the module docstring.
     """
 
     __slots__ = (
@@ -344,6 +443,7 @@ class GNConfig:
         "nsplit_target",
         "elem_tile",
         "elem_warps",
+        "elem_progs",
     )
 
     def __init__(
@@ -353,12 +453,14 @@ class GNConfig:
         nsplit_target=2048,
         elem_tile=8192,
         elem_warps=4,
+        elem_progs=2048,
     ):
         self.stats_tile = stats_tile
         self.stats_warps = stats_warps
         self.nsplit_target = nsplit_target
         self.elem_tile = elem_tile
         self.elem_warps = elem_warps
+        self.elem_progs = elem_progs
 
     def key(self):
         return (
@@ -367,6 +469,7 @@ class GNConfig:
             self.nsplit_target,
             self.elem_tile,
             self.elem_warps,
+            self.elem_progs,
         )
 
     def __eq__(self, other):
@@ -378,22 +481,33 @@ class GNConfig:
     def __repr__(self):
         return (
             "GNConfig(stats_tile=%d, stats_warps=%d, nsplit_target=%d, "
-            "elem_tile=%d, elem_warps=%d)" % self.key()
+            "elem_tile=%d, elem_warps=%d, elem_progs=%d)" % self.key()
         )
 
 
 #: Frozen tuning table, produced by coordinate descent on fwd+bwd time on one
 #: MI300A (228 CUs) at fp32 with ``num_groups=8``, keyed by the
 #: ``(num_channels, cube-root spatial extent)`` of the scale-8 ScaFFold UNet
-#: GroupNorm sites.  Frozen -- never autotuned at run time -- because the split
-#: count fixes the reduction order and therefore the bits of the result.
+#: GroupNorm sites plus the ``[1,4096,4^3]`` tail.  Frozen -- never autotuned at
+#: run time -- because the split count fixes the reduction order and therefore
+#: the bits of the result.
+#:
+#: Re-derived for the fused (2+2 launch) kernels: every candidate was timed
+#: **interleaved against the incumbent** in one process, because this node moves
+#: the host-bound shapes by +-35% over the minutes a sweep takes.  The table is
+#: keyed on ``(C, edge)`` and not on ``N``: ``nsplit_target`` is a target for
+#: the split count *summed over the batch* (the per-sample count is
+#: ``nsplit_target // N``), so the same entry serves ``N > 1`` with the same
+#: total number of stats programs.  Verified at ``[2,1024,16^3]``,
+#: ``[4,2048,8^3]`` and ``[2,256,64^3]``.
 _TUNED = {
-    (64, 256): GNConfig(8192, 4, 2048, 8192, 4),
-    (128, 128): GNConfig(16384, 4, 512, 16384, 4),
-    (256, 64): GNConfig(4096, 4, 512, 8192, 4),
-    (512, 32): GNConfig(32768, 4, 8192, 8192, 4),
-    (1024, 16): GNConfig(16384, 8, 512, 8192, 4),
-    (2048, 8): GNConfig(32768, 4, 512, 8192, 4),
+    (64, 256): GNConfig(16384, 4, 2048, 8192, 4, 2048),
+    (128, 128): GNConfig(16384, 4, 2048, 16384, 4, 912),
+    (256, 64): GNConfig(16384, 4, 512, 16384, 8, 912),
+    (512, 32): GNConfig(32768, 8, 4096, 16384, 4, 0),
+    (1024, 16): GNConfig(65536, 4, 8192, 16384, 4, 0),
+    (2048, 8): GNConfig(16384, 8, 1024, 8192, 8, 228),
+    (4096, 4): GNConfig(16384, 4, 32, 4096, 8, 0),
 }
 
 _DEFAULT_CONFIG = GNConfig()
@@ -415,11 +529,13 @@ def default_config(num_channels: int, spatial: int) -> GNConfig:
 #: thing.
 STRATEGIES = ("split_k",)
 
-#: Spatial extent (``D*H*W``) below which the split-K chain is expected to be
-#: host-dispatch bound rather than bandwidth bound.  Measured on MI300A: at
-#: ``[1,2048,8^3]`` the seven kernels do 0.031 ms of GPU work behind 0.600 ms
-#: of Python/autograd/launch cost, a 19x overhead tax (RESULTS.md 3).  Purely
-#: informational today -- ``select_strategy`` does not use it yet.
+#: Spatial extent (``D*H*W``) below which the split-K chain is host-dispatch
+#: bound rather than bandwidth bound.  Measured on MI300A: at ``[1,2048,8^3]``
+#: the kernels do 0.030 ms of GPU work behind ~0.58 ms of
+#: Python/autograd/launch cost, and 0.086 ms of that is the *empty*
+#: ``torch.autograd.Function`` wrapper -- i.e. 68% of the remaining call is
+#: torch's plumbing, not this file's.  Purely informational --
+#: ``select_strategy`` does not use it.
 SMALL_SPATIAL_THRESHOLD = 4096
 
 
@@ -428,19 +544,22 @@ def select_strategy(n: int, num_channels: int, spatial: int, num_groups: int) ->
     kernel strategy is chosen for a shape.
 
     Returns a name from :data:`STRATEGIES`.  Today it always returns
-    ``"split_k"``: three forward and four backward kernels with split-K partial
-    reductions, which is bandwidth-optimal for the large shapes but pays seven
-    kernel launches (~17 us each on this node) plus autograd overhead
-    regardless of size -- so below roughly ``SMALL_SPATIAL_THRESHOLD`` voxels
-    the whole call is host bound and a *single-program-per-(n, group)* kernel
-    that never leaves registers would win.
+    ``"split_k"``: two forward and two backward kernels with split-K partial
+    reductions and the finalize passes fused into their consumers.  That is
+    bandwidth-optimal for the large shapes and, after the fusion, within
+    ~0.09 ms of the floor a Python ``autograd.Function`` can reach at the small
+    ones -- so there is much less left here than there looks.  Below roughly
+    ``SMALL_SPATIAL_THRESHOLD`` voxels the call is host bound, but the host cost
+    is now dominated by autograd and the dispatcher rather than by launches:
+    see "Why not one launch per pass" in the module docstring for the one
+    strategy that *would* cut it further and why it is not here.
 
-    That regime is under active investigation; when a second strategy lands,
-    add its name to :data:`STRATEGIES`, return it from here on a rule that is a
-    **pure function of the shape** (determinism depends on it), and branch on
-    it in ``_dispatch`` -- which is the only caller, sits in front of the
-    memoized tiling plan, and is itself called by both ``_forward`` and
-    ``_backward``.  Nothing else in this file needs to change.
+    If a second strategy ever lands, add its name to :data:`STRATEGIES`, return
+    it from here on a rule that is a **pure function of the shape**
+    (determinism depends on it), and branch on it in ``_dispatch`` -- which is
+    the only caller, sits in front of the memoized tiling plan, and is itself
+    called by both ``_forward`` and ``_backward``.  Nothing else in this file
+    needs to change.
     """
     return "split_k"
 
@@ -484,6 +603,14 @@ class _Plan:
         "chunk",
         "block_s_elem",
         "nblk_elem",
+        "nprog_elem",
+        "elements_per_group",
+        "dwdb_rows",
+        "dwdb_block_c",
+        "dwdb_block_r",
+        "dwdb_progs",
+        "grid_dx",
+        "zero_dx",
         "cfg",
     )
 
@@ -517,10 +644,26 @@ class _Plan:
         self.chunk = _cdiv(spatial, self.nsplit)
         self.block_s_elem = max(1, _prev_pow2(cfg.elem_tile // max(1, voxel)))
         self.nblk_elem = _cdiv(spatial, self.block_s_elem)
-
-    @property
-    def elements_per_group(self) -> float:
-        return float(self.spatial * self.group_channels)
+        # Grid cap for the two elementwise kernels; each program then strides
+        # over its share of the tiles.  Bounds the cost of the fused finalize,
+        # which every *program* pays once.
+        self.nprog_elem = (
+            self.nblk_elem
+            if cfg.elem_progs <= 0
+            else min(self.nblk_elem, cfg.elem_progs)
+        )
+        self.elements_per_group = float(spatial * self.group_channels)
+        # Everything the fused dweight/dbias reduction in _dx_kernel needs.
+        # Precomputed rather than derived per call: the launch-bound shapes pay
+        # every Python statement in _backward, and _next_pow2 is a loop.
+        self.dwdb_rows = n * self.nsplit
+        self.dwdb_block_c = min(256, max(64, _next_pow2(channels)))
+        self.dwdb_block_r = 32 if self.dwdb_rows >= 32 else 1
+        self.dwdb_progs = _cdiv(channels, self.dwdb_block_c)
+        # Programs past nprog_elem run no elementwise loop iterations; they
+        # exist only when there are more dweight/dbias blocks than tiles.
+        self.grid_dx = max(self.nprog_elem, self.dwdb_progs)
+        self.zero_dx = self.group_channels * spatial == 1
 
 
 @functools.lru_cache(maxsize=256)
@@ -551,11 +694,8 @@ triton = None
 tl = None
 _welford_combine = None
 _stats_partial_kernel = None
-_stats_finalize_kernel = None
 _normalize_kernel = None
 _bwd_partial_kernel = None
-_bwd_finalize_kernel = None
-_dwdb_reduce_kernel = None
 _dx_kernel = None
 
 
@@ -702,58 +842,56 @@ def _build_kernels():
         tl.store(PMEAN + o, mean, mask=gm)
         tl.store(PM2 + o, m2, mask=gm)
 
-    @_triton.jit
-    def _stats_finalize_kernel(
-        PCNT,
-        PMEAN,
-        PM2,
-        MEAN,
-        RSTD,
-        M,
-        eps,
-        G: tl.constexpr,
-        NSPLIT: tl.constexpr,
-    ):
-        """Merge the NSPLIT partials of one ``(n, g)`` into mean and 1/std."""
-        pid = tl.program_id(0)  # n * G + g
-        n = pid // G
-        g = pid % G
-        offs = tl.arange(0, NSPLIT)
-        idx = (n * NSPLIT + offs) * G + g
-        cnt, mean, m2 = tl.reduce(
-            (tl.load(PCNT + idx), tl.load(PMEAN + idx), tl.load(PM2 + idx)),
-            0,
-            _welford_combine,
-        )
-        # `cnt` equals M by construction; M is passed in so the divisor is the
-        # exact element count rather than a float accumulated from partials.
-        var = m2 / M
-        tl.store(MEAN + pid, mean)
-        tl.store(RSTD + pid, 1.0 / tl.sqrt(var + eps))
-
     # ------------------------------------------------------------ normalize --
     @_triton.jit
     def _normalize_kernel(
         X,
         Y,
+        PCNT,
+        PMEAN,
+        PM2,
         MEAN,
         RSTD,
         W,
         B,
         S,
+        M,
+        eps,
         C: tl.constexpr,
         G: tl.constexpr,
         CG: tl.constexpr,
         GP: tl.constexpr,
         CGP: tl.constexpr,
+        NSPLIT: tl.constexpr,
         BLOCK_S: tl.constexpr,
+        NBLK: tl.constexpr,
+        NPROG: tl.constexpr,
         RELU: tl.constexpr,
         HAS_W: tl.constexpr,
         HAS_B: tl.constexpr,
         MASKED_C: tl.constexpr,
         INT64: tl.constexpr,
     ):
-        blk = tl.program_id(0)
+        """Finalize the split-K statistics, then normalize NBLK/NPROG tiles.
+
+        The finalize is *recomputed by every program* rather than round-tripped
+        through its own kernel launch: merging NSPLIT Welford triples is a few
+        KB of L2-resident traffic and a tree reduction over a ``(NSPLIT, GP)``
+        tile, which is cheaper than the ~9 us launch it replaces.  What it is
+        *not* cheap enough for is being paid once per tile at the largest
+        shapes, where the flat grid is 10^5 programs: the grid is therefore
+        capped at ``NPROG`` and each program strides over its share of the
+        ``NBLK`` tiles, so the redundant read costs ``NPROG * NSPLIT`` and not
+        ``NBLK * NSPLIT``.  See :class:`GNConfig` -- ``nsplit_target``,
+        ``elem_tile`` and ``elem_progs`` are one joint tuning problem, not
+        three independent knobs.
+
+        Every program reads the same partials with the same tile shape, so they
+        all get bit-identical ``mean``/``rstd``; program 0 stores them for the
+        backward.  The loop carries nothing across iterations, so the striding
+        cannot affect the result.
+        """
+        pid = tl.program_id(0)
         n = tl.program_id(1)
 
         offs_g = tl.arange(0, GP)
@@ -764,18 +902,33 @@ def _build_kernels():
         wb = offs_g[:, None] * CG + offs_j[None, :]
         wbm = (offs_g[:, None] < G) & (offs_j[None, :] < CG)
 
-        s0 = blk * BLOCK_S
-        m = tl.broadcast_to((offs_s < S - s0)[:, None, None], (BLOCK_S, GP, CGP))
-        if MASKED_C:
-            m = m & ((offs_g[None, :, None] < G) & (offs_j[None, None, :] < CG))
-        if INT64:
-            base = (n.to(tl.int64) * S + s0) * C
-        else:
-            base = (n * S + s0) * C
-
         gm = offs_g < G
-        mean = tl.load(MEAN + n * G + offs_g, mask=gm, other=0.0)[None, :, None]
-        rstd = tl.load(RSTD + n * G + offs_g, mask=gm, other=0.0)[None, :, None]
+        offs_p = tl.arange(0, NSPLIT)
+        pidx = (n * NSPLIT + offs_p[:, None]) * G + offs_g[None, :]
+        pm = tl.broadcast_to(gm[None, :], (NSPLIT, GP))
+        # Padded group lanes load cnt == 0, which _welford_combine treats as the
+        # identity, so they merge to (0, 0, 0) and are masked off on the store.
+        # Reduced over axis 0 -- the *slowest* axis -- deliberately: reducing
+        # the fastest axis of a 2-D tile makes Triton stage the whole tile
+        # through LDS, which for a (G, NSPLIT) tile is 64 KB per array.
+        cnt_p = tl.load(PCNT + pidx, mask=pm, other=0.0)
+        _cnt, mu, m2 = tl.reduce(
+            (
+                cnt_p,
+                tl.load(PMEAN + pidx, mask=pm, other=0.0),
+                tl.load(PM2 + pidx, mask=pm, other=0.0),
+            ),
+            0,
+            _welford_combine,
+        )
+        # `_cnt` equals M by construction; M is passed in so the divisor is the
+        # exact element count rather than a float accumulated from partials.
+        rs = 1.0 / tl.sqrt(m2 / M + eps)
+        if pid == 0:
+            tl.store(MEAN + n * G + offs_g, mu, mask=gm)
+            tl.store(RSTD + n * G + offs_g, rs, mask=gm)
+        mean = mu[None, :, None]
+        rstd = rs[None, :, None]
         if HAS_W:
             w = tl.load(W + wb, mask=wbm, other=0.0).to(tl.float32)[None, :, :]
         else:
@@ -785,12 +938,21 @@ def _build_kernels():
         else:
             b = tl.zeros((1, GP, CGP), dtype=tl.float32)
 
-        x = tl.load(X + base + off, mask=m, other=0.0).to(tl.float32)
-        xhat = (x - mean) * rstd
-        y = xhat * w + b
-        if RELU:
-            y = tl.maximum(y, 0.0)
-        tl.store(Y + base + off, y.to(Y.dtype.element_ty), mask=m)
+        for blk in tl.range(pid, NBLK, NPROG):
+            s0 = blk * BLOCK_S
+            m = tl.broadcast_to((offs_s < S - s0)[:, None, None], (BLOCK_S, GP, CGP))
+            if MASKED_C:
+                m = m & ((offs_g[None, :, None] < G) & (offs_j[None, None, :] < CG))
+            if INT64:
+                base = (n.to(tl.int64) * S + s0) * C
+            else:
+                base = (n * S + s0) * C
+            x = tl.load(X + base + off, mask=m, other=0.0).to(tl.float32)
+            xhat = (x - mean) * rstd
+            y = xhat * w + b
+            if RELU:
+                y = tl.maximum(y, 0.0)
+            tl.store(Y + base + off, y.to(Y.dtype.element_ty), mask=m)
 
     # ------------------------------------------------------------- backward --
     @_triton.jit
@@ -886,49 +1048,6 @@ def _build_kernels():
         tl.store(PDB + row, accdb, mask=wbm)
 
     @_triton.jit
-    def _bwd_finalize_kernel(
-        PS1,
-        PS2,
-        C1,
-        C2,
-        M,
-        G: tl.constexpr,
-        NSPLIT: tl.constexpr,
-    ):
-        pid = tl.program_id(0)  # n * G + g
-        n = pid // G
-        g = pid % G
-        offs = tl.arange(0, NSPLIT)
-        idx = (n * NSPLIT + offs) * G + g
-        tl.store(C1 + pid, tl.sum(tl.load(PS1 + idx)) / M)
-        tl.store(C2 + pid, tl.sum(tl.load(PS2 + idx)) / M)
-
-    @_triton.jit
-    def _dwdb_reduce_kernel(
-        PDW,
-        PDB,
-        DW,
-        DB,
-        ROWS,
-        C,
-        BLOCK_C: tl.constexpr,
-        BLOCK_R: tl.constexpr,
-    ):
-        pid = tl.program_id(0)
-        offs_c = pid * BLOCK_C + tl.arange(0, BLOCK_C)
-        mc = offs_c < C
-        accw = tl.zeros((BLOCK_C,), dtype=tl.float32)
-        accb = tl.zeros((BLOCK_C,), dtype=tl.float32)
-        for r0 in range(0, ROWS, BLOCK_R):
-            offs_r = r0 + tl.arange(0, BLOCK_R)
-            m = (offs_r[:, None] < ROWS) & mc[None, :]
-            off = offs_r[:, None] * C + offs_c[None, :]
-            accw += tl.sum(tl.load(PDW + off, mask=m, other=0.0), 0)
-            accb += tl.sum(tl.load(PDB + off, mask=m, other=0.0), 0)
-        tl.store(DW + offs_c, accw, mask=mc)
-        tl.store(DB + offs_c, accb, mask=mc)
-
-    @_triton.jit
     def _dx_kernel(
         X,
         DY,
@@ -937,23 +1056,63 @@ def _build_kernels():
         RSTD,
         W,
         B,
-        C1,
-        C2,
+        PS1,
+        PS2,
+        PDW,
+        PDB,
+        DW,
+        DB,
+        ROWS,
         S,
+        M,
         C: tl.constexpr,
         G: tl.constexpr,
         CG: tl.constexpr,
         GP: tl.constexpr,
         CGP: tl.constexpr,
+        NSPLIT: tl.constexpr,
         BLOCK_S: tl.constexpr,
+        NBLK: tl.constexpr,
+        NPROG: tl.constexpr,
+        NDW: tl.constexpr,
+        BLOCK_C: tl.constexpr,
+        BLOCK_R: tl.constexpr,
         RELU: tl.constexpr,
         HAS_W: tl.constexpr,
         HAS_B: tl.constexpr,
         MASKED_C: tl.constexpr,
         INT64: tl.constexpr,
+        ZERO_DX: tl.constexpr,
     ):
-        blk = tl.program_id(0)
+        """The whole backward tail: dweight/dbias, the c1/c2 finalize, and dx.
+
+        Two reductions that used to be their own launches ride along here.  The
+        per-channel dweight/dbias row reduction is done by the first ``NDW``
+        programs of ``n == 0`` (a single pass over an ``(n*nsplit, C)`` scratch,
+        i.e. a few hundred KB); the per-``(n, g)`` c1/c2 finalize is recomputed
+        redundantly by every program, once, before the tile loop -- exactly as
+        in ``_normalize_kernel``, and capped the same way.  The grid is
+        ``(max(NPROG, NDW), n)``; programs past ``NPROG`` exist only to cover
+        the dweight/dbias rows and run no loop iterations.
+        """
+        pid = tl.program_id(0)
         n = tl.program_id(1)
+
+        # ---- dweight / dbias: rows of the split-K scratch, once per channel --
+        if n == 0:
+            if pid < NDW:
+                offs_c = pid * BLOCK_C + tl.arange(0, BLOCK_C)
+                mc = offs_c < C
+                accw = tl.zeros((BLOCK_C,), dtype=tl.float32)
+                accb = tl.zeros((BLOCK_C,), dtype=tl.float32)
+                for r0 in range(0, ROWS, BLOCK_R):
+                    offs_r = r0 + tl.arange(0, BLOCK_R)
+                    rm = (offs_r[:, None] < ROWS) & mc[None, :]
+                    roff = offs_r[:, None] * C + offs_c[None, :]
+                    accw += tl.sum(tl.load(PDW + roff, mask=rm, other=0.0), 0)
+                    accb += tl.sum(tl.load(PDB + roff, mask=rm, other=0.0), 0)
+                tl.store(DW + offs_c, accw, mask=mc)
+                tl.store(DB + offs_c, accb, mask=mc)
 
         offs_g = tl.arange(0, GP)
         offs_j = tl.arange(0, CGP)
@@ -963,46 +1122,72 @@ def _build_kernels():
         wb = offs_g[:, None] * CG + offs_j[None, :]
         wbm = (offs_g[:, None] < G) & (offs_j[None, :] < CG)
 
-        s0 = blk * BLOCK_S
-        m = tl.broadcast_to((offs_s < S - s0)[:, None, None], (BLOCK_S, GP, CGP))
-        if MASKED_C:
-            m = m & ((offs_g[None, :, None] < G) & (offs_j[None, None, :] < CG))
-        if INT64:
-            base = (n.to(tl.int64) * S + s0) * C
+        if ZERO_DX:
+            # One element per group: mean == x and var == 0 identically, so
+            # xhat is the constant 0 and y does not depend on x at all -- the
+            # exact d_input is zero everywhere.  The expression below would
+            # instead return rstd * (dy*w - c1), and since the compiler
+            # contracts that to fma(dy, w, -c1) while c1 was accumulated from
+            # the *rounded* product, what survives is the product's rounding
+            # error amplified by rstd = 1/sqrt(eps) ~ 316 (2.2e-05 at
+            # eps=1e-5).  Answering with the exact zero costs one constexpr.
+            zero = tl.zeros((BLOCK_S, GP, CGP), dtype=tl.float32)
+            for blk in tl.range(pid, NBLK, NPROG):
+                s0 = blk * BLOCK_S
+                m = tl.broadcast_to(
+                    (offs_s < S - s0)[:, None, None], (BLOCK_S, GP, CGP)
+                )
+                if MASKED_C:
+                    m = m & ((offs_g[None, :, None] < G) & (offs_j[None, None, :] < CG))
+                if INT64:
+                    base = (n.to(tl.int64) * S + s0) * C
+                else:
+                    base = (n * S + s0) * C
+                tl.store(DX + base + off, zero.to(DX.dtype.element_ty), mask=m)
         else:
-            base = (n * S + s0) * C
+            gm = offs_g < G
+            offs_p = tl.arange(0, NSPLIT)
+            pidx = (n * NSPLIT + offs_p[:, None]) * G + offs_g[None, :]
+            pm = tl.broadcast_to(gm[None, :], (NSPLIT, GP))
+            c1 = (tl.sum(tl.load(PS1 + pidx, mask=pm, other=0.0), 0) / M)[None, :, None]
+            c2 = (tl.sum(tl.load(PS2 + pidx, mask=pm, other=0.0), 0) / M)[None, :, None]
 
-        gm = offs_g < G
-        mean = tl.load(MEAN + n * G + offs_g, mask=gm, other=0.0)[None, :, None]
-        rstd = tl.load(RSTD + n * G + offs_g, mask=gm, other=0.0)[None, :, None]
-        c1 = tl.load(C1 + n * G + offs_g, mask=gm, other=0.0)[None, :, None]
-        c2 = tl.load(C2 + n * G + offs_g, mask=gm, other=0.0)[None, :, None]
-        if HAS_W:
-            w = tl.load(W + wb, mask=wbm, other=0.0).to(tl.float32)[None, :, :]
-        else:
-            w = tl.full((1, GP, CGP), 1.0, tl.float32)
-        if HAS_B:
-            b = tl.load(B + wb, mask=wbm, other=0.0).to(tl.float32)[None, :, :]
-        else:
-            b = tl.zeros((1, GP, CGP), dtype=tl.float32)
+            mean = tl.load(MEAN + n * G + offs_g, mask=gm, other=0.0)[None, :, None]
+            rstd = tl.load(RSTD + n * G + offs_g, mask=gm, other=0.0)[None, :, None]
+            if HAS_W:
+                w = tl.load(W + wb, mask=wbm, other=0.0).to(tl.float32)[None, :, :]
+            else:
+                w = tl.full((1, GP, CGP), 1.0, tl.float32)
+            if HAS_B:
+                b = tl.load(B + wb, mask=wbm, other=0.0).to(tl.float32)[None, :, :]
+            else:
+                b = tl.zeros((1, GP, CGP), dtype=tl.float32)
 
-        x = tl.load(X + base + off, mask=m, other=0.0).to(tl.float32)
-        dy = tl.load(DY + base + off, mask=m, other=0.0).to(tl.float32)
-        xhat = (x - mean) * rstd
-        if RELU:
-            dy = tl.where(xhat * w + b > 0.0, dy, 0.0)
-        dyw = dy * w
-        dx = rstd * (dyw - c1 - xhat * c2)
-        tl.store(DX + base + off, dx.to(DX.dtype.element_ty), mask=m)
+            for blk in tl.range(pid, NBLK, NPROG):
+                s0 = blk * BLOCK_S
+                m = tl.broadcast_to(
+                    (offs_s < S - s0)[:, None, None], (BLOCK_S, GP, CGP)
+                )
+                if MASKED_C:
+                    m = m & ((offs_g[None, :, None] < G) & (offs_j[None, None, :] < CG))
+                if INT64:
+                    base = (n.to(tl.int64) * S + s0) * C
+                else:
+                    base = (n * S + s0) * C
+                x = tl.load(X + base + off, mask=m, other=0.0).to(tl.float32)
+                dy = tl.load(DY + base + off, mask=m, other=0.0).to(tl.float32)
+                xhat = (x - mean) * rstd
+                if RELU:
+                    dy = tl.where(xhat * w + b > 0.0, dy, 0.0)
+                dyw = dy * w
+                dx = rstd * (dyw - c1 - xhat * c2)
+                tl.store(DX + base + off, dx.to(DX.dtype.element_ty), mask=m)
 
     globals().update(
         _welford_combine=_welford_combine,
         _stats_partial_kernel=_stats_partial_kernel,
-        _stats_finalize_kernel=_stats_finalize_kernel,
         _normalize_kernel=_normalize_kernel,
         _bwd_partial_kernel=_bwd_partial_kernel,
-        _bwd_finalize_kernel=_bwd_finalize_kernel,
-        _dwdb_reduce_kernel=_dwdb_reduce_kernel,
         _dx_kernel=_dx_kernel,
     )
 
@@ -1067,6 +1252,7 @@ def _forward(input, num_groups, weight, bias, eps, activation, out_dtype):
         pm2 = torch.empty_like(pcnt)
         mean = torch.empty((n, groups), device=device, dtype=torch.float32)
         rstd = torch.empty_like(mean)
+        out = torch.empty_like(input, dtype=out_dtype, memory_format=_CL_FORMAT)
 
         _stats_partial_kernel[(plan.nsplit, n)](
             input,
@@ -1086,34 +1272,28 @@ def _forward(input, num_groups, weight, bias, eps, activation, out_dtype):
             INT64=plan.int64,
             num_warps=plan.cfg.stats_warps,
         )
-        _stats_finalize_kernel[(n * groups,)](
+        _normalize_kernel[(plan.nprog_elem, n)](
+            input,
+            out,
             pcnt,
             pmean,
             pm2,
             mean,
             rstd,
-            plan.elements_per_group,
-            eps,
-            G=groups,
-            NSPLIT=plan.nsplit,
-            num_warps=4,
-        )
-
-        out = torch.empty_like(input, dtype=out_dtype, memory_format=_CL_FORMAT)
-        _normalize_kernel[(plan.nblk_elem, n)](
-            input,
-            out,
-            mean,
-            rstd,
             weight,
             bias,
             spatial,
+            plan.elements_per_group,
+            eps,
             C=channels,
             G=groups,
             CG=plan.group_channels,
             GP=plan.groups_p2,
             CGP=plan.group_channels_p2,
+            NSPLIT=plan.nsplit,
             BLOCK_S=plan.block_s_elem,
+            NBLK=plan.nblk_elem,
+            NPROG=plan.nprog_elem,
             RELU=activation == "relu",
             HAS_W=weight is not None,
             HAS_B=bias is not None,
@@ -1167,72 +1347,46 @@ def _backward(grad_out, input, weight, bias, mean, rstd, num_groups, activation)
             num_warps=plan.cfg.stats_warps,
         )
 
-        c1 = torch.empty(n * groups, device=device, dtype=torch.float32)
-        c2 = torch.empty_like(c1)
-        _bwd_finalize_kernel[(n * groups,)](
-            ps1,
-            ps2,
-            c1,
-            c2,
-            plan.elements_per_group,
-            G=groups,
-            NSPLIT=plan.nsplit,
-            num_warps=4,
-        )
-
         d_weight = torch.empty(channels, device=device, dtype=torch.float32)
         d_bias = torch.empty_like(d_weight)
-        rows = n * plan.nsplit
-        block_c = min(256, max(64, _next_pow2(channels)))
-        block_r = 32 if rows >= 32 else 1
-        _dwdb_reduce_kernel[(_cdiv(channels, block_c),)](
+        d_input = torch.empty_like(input, memory_format=_CL_FORMAT)
+        _dx_kernel[(plan.grid_dx, n)](
+            input,
+            grad_out,
+            d_input,
+            mean,
+            rstd,
+            weight,
+            bias,
+            ps1,
+            ps2,
             pdw,
             pdb,
             d_weight,
             d_bias,
-            rows,
-            channels,
-            BLOCK_C=block_c,
-            BLOCK_R=block_r,
-            num_warps=4,
+            plan.dwdb_rows,
+            spatial,
+            plan.elements_per_group,
+            C=channels,
+            G=groups,
+            CG=plan.group_channels,
+            GP=plan.groups_p2,
+            CGP=plan.group_channels_p2,
+            NSPLIT=plan.nsplit,
+            BLOCK_S=plan.block_s_elem,
+            NBLK=plan.nblk_elem,
+            NPROG=plan.nprog_elem,
+            NDW=plan.dwdb_progs,
+            BLOCK_C=plan.dwdb_block_c,
+            BLOCK_R=plan.dwdb_block_r,
+            RELU=activation == "relu",
+            HAS_W=weight is not None,
+            HAS_B=bias is not None,
+            MASKED_C=plan.masked_c,
+            INT64=plan.int64,
+            ZERO_DX=plan.zero_dx,
+            num_warps=plan.cfg.elem_warps,
         )
-
-        d_input = torch.empty_like(input, memory_format=_CL_FORMAT)
-        if plan.group_channels * spatial == 1:
-            # One element per group: mean == x and var == 0 identically, so
-            # xhat is the constant 0 and y does not depend on x at all -- the
-            # exact d_input is zero everywhere.  _dx_kernel would instead
-            # return rstd * (dy*w - c1), and since the compiler contracts that
-            # to fma(dy, w, -c1) while c1 was accumulated from the *rounded*
-            # product, what survives is the product's rounding error amplified
-            # by rstd = 1/sqrt(eps) ~ 316 (2.2e-05 at eps=1e-5).  Answering
-            # with the exact zero costs one integer test per backward call.
-            d_input.zero_()
-        else:
-            _dx_kernel[(plan.nblk_elem, n)](
-                input,
-                grad_out,
-                d_input,
-                mean,
-                rstd,
-                weight,
-                bias,
-                c1,
-                c2,
-                spatial,
-                C=channels,
-                G=groups,
-                CG=plan.group_channels,
-                GP=plan.groups_p2,
-                CGP=plan.group_channels_p2,
-                BLOCK_S=plan.block_s_elem,
-                RELU=activation == "relu",
-                HAS_W=weight is not None,
-                HAS_B=bias is not None,
-                MASKED_C=plan.masked_c,
-                INT64=plan.int64,
-                num_warps=plan.cfg.elem_warps,
-            )
     return d_input, d_weight, d_bias
 
 
