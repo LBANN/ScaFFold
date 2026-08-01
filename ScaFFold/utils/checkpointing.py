@@ -295,17 +295,29 @@ class CheckpointManager:
             self._raise_save_error(error)
 
     def snapshot_training_state(self) -> Dict[str, Any]:
-        """Capture mutable in-memory training state without writing a checkpoint."""
+        """Capture mutable in-memory training state without writing a checkpoint.
+
+        The copy is taken on the *host*. Cloning device-to-device instead would
+        hold roughly 3x parameter bytes of accelerator memory (the weights plus
+        Adam's two moment buffers) for as long as the snapshot lives -- which is
+        the whole of warmup, precisely where the run establishes its peak
+        memory. ``restore_training_state`` puts the state back on the model's
+        own device, so the detour is invisible to callers.
+        """
         model_ref = self.model.module if hasattr(self.model, "module") else self.model
         return {
-            "model_state_dict": self._clone_state_dict(model_ref.state_dict()),
-            "optimizer_state_dict": self._clone_state_dict(self.optimizer.state_dict())
+            "model_state_dict": self._transfer_dict_to_cpu(model_ref.state_dict()),
+            "optimizer_state_dict": self._transfer_dict_to_cpu(
+                self.optimizer.state_dict()
+            )
             if self.optimizer
             else None,
-            "scheduler_state_dict": self._clone_state_dict(self.scheduler.state_dict())
+            "scheduler_state_dict": self._transfer_dict_to_cpu(
+                self.scheduler.state_dict()
+            )
             if self.scheduler
             else None,
-            "grad_scaler_state_dict": self._clone_state_dict(
+            "grad_scaler_state_dict": self._transfer_dict_to_cpu(
                 self.grad_scaler.state_dict()
             )
             if self.grad_scaler
@@ -315,7 +327,13 @@ class CheckpointManager:
         }
 
     def restore_training_state(self, snapshot: Dict[str, Any]) -> None:
-        """Restore an in-memory training snapshot."""
+        """Restore an in-memory training snapshot.
+
+        The snapshot is host-resident (see ``snapshot_training_state``); the
+        ``load_state_dict`` calls below copy into the live parameters and move
+        optimizer state onto each parameter's device, so the restored state
+        ends up exactly where it started.
+        """
         model_ref = self.model.module if hasattr(self.model, "module") else self.model
         model_ref.load_state_dict(snapshot["model_state_dict"])
 
@@ -696,8 +714,8 @@ class CheckpointManager:
 
         ``Tensor.cpu()`` is a no-op for tensors already on CPU (it returns the
         same object), so CPU-resident state must be cloned explicitly;
-        otherwise the async writer would serialize tensors the training loop
-        keeps mutating in place.
+        otherwise the async writer -- or the warmup snapshot -- would keep an
+        alias of tensors the training loop mutates in place.
         """
         if torch.is_tensor(obj):
             t = obj.detach()
@@ -708,19 +726,6 @@ class CheckpointManager:
             return [self._transfer_dict_to_cpu(v) for v in obj]
         elif isinstance(obj, tuple):
             return tuple(self._transfer_dict_to_cpu(v) for v in obj)
-        else:
-            return obj
-
-    def _clone_state_dict(self, obj):
-        """Recursively clone tensors so in-memory snapshots are isolated."""
-        if torch.is_tensor(obj):
-            return obj.detach().clone()
-        elif isinstance(obj, dict):
-            return {k: self._clone_state_dict(v) for k, v in obj.items()}
-        elif isinstance(obj, list):
-            return [self._clone_state_dict(v) for v in obj]
-        elif isinstance(obj, tuple):
-            return tuple(self._clone_state_dict(v) for v in obj)
         else:
             return obj
 

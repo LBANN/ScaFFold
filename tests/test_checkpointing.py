@@ -706,6 +706,115 @@ def test_cpu_tensors_cloned(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# R09 -- the warmup snapshot is host-resident, not a device-side copy
+# ---------------------------------------------------------------------------
+
+
+def _all_tensors(obj):
+    """Yield every tensor reachable from a snapshot payload."""
+    if torch.is_tensor(obj):
+        yield obj
+    elif isinstance(obj, dict):
+        for value in obj.values():
+            yield from _all_tensors(value)
+    elif isinstance(obj, (list, tuple)):
+        for value in obj:
+            yield from _all_tensors(value)
+
+
+class _StubOptimizer:
+    """Stand-in exposing only the state_dict the snapshot reads."""
+
+    def __init__(self, state):
+        self._state = state
+
+    def state_dict(self):
+        return self._state
+
+
+def test_snapshot_holds_no_device_resident_tensors(tmp_path):
+    """``snapshot_training_state`` copies to the host, not device-to-device.
+
+    The snapshot used to clone model and optimizer state on whatever device
+    they lived on, pinning ~3x parameter bytes of accelerator memory (model
+    clone + Adam's two moment buffers) from before the first warmup batch
+    until the restore -- i.e. straight across warmup's own peak, which is
+    where a memory-marginal configuration OOMs. Device tensors are simulated
+    with FakeTensorMode so this runs without a GPU.
+    """
+    from torch._subclasses.fake_tensor import FakeTensorMode
+
+    mgr, _ = _make_manager(tmp_path)
+
+    with FakeTensorMode():
+        mgr.model = torch.nn.Linear(8, 4, device="cuda")
+        mgr.optimizer = _StubOptimizer(
+            {
+                "state": {
+                    0: {
+                        "step": torch.zeros(1, device="cuda"),
+                        "exp_avg": torch.zeros(4, 8, device="cuda"),
+                        "exp_avg_sq": torch.zeros(4, 8, device="cuda"),
+                    }
+                },
+                "param_groups": [{"params": [0], "lr": 0.1}],
+            }
+        )
+        snapshot = mgr.snapshot_training_state()
+
+        devices = {t.device.type for t in _all_tensors(snapshot)}
+
+    assert devices == {"cpu"}, f"snapshot kept device-resident tensors: {devices}"
+
+
+def test_snapshot_restore_round_trips_values_and_devices(tmp_path):
+    """A host-resident snapshot still restores exact state on its own device.
+
+    ``load_state_dict`` copies into the live parameters and moves optimizer
+    state back to each parameter's device, so nothing downstream has to know
+    the snapshot took a detour through the host.
+    """
+    mgr, model = _make_manager(tmp_path)
+    optimizer = mgr.optimizer
+
+    # One applied step so the optimizer carries real per-parameter state.
+    model(torch.randn(2, 8)).sum().backward()
+    optimizer.step()
+    optimizer.zero_grad(set_to_none=True)
+
+    reference_params = {k: v.detach().clone() for k, v in model.state_dict().items()}
+    reference_state = {
+        pid: {k: v.detach().clone() for k, v in state.items() if torch.is_tensor(v)}
+        for pid, state in optimizer.state_dict()["state"].items()
+    }
+    param_devices = {k: v.device for k, v in model.state_dict().items()}
+
+    snapshot = mgr.snapshot_training_state()
+
+    # Warmup-shaped mutation: more steps, then roll back.
+    for _ in range(3):
+        model(torch.randn(2, 8)).sum().backward()
+        optimizer.step()
+        optimizer.zero_grad(set_to_none=True)
+    assert not torch.equal(model.state_dict()["weight"], reference_params["weight"])
+
+    mgr.restore_training_state(snapshot)
+
+    for name, tensor in model.state_dict().items():
+        assert torch.equal(tensor, reference_params[name]), name
+        assert tensor.device == param_devices[name], name
+    restored_state = optimizer.state_dict()["state"]
+    for pid, state in reference_state.items():
+        for key, value in state.items():
+            assert torch.equal(restored_state[pid][key], value), (pid, key)
+    for group, param in zip(optimizer.param_groups, model.parameters()):
+        del group
+        for value in optimizer.state[param].values():
+            if torch.is_tensor(value) and value.dim() > 0:
+                assert value.device == param.device
+
+
+# ---------------------------------------------------------------------------
 # F50 -- a final checkpoint is written when the run exits between intervals
 # ---------------------------------------------------------------------------
 
