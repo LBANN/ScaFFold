@@ -13,6 +13,7 @@
 # SPDX-License-Identifier: (Apache-2.0)
 
 import csv
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -319,8 +320,6 @@ class TestProfilerTraceExport:
         post-processing, so a raise here kills the profiling rank and leaves
         every other rank blocked in that barrier until the collective timeout.
         """
-        import logging
-
         import ScaFFold.worker as worker
 
         log = logging.getLogger("test_zero_step_export")
@@ -340,8 +339,6 @@ class TestProfilerTraceExport:
 
     def test_successful_export_writes_a_trace(self, tmp_path, caplog):
         """A profiler with a completed window still writes its trace (control)."""
-        import logging
-
         from torch.profiler import ProfilerActivity, profile, schedule
 
         import ScaFFold.worker as worker
@@ -364,8 +361,6 @@ class TestProfilerTraceExport:
 
     def test_trace_lands_in_the_run_dir(self, tmp_path, caplog):
         """R23: the trace goes to the run dir, not whatever CWD happens to be."""
-        import logging
-
         import ScaFFold.worker as worker
 
         prof = self._stepped_profiler()
@@ -387,8 +382,6 @@ class TestProfilerTraceExport:
         self, tmp_path, world_size, ranks_per_node, expected
     ):
         """R23: the N field is a node count, and never rounds a node away."""
-        import logging
-
         import ScaFFold.worker as worker
 
         prof = self._stepped_profiler()
@@ -493,7 +486,7 @@ class TestProfilerSchedule:
         assert is_local
         return ctx
 
-    def test_wait_zero_does_not_record_step_zero(self, monkeypatch, capsys):
+    def test_wait_zero_does_not_record_step_zero(self, monkeypatch, caplog):
         """PROFILE_TORCH_WAIT=0 is clamped so step 0 records nothing.
 
         worker.main enters the profiler context around checkpoint cleanup and
@@ -509,11 +502,12 @@ class TestProfilerSchedule:
         import ScaFFold.utils.perf_measure as perf_measure
 
         try:
-            with monkeypatch.context() as m:
-                ctx = self._context_with(m, {"PROFILE_TORCH_WAIT": "0"})
-                assert ctx.schedule(0) == ProfilerAction.NONE
-            output = capsys.readouterr().out
-            assert "PROFILE_TORCH_WAIT" in output
+            with caplog.at_level(logging.WARNING, logger=perf_measure.logger.name):
+                with monkeypatch.context() as m:
+                    ctx = self._context_with(m, {"PROFILE_TORCH_WAIT": "0"})
+                    assert ctx.schedule(0) == ProfilerAction.NONE
+            messages = " ".join(record.getMessage() for record in caplog.records)
+            assert "PROFILE_TORCH_WAIT" in messages
         finally:
             importlib.reload(perf_measure)
 

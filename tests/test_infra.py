@@ -26,6 +26,7 @@ import logging
 import os
 
 import numpy as np
+import pytest
 import torch
 
 from ScaFFold.utils.data_loading import FractalDataset
@@ -245,19 +246,23 @@ def _debug_logger(name):
     return log
 
 
+# The bug was a CUDA-free host taking the CUDA path, so these only mean
+# something where CUDA is genuinely unavailable.
+_requires_no_cuda = pytest.mark.skipif(
+    torch.cuda.is_available(), reason="covers the CPU-only path"
+)
+
+
+@_requires_no_cuda
 def test_mem_stats_without_cuda(caplog):
     """``mem_stats`` reports "no GPU" instead of raising on a CPU-only host."""
-    if torch.cuda.is_available():
-        import pytest
-
-        pytest.skip("test covers the CPU-only path")
-
     stats = mem_stats()
 
     assert stats["cuda_available"] is False
     assert "rank" in stats
 
 
+@_requires_no_cuda
 def test_gather_and_print_mem_without_cuda(caplog):
     """A DEBUG-level CPU run logs a fallback instead of crashing.
 
@@ -265,11 +270,6 @@ def test_gather_and_print_mem_without_cuda(caplog):
     ``-v`` used to die in trainer construction with "No CUDA GPUs are
     available".
     """
-    if torch.cuda.is_available():
-        import pytest
-
-        pytest.skip("test covers the CPU-only path")
-
     log = _debug_logger("test_gather_and_print_mem_without_cuda")
     with caplog.at_level(logging.DEBUG, logger=log.name):
         gather_and_print_mem(log, "after_trainer_setup")

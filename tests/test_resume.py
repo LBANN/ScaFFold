@@ -364,7 +364,7 @@ def test_restart_of_completed_run_trains_and_saves_nothing(tmp_path, caplog):
     (the last checkpoint already covers the completed epochs) rather than
     saving with an unbound ``val_loss_avg``. ``train()`` has to return normally
     so the worker's post-processing still runs off the CSV already on disk, and
-    the run must say plainly that there was nothing to resume.
+    the run must say plainly that it had no epoch left to run.
     """
     log = logging.getLogger("resume.r01")
     run = tmp_path / "run"
@@ -416,7 +416,38 @@ def test_restart_of_completed_run_trains_and_saves_nothing(tmp_path, caplog):
     assert ckpt.read_bytes() == before
     epochs = [ln.split(",")[0] for ln in csv.read_text().splitlines()[1:]]
     assert epochs == ["1", "2"]
-    assert "nothing to resume" in caplog.text.lower()
+    assert "no epoch left to run" in caplog.text.lower()
+
+
+def test_fresh_run_with_no_epochs_does_not_claim_a_resume(tmp_path, caplog):
+    """A fresh ``epochs: 0`` run reports the truth: nothing was resumed.
+
+    The same message covers both ways of entering ``train()`` with no epoch to
+    run, so it must not describe one of them as the other. This run has no
+    checkpoint and never asked for one -- telling its user "there was nothing
+    to resume" sends them looking for a checkpoint that was never part of the
+    story.
+    """
+    log = logging.getLogger("resume.va4")
+    run = tmp_path / "run"
+    run.mkdir()
+
+    trainer = _stub_trainer(
+        run,
+        train_from_scratch=True,
+        log=log,
+        epochs=0,
+        checkpoint_interval=1,
+    )
+    trainer.cleanup_or_resume()
+    assert trainer.start_epoch == 1  # a fresh run: nothing was resumed
+
+    with caplog.at_level(logging.WARNING):
+        trainer.train()
+
+    assert "no epoch left to run" in caplog.text.lower()
+    assert "nothing to resume" not in caplog.text.lower()
+    assert not trainer.checkpoint_manager.last_ckpt_path.exists()
 
 
 def test_converged_resume_does_not_retrain(tiny_trainer, monkeypatch):

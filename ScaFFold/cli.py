@@ -100,9 +100,16 @@ def explicit_cli_keys(args, parsers):
     parser). Only these may outrank a config-file setting; everything else in
     the namespace is an argparse default, which is the weakest source.
 
-    The one ambiguity is a flag passed with exactly its default value: it looks
-    absent, so a config-file entry wins over it. Both spellings then agree on
-    the default, which is the only value the flag could have contributed.
+    The one ambiguity is a flag passed with exactly its default value: it is
+    indistinguishable from an absent flag, so a config-file entry outranks it.
+    Where the flag has no default (``None``) that is harmless -- passing a
+    value always makes it explicit -- but the two flags that do have one,
+    ``--datagen-batch-size`` (10000) and ``-v`` (0), lose the argument in that
+    one case: ``--datagen-batch-size 10000`` next to ``datagen_batch_size: 500``
+    in the config file yields 500. The alternative is to give every flag a
+    ``None`` default and re-derive the real defaults elsewhere, which buys a
+    narrow correctness win by scattering the defaults; the ambiguity is
+    documented instead.
     """
     explicit = set()
     for name, value in vars(args).items():
@@ -611,7 +618,9 @@ def main():
     if config_error is not None:
         # Rank 0 re-raises the original (keeping its traceback); the peers
         # rebuild it from what crossed the wire.
-        raise rank0_error if rank0_error is not None else rebuild_error(*config_error)
+        if rank0_error is not None:
+            raise rank0_error
+        raise rebuild_error(*config_error)
     combined_config = comm.bcast(combined_config, root=0)
 
     # Restart pre-check. Like every other decision here it is made once, on

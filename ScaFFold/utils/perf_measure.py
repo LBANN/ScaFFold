@@ -12,11 +12,19 @@
 #
 # SPDX-License-Identifier: (Apache-2.0)
 
+import logging
 import os
 from contextlib import nullcontext
 
 CALI_PERF_ENV_VAR = "CALI_CONFIG"
 TORCH_PERF_ENV_VAR = "PROFILE_TORCH"
+
+# This module is imported before (and independently of) the run's MPI logger,
+# so it keeps its own. Everything it has to say is about the user's profiling
+# request not being honored as written, which belongs on a diagnostic channel
+# that a caller can filter or capture -- not on stdout, where it lands in the
+# middle of whatever the run is printing.
+logger = logging.getLogger(__name__)
 
 
 def _profiler_env_flag(name):
@@ -39,8 +47,11 @@ if CALI_PERF_ENV_VAR in os.environ:
 
         _CALI_PERF_ENABLED = True
     except Exception as e:
-        print("User requested Caliper annotations, but could not import Caliper")
-        print(f"Exception: {e}")
+        logger.warning(
+            "User requested Caliper annotations, but could not import Caliper: %s: %s",
+            type(e).__name__,
+            e,
+        )
 
 # The torch profiler is gated purely on its own environment variable: Caliper
 # and the torch profiler may both be enabled at once.
@@ -51,8 +62,9 @@ if _profiler_env_flag(TORCH_PERF_ENV_VAR):
 
         TORCH_PERF_ENABLED = True
     except Exception:
-        print(
-            "User requested PyTorch profiling, but could not import the PyTorch profiler"
+        logger.warning(
+            "User requested PyTorch profiling, but could not import the "
+            "PyTorch profiler"
         )
 
 
@@ -131,7 +143,7 @@ def get_torch_context(ranks_per_node, rank):
         # thing the bounded window exists to prevent.
         wait = _profiler_env_int("PROFILE_TORCH_WAIT", 1)
         if wait < 1:
-            print(
+            logger.warning(
                 "PROFILE_TORCH_WAIT must be at least 1: the profiler window "
                 "opens before the warmup batches, whose work would otherwise "
                 "accumulate in host memory as one unbounded step. Using "
