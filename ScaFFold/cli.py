@@ -555,12 +555,16 @@ def main():
 
     comm = MPI.COMM_WORLD
     rank = comm.Get_rank()
-    # Every rank runs this identically, before any run directory is created,
-    # so a mis-launched job aborts uniformly instead of leaving per-rank run
-    # dirs behind and hanging.
-    check_launcher_world_size(comm.Get_size())
     # Parse the command-line arguments.
     args = parser.parse_args()
+    # Every rank runs this identically, before any run directory is created, so
+    # a mis-launched job aborts uniformly instead of leaving per-rank run dirs
+    # behind and hanging. It runs *after* parsing so that the arguments argparse
+    # handles by itself -- ``--help``, a usage error -- still behave: asking
+    # what the flags are is not a job launch, and answering it with a launcher
+    # mismatch (which is exactly the environment someone debugging one is
+    # sitting in) helps nobody.
+    check_launcher_world_size(comm.Get_size())
     subcommand_parsers = {
         "benchmark": benchmark_parser,
         "generate_fractals": generate_fractals_parser,

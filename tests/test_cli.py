@@ -181,6 +181,28 @@ def test_matching_world_sizes_are_accepted(monkeypatch, tmp_path):
     assert len(calls["benchmark"]) == 1
 
 
+def test_help_works_under_a_mismatched_launcher_env(monkeypatch, tmp_path, capsys):
+    """``--help`` is answered even when the launcher environment disagrees.
+
+    The cross-check ran before ``parse_args``, so asking what the flags are
+    raised the launcher-mismatch error -- in exactly the environment (a
+    half-configured shell) where someone is most likely to be asking.
+    """
+    monkeypatch.setenv("WORLD_SIZE", "2")
+    monkeypatch.setenv("RANK", "0")
+
+    with pytest.raises(SystemExit) as excinfo:
+        run_cli(
+            monkeypatch,
+            ["scaffold", "--help"],
+            comm=_FakeComm(rank=0, size=1),
+            sync_env=False,
+        )
+
+    assert excinfo.value.code == 0
+    assert "usage" in capsys.readouterr().out.lower()
+
+
 def test_no_launcher_env_is_not_a_mismatch(monkeypatch, tmp_path):
     """With no launcher variables set, the MPI world alone defines the size."""
     for var in ("WORLD_SIZE", "RANK", "LOCAL_RANK", "SLURM_NTASKS", "FLUX_JOB_SIZE"):

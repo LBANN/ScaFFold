@@ -21,6 +21,7 @@ device binding relative to process-group initialization.
 
 import logging
 
+import pytest
 import torch
 
 import ScaFFold.utils.distributed as distributed_mod
@@ -275,4 +276,56 @@ def test_local_size_defaults_to_one(monkeypatch):
     """With nothing to go on, one rank per node is still the assumption."""
     for var in _LOCAL_SIZE_VARS:
         monkeypatch.delenv(var, raising=False)
+    assert distributed_mod.get_local_size() == 1
+
+
+# ---------------------------------------------------------------------------
+# VC-3: an unusable launcher variable is ignored, not fatal
+#
+# These helpers run at the top of every entry point, so a bare int() on a
+# variable a site wrapper exported empty ("WORLD_SIZE=") or as a placeholder
+# ("auto") killed the invocation -- ``scaffold --help`` included -- with a
+# ValueError naming neither the variable nor a remedy.
+# ---------------------------------------------------------------------------
+
+
+def _clear_launcher_env(monkeypatch):
+    for var in set(_LAUNCHER_VARS) | set(_LOCAL_SIZE_VARS):
+        monkeypatch.delenv(var, raising=False)
+
+
+@pytest.mark.parametrize("value", ["", "   ", "auto"])
+def test_unusable_launcher_values_fall_through(monkeypatch, value):
+    """Empty and non-numeric values are treated as absent, never raise."""
+    _clear_launcher_env(monkeypatch)
+    for var in ("WORLD_SIZE", "RANK", "LOCAL_RANK", "LOCAL_WORLD_SIZE"):
+        monkeypatch.setenv(var, value)
+
+    # Falls through to the next source -- here the (singleton) communicator and
+    # the documented defaults.
+    assert distributed_mod.get_world_size() == 1
+    assert distributed_mod.get_world_rank() == 0
+    assert distributed_mod.get_local_rank() == 0
+    assert distributed_mod.get_local_size() == 1
+
+
+def test_unusable_value_defers_to_the_next_launcher_variable(monkeypatch, caplog):
+    """A garbage value does not mask a usable variable further down the order."""
+    _clear_launcher_env(monkeypatch)
+    monkeypatch.setenv("WORLD_SIZE", "auto")
+    monkeypatch.setenv("PALS_NRANKS", "8")
+
+    with caplog.at_level(logging.WARNING, logger=distributed_mod.logger.name):
+        assert distributed_mod.get_world_size() == 8
+
+    messages = " ".join(record.getMessage() for record in caplog.records)
+    assert "WORLD_SIZE" in messages, "the ignored value was not reported"
+
+
+def test_zero_node_count_does_not_divide_by_zero(monkeypatch):
+    """A nonsense node count falls through instead of raising."""
+    _clear_launcher_env(monkeypatch)
+    monkeypatch.setenv("SLURM_NTASKS", "8")
+    monkeypatch.setenv("SLURM_NNODES", "0")
+
     assert distributed_mod.get_local_size() == 1
