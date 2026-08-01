@@ -55,10 +55,10 @@ Public API
 ==========
 ``triton_group_norm(input, num_groups, weight=None, bias=None, eps=1e-5,
 activation=None)``
-    Drop-in for ``F.group_norm`` (plus an optionally fused ReLU) with full
-    autograd support.  Accepts *anything* ``F.group_norm`` accepts; inputs the
-    Triton kernel cannot serve fall back to ``F.group_norm`` internally (see
-    "Layouts" below).
+    Drop-in for ``F.group_norm`` (plus an optionally fused ReLU) with
+    first-order autograd support.  Accepts *anything* ``F.group_norm`` accepts;
+    inputs the Triton kernel cannot serve fall back to ``F.group_norm``
+    internally (see "Layouts" below).
 
 ``is_supported(input, num_groups, weight=None, bias=None, activation=None)``
     Cheap, side-effect-free predicate: ``True`` exactly when the native Triton
@@ -94,12 +94,35 @@ to within fp32 reduction-order noise, with:
   ``review/gn-dctensor/triton/RESULTS.md``); preserving channels-last is the
   entire point of the kernel.
 * **autograd** -- ``d_input``, ``d_weight``, ``d_bias``; ``weight=None`` and/or
-  ``bias=None`` supported.
+  ``bias=None`` supported.  **First order only**: the backward is itself a
+  custom op with no autograd formula of its own, so a second
+  ``torch.autograd.grad`` through this op raises ``RuntimeError: Trying to
+  backward through scaffold_gn.group_norm_backward.default but no autograd
+  formula was registered``.  Stock ``F.group_norm`` *does* support double
+  backward, so a gradient penalty or a Hessian-vector product must route
+  around this kernel (``is_supported`` says nothing about second derivatives;
+  it is documented there too).  It fails loudly rather than returning garbage.
+* **device** -- the kernels run on the *input's* device, whatever device is
+  current, matching ATen's ``DeviceGuard`` behaviour; see ``_device_guard``.
 * **determinism** -- bitwise reproducible run to run and process to process.
   There are no float atomics anywhere, and the grid, split count and tile sizes
   are pure functions of the shape (the tuning table is frozen in this file for
   exactly that reason -- a *runtime* autotuner would break reproducibility by
   changing the reduction order between runs).
+* **rejections** -- every shape/dtype/parameter combination ``F.group_norm``
+  raises on is one ``is_supported`` returns ``False`` for, including the
+  degenerate "1 value per channel" shape (``N*(C/G)*D*H*W == 1``), so a caller
+  that branches on ``is_supported`` never gets an answer where the op this
+  replaces would have raised.
+* **eps** -- one deliberate divergence, at a value no run uses: for a
+  *subnormal* fp32 ``eps`` (``< 1.18e-38``) on a zero-variance group the GPU
+  flushes ``var + eps`` to zero, so ``rstd`` is ``inf`` and ``y`` is ``NaN``
+  where ATen stays finite.  The boundary is exactly the normal/subnormal one
+  (``eps=1.2e-38`` gives ``rstd=9.1e18``, ``eps=1e-38`` gives ``inf``); at
+  ``eps == 0`` both implementations produce non-finite output identically.
+  Left as is rather than clamped because clamping would perturb every
+  ordinary call to defend a value nine orders of magnitude below the smallest
+  plausible one.
 
 Reduction strategy
 ==================
@@ -150,6 +173,54 @@ dominates the step), +3-8% at the middle shapes, and **0%** on the backward,
 which does not compute a variance.  A cheaper shifted-mean variant (two tile
 reductions instead of three, shift taken from a peeled first tile) would
 recover most of that; it was not worth the extra failure mode for ~4 ms/step.
+
+What the third pass (``corr``) is worth, separately
+---------------------------------------------------
+The accuracy above is mostly the *two-pass* structure; the ``corr`` term is a
+third reduction on top of it and deserves its own accounting.  Deleting it
+outright (keeping ``mean_t = mean0``, ``M2 = sum((x-mean0)^2)``) and comparing
+both against float64 on the same fp32 samples, relative error of ``rstd``,
+10 seeds each:
+
+    regime                                     with corr    without    ratio
+    one tile per group reduction (nsplit=1):
+      [2,64,8,4,4] G=4, mu/sigma=1e6            1.1e-07     1.6e-04    1472x
+      [2,64,8,4,4] G=2, mu/sigma=1e6            8.4e-08     4.9e-05     580x
+      [2,64,8,4,4] G=1, mu/sigma=1e6            9.8e-08     2.1e-05     216x
+      [2,64,8,4,4] G=4, mu/sigma=1e5            9.9e-08     8.4e-06      85x
+    many tiles and splits (the production configs):
+      [1,512,32^3]  G=8, mu/sigma=1e5           1.2e-05     4.4e-05     3.8x
+      [1,1024,16^3] G=8, mu/sigma=1e5           8.6e-06     2.5e-05     2.9x
+      [1,256,24^3]  G=8, mu/sigma=1e5           3.0e-05     3.7e-05     1.3x
+      [1,256,24^3]  G=8, mu/sigma=1e7           5.8e-04     2.3e-06    0.004x
+
+So it is decisively load-bearing exactly where the tile mean is formed from
+many large values -- up to 1472x on ``rstd`` -- and worth a steady 1.3-4x in
+the multi-split configs the tuning table actually picks, at ``mu/sigma = 1e5``.
+Past ``mu/sigma ~ 1e6`` with many splits it can go the *other* way (last row):
+there the true spread between tile means is smaller than one ulp of the means
+themselves, so Chan's between-tile term is computed from quantization noise
+either way and the uncorrected version's inflated ``M2`` partly cancels it.
+That regime is past fp32's floor for this computation (a mean of 1e6 held in
+fp32 quantizes to 0.06, i.e. 6% of a standard deviation at sigma=1) and no
+production input is near it.
+
+The *output* error is nearly unmoved by any of this -- at most ~1.4x in either
+direction -- which is why the term looks free to delete if you only measure
+``y``: the output is dominated by the fp32 representation of the mean, which
+``corr`` cannot improve (``mean0 + corr`` rounds straight back to ``mean0``
+once the mean is large).  It is ``rstd`` that carries the benefit.
+
+Price, measured the same way (median of 20 forwards, correction removed
+outright rather than zeroed): **+2.3%** of the forward at ``[1,64,256^3]``,
++3.0% at ``[1,128,128^3]``, +4.7% at ``[1,256,64^3]``, and nothing measurable
+(-1.2% to +0.5%, i.e. noise) at the three launch-bound shapes.  At the shape
+that dominates the step that is +0.10 ms of a 11.6 ms fwd+bwd, i.e. +0.9%.
+Kept: a 1.3-1472x accuracy factor on the statistic the whole rewrite exists to
+protect is worth ~1% of GroupNorm time.  The load-bearing case is pinned by
+``test_welford_correction_recovers_rstd_in_a_single_tile_reduction`` in
+``tests/test_triton_group_norm_edge.py``, so deleting the term now fails the
+suite instead of passing it silently.
 
 Layouts
 =======
@@ -228,6 +299,7 @@ Triton is imported lazily, on the first call that actually reaches the kernel,
 so importing this module (or running the CPU test suite) costs nothing.
 """
 
+import contextlib
 import functools
 import importlib.util
 from typing import Optional, Tuple
@@ -590,12 +662,26 @@ def _build_kernels():
             m = tl.broadcast_to((offs_s < nvalid)[:, None, None], (BLOCK_S, GP, CGP))
             if MASKED_C:
                 m = m & cmask
+            # `other` is not load-bearing for any *bounded* value: `cnt_t`
+            # counts only the valid lanes, so `corr` below evaluates to
+            # `sum_valid(x)/cnt_t - mean0` and `mean_t = mean0 + corr` is the
+            # true mean whatever the masked lanes contributed, while `d`/`dd`
+            # are re-masked before they reach `m2_t`.  (Bounded: `other=1e30`
+            # would swamp `mean0` and the correction with it, and `other=inf`
+            # or `nan` would poison it outright.)  0.0 is kept because it is
+            # the value that survives all three of those, not because the
+            # cancellation is something to rely on.
             x = tl.load(X + base + off, mask=m, other=0.0).to(tl.float32)
 
             # Corrected two-pass within the tile: the first mean loses digits
             # to the magnitude of the data, `corr` puts them back, and the
             # centred squares are then accurate to fp32 roundoff.  Everything
             # here is register traffic; the tile is read from HBM exactly once.
+            # `corr` is worth 1.3x to 1472x on `rstd` once the data's mean
+            # dominates its spread -- see "What the third pass is worth" in the
+            # module docstring for the measurements, for the one regime where
+            # it goes the other way, and for why the *output* error barely
+            # moves even where `rstd` improves by three orders of magnitude.
             cnt_t = (nvalid * CG).to(tl.float32)
             mean0 = tl.sum(tl.sum(x, 2), 0) / cnt_t
             d = tl.where(m, x - mean0[None, :, None], 0.0)
@@ -931,6 +1017,34 @@ def _ensure_kernels():
 # --------------------------------------------------------------------------- #
 _CL_FORMAT = torch.channels_last_3d
 
+#: Reused so the common (already-current device) path allocates nothing.
+_NO_GUARD = contextlib.nullcontext()
+
+
+def _device_guard(device: torch.device):
+    """Make ``device`` current for the kernel launches inside the ``with``.
+
+    A Triton launch goes to whatever device is *current*, not to the device the
+    argument tensors live on, so without this a tensor on ``cuda:1`` while
+    ``cuda:0`` is current makes the kernel dereference another device's pointers
+    and the process dies with ``Memory access fault by GPU node-N``.  ATen ops
+    (including ``F.group_norm``) carry a ``DeviceGuard`` and handle the same
+    call, so this is required for the drop-in contract, not a nicety.
+
+    The ``current_device()`` test is not about correctness but about *cost*.
+    Measured on this node (median of 200k calls, torch 2.13.0+rocm7.2):
+    ``with torch.cuda.device(t.device)`` is **1.55 us** of host time per call,
+    ``with torch.cuda._DeviceGuard(t.device.index)`` **0.61 us**, and this
+    helper **0.51 us** when the tensor is already on the current device --
+    which it is on every ScaFFold call, since ScaFFold pins one device per
+    rank.  Two of those (forward + backward) against the 0.65 ms fwd+bwd of the
+    two smallest scale-8 shapes, which are host-dispatch bound, is 0.16%
+    instead of 0.48%.
+    """
+    if device.index == torch.cuda.current_device():
+        return _NO_GUARD
+    return torch.cuda.device(device)
+
 
 def _shape_of(input: torch.Tensor):
     n, channels = input.shape[0], input.shape[1]
@@ -947,65 +1061,66 @@ def _forward(input, num_groups, weight, bias, eps, activation, out_dtype):
     groups = num_groups
     device = input.device
 
-    pcnt = torch.empty(n * plan.nsplit * groups, device=device, dtype=torch.float32)
-    pmean = torch.empty_like(pcnt)
-    pm2 = torch.empty_like(pcnt)
-    mean = torch.empty((n, groups), device=device, dtype=torch.float32)
-    rstd = torch.empty_like(mean)
+    with _device_guard(device):
+        pcnt = torch.empty(n * plan.nsplit * groups, device=device, dtype=torch.float32)
+        pmean = torch.empty_like(pcnt)
+        pm2 = torch.empty_like(pcnt)
+        mean = torch.empty((n, groups), device=device, dtype=torch.float32)
+        rstd = torch.empty_like(mean)
 
-    _stats_partial_kernel[(plan.nsplit, n)](
-        input,
-        pcnt,
-        pmean,
-        pm2,
-        spatial,
-        plan.chunk,
-        C=channels,
-        G=groups,
-        CG=plan.group_channels,
-        GP=plan.groups_p2,
-        CGP=plan.group_channels_p2,
-        NSPLIT=plan.nsplit,
-        BLOCK_S=plan.block_s_stats,
-        MASKED_C=plan.masked_c,
-        INT64=plan.int64,
-        num_warps=plan.cfg.stats_warps,
-    )
-    _stats_finalize_kernel[(n * groups,)](
-        pcnt,
-        pmean,
-        pm2,
-        mean,
-        rstd,
-        plan.elements_per_group,
-        eps,
-        G=groups,
-        NSPLIT=plan.nsplit,
-        num_warps=4,
-    )
+        _stats_partial_kernel[(plan.nsplit, n)](
+            input,
+            pcnt,
+            pmean,
+            pm2,
+            spatial,
+            plan.chunk,
+            C=channels,
+            G=groups,
+            CG=plan.group_channels,
+            GP=plan.groups_p2,
+            CGP=plan.group_channels_p2,
+            NSPLIT=plan.nsplit,
+            BLOCK_S=plan.block_s_stats,
+            MASKED_C=plan.masked_c,
+            INT64=plan.int64,
+            num_warps=plan.cfg.stats_warps,
+        )
+        _stats_finalize_kernel[(n * groups,)](
+            pcnt,
+            pmean,
+            pm2,
+            mean,
+            rstd,
+            plan.elements_per_group,
+            eps,
+            G=groups,
+            NSPLIT=plan.nsplit,
+            num_warps=4,
+        )
 
-    out = torch.empty_like(input, dtype=out_dtype, memory_format=_CL_FORMAT)
-    _normalize_kernel[(plan.nblk_elem, n)](
-        input,
-        out,
-        mean,
-        rstd,
-        weight,
-        bias,
-        spatial,
-        C=channels,
-        G=groups,
-        CG=plan.group_channels,
-        GP=plan.groups_p2,
-        CGP=plan.group_channels_p2,
-        BLOCK_S=plan.block_s_elem,
-        RELU=activation == "relu",
-        HAS_W=weight is not None,
-        HAS_B=bias is not None,
-        MASKED_C=plan.masked_c,
-        INT64=plan.int64,
-        num_warps=plan.cfg.elem_warps,
-    )
+        out = torch.empty_like(input, dtype=out_dtype, memory_format=_CL_FORMAT)
+        _normalize_kernel[(plan.nblk_elem, n)](
+            input,
+            out,
+            mean,
+            rstd,
+            weight,
+            bias,
+            spatial,
+            C=channels,
+            G=groups,
+            CG=plan.group_channels,
+            GP=plan.groups_p2,
+            CGP=plan.group_channels_p2,
+            BLOCK_S=plan.block_s_elem,
+            RELU=activation == "relu",
+            HAS_W=weight is not None,
+            HAS_B=bias is not None,
+            MASKED_C=plan.masked_c,
+            INT64=plan.int64,
+            num_warps=plan.cfg.elem_warps,
+        )
     return out, mean, rstd
 
 
@@ -1016,100 +1131,133 @@ def _backward(grad_out, input, weight, bias, mean, rstd, num_groups, activation)
     groups = num_groups
     device = input.device
 
-    ps1 = torch.empty(n * plan.nsplit * groups, device=device, dtype=torch.float32)
-    ps2 = torch.empty_like(ps1)
-    pdw = torch.empty(n * plan.nsplit * channels, device=device, dtype=torch.float32)
-    pdb = torch.empty_like(pdw)
+    with _device_guard(device):
+        ps1 = torch.empty(n * plan.nsplit * groups, device=device, dtype=torch.float32)
+        ps2 = torch.empty_like(ps1)
+        pdw = torch.empty(
+            n * plan.nsplit * channels, device=device, dtype=torch.float32
+        )
+        pdb = torch.empty_like(pdw)
 
-    _bwd_partial_kernel[(plan.nsplit, n)](
-        input,
-        grad_out,
-        mean,
-        rstd,
-        weight,
-        bias,
-        ps1,
-        ps2,
-        pdw,
-        pdb,
-        spatial,
-        plan.chunk,
-        C=channels,
-        G=groups,
-        CG=plan.group_channels,
-        GP=plan.groups_p2,
-        CGP=plan.group_channels_p2,
-        NSPLIT=plan.nsplit,
-        BLOCK_S=plan.block_s_stats,
-        RELU=activation == "relu",
-        HAS_W=weight is not None,
-        HAS_B=bias is not None,
-        MASKED_C=plan.masked_c,
-        INT64=plan.int64,
-        num_warps=plan.cfg.stats_warps,
-    )
+        _bwd_partial_kernel[(plan.nsplit, n)](
+            input,
+            grad_out,
+            mean,
+            rstd,
+            weight,
+            bias,
+            ps1,
+            ps2,
+            pdw,
+            pdb,
+            spatial,
+            plan.chunk,
+            C=channels,
+            G=groups,
+            CG=plan.group_channels,
+            GP=plan.groups_p2,
+            CGP=plan.group_channels_p2,
+            NSPLIT=plan.nsplit,
+            BLOCK_S=plan.block_s_stats,
+            RELU=activation == "relu",
+            HAS_W=weight is not None,
+            HAS_B=bias is not None,
+            MASKED_C=plan.masked_c,
+            INT64=plan.int64,
+            num_warps=plan.cfg.stats_warps,
+        )
 
-    c1 = torch.empty(n * groups, device=device, dtype=torch.float32)
-    c2 = torch.empty_like(c1)
-    _bwd_finalize_kernel[(n * groups,)](
-        ps1,
-        ps2,
-        c1,
-        c2,
-        plan.elements_per_group,
-        G=groups,
-        NSPLIT=plan.nsplit,
-        num_warps=4,
-    )
+        c1 = torch.empty(n * groups, device=device, dtype=torch.float32)
+        c2 = torch.empty_like(c1)
+        _bwd_finalize_kernel[(n * groups,)](
+            ps1,
+            ps2,
+            c1,
+            c2,
+            plan.elements_per_group,
+            G=groups,
+            NSPLIT=plan.nsplit,
+            num_warps=4,
+        )
 
-    d_weight = torch.empty(channels, device=device, dtype=torch.float32)
-    d_bias = torch.empty_like(d_weight)
-    rows = n * plan.nsplit
-    block_c = min(256, max(64, _next_pow2(channels)))
-    block_r = 32 if rows >= 32 else 1
-    _dwdb_reduce_kernel[(_cdiv(channels, block_c),)](
-        pdw,
-        pdb,
-        d_weight,
-        d_bias,
-        rows,
-        channels,
-        BLOCK_C=block_c,
-        BLOCK_R=block_r,
-        num_warps=4,
-    )
+        d_weight = torch.empty(channels, device=device, dtype=torch.float32)
+        d_bias = torch.empty_like(d_weight)
+        rows = n * plan.nsplit
+        block_c = min(256, max(64, _next_pow2(channels)))
+        block_r = 32 if rows >= 32 else 1
+        _dwdb_reduce_kernel[(_cdiv(channels, block_c),)](
+            pdw,
+            pdb,
+            d_weight,
+            d_bias,
+            rows,
+            channels,
+            BLOCK_C=block_c,
+            BLOCK_R=block_r,
+            num_warps=4,
+        )
 
-    d_input = torch.empty_like(input, memory_format=_CL_FORMAT)
-    _dx_kernel[(plan.nblk_elem, n)](
-        input,
-        grad_out,
-        d_input,
-        mean,
-        rstd,
-        weight,
-        bias,
-        c1,
-        c2,
-        spatial,
-        C=channels,
-        G=groups,
-        CG=plan.group_channels,
-        GP=plan.groups_p2,
-        CGP=plan.group_channels_p2,
-        BLOCK_S=plan.block_s_elem,
-        RELU=activation == "relu",
-        HAS_W=weight is not None,
-        HAS_B=bias is not None,
-        MASKED_C=plan.masked_c,
-        INT64=plan.int64,
-        num_warps=plan.cfg.elem_warps,
-    )
+        d_input = torch.empty_like(input, memory_format=_CL_FORMAT)
+        if plan.group_channels * spatial == 1:
+            # One element per group: mean == x and var == 0 identically, so
+            # xhat is the constant 0 and y does not depend on x at all -- the
+            # exact d_input is zero everywhere.  _dx_kernel would instead
+            # return rstd * (dy*w - c1), and since the compiler contracts that
+            # to fma(dy, w, -c1) while c1 was accumulated from the *rounded*
+            # product, what survives is the product's rounding error amplified
+            # by rstd = 1/sqrt(eps) ~ 316 (2.2e-05 at eps=1e-5).  Answering
+            # with the exact zero costs one integer test per backward call.
+            d_input.zero_()
+        else:
+            _dx_kernel[(plan.nblk_elem, n)](
+                input,
+                grad_out,
+                d_input,
+                mean,
+                rstd,
+                weight,
+                bias,
+                c1,
+                c2,
+                spatial,
+                C=channels,
+                G=groups,
+                CG=plan.group_channels,
+                GP=plan.groups_p2,
+                CGP=plan.group_channels_p2,
+                BLOCK_S=plan.block_s_elem,
+                RELU=activation == "relu",
+                HAS_W=weight is not None,
+                HAS_B=bias is not None,
+                MASKED_C=plan.masked_c,
+                INT64=plan.int64,
+                num_warps=plan.cfg.elem_warps,
+            )
     return d_input, d_weight, d_bias
 
 
 # --------------------------------------------------------------------------- #
 # torch.library registration
 # --------------------------------------------------------------------------- #
+def _one_value_per_channel(input, num_groups: int) -> bool:
+    """Whether ``F.group_norm`` would reject this shape as degenerate.
+
+    ``F.group_norm`` runs ``_verify_batch_size([N*C//G, G, *spatial])``, which
+    raises ``ValueError("Expected more than 1 value per channel when
+    training")`` exactly when ``N * (C/G) * D*H*W == 1``.  All three factors are
+    positive, so that holds iff ``N == 1``, ``C == num_groups`` and the spatial
+    extent is 1 -- i.e. iff ``numel == C == num_groups``, which is the cheap
+    form used here (``numel`` is wanted by the caller anyway).
+
+    Rejected rather than served: the kernel *can* compute it (it returns
+    ``bias``, since every group has zero variance), but a caller that branches
+    on :func:`is_supported` would then get a result where the op this replaces
+    raises, which is a worse failure than being slower.
+    """
+    channels = input.shape[1]
+    return channels == num_groups and input.numel() == channels
+
+
 def _validate(input, num_groups, weight, bias, activation):
     if activation not in SUPPORTED_ACTIVATIONS:
         raise ValueError(
@@ -1120,6 +1268,13 @@ def _validate(input, num_groups, weight, bias, activation):
     if num_groups <= 0 or input.shape[1] % num_groups != 0:
         raise ValueError(
             f"num_channels={input.shape[1]} is not divisible by num_groups={num_groups}"
+        )
+    if _one_value_per_channel(input, num_groups):
+        # Same rejection, and the same exception type, as F.group_norm's
+        # _verify_batch_size; see _one_value_per_channel.
+        raise ValueError(
+            f"Expected more than 1 value per channel when training, got input "
+            f"size {tuple(input.shape)} with num_groups={num_groups}"
         )
     if input.dtype not in SUPPORTED_DTYPES:
         raise ValueError(f"unsupported input dtype {input.dtype}")
@@ -1155,8 +1310,10 @@ def _group_norm_op(
     """Channels-last GroupNorm forward: returns ``(output, mean, rstd)``.
 
     ``mean``/``rstd`` are ``(N, num_groups)`` fp32 tensors kept for the
-    backward; they are *not* differentiable (nothing produces a gradient for
-    them) and callers should treat them as opaque.
+    backward; they are marked non-differentiable in ``_setup_context``
+    (nothing produces a gradient for them), so they come back with
+    ``requires_grad=False`` and differentiating through them raises rather than
+    returning zeros.  Callers should treat them as opaque.
     """
     _validate(input, num_groups, weight, bias, activation)
     weight = None if weight is None else weight.contiguous()
@@ -1204,7 +1361,9 @@ def _group_norm_backward_op(
     d_input, d_weight, d_bias = _backward(
         grad_out, input, weight, bias, mean, rstd, num_groups, activation
     )
-    d_input = d_input.to(input.dtype)
+    # No `d_input.to(input.dtype)`: `_backward` allocates it with
+    # `empty_like(input)` and `_dx_kernel` stores through `DX.dtype.element_ty`,
+    # so it already *is* the input's dtype.
     if weight is None:
         d_weight = d_weight.new_empty(0)
     else:
@@ -1219,7 +1378,12 @@ def _group_norm_backward_op(
 @_group_norm_backward_op.register_fake
 def _(grad_out, input, weight, bias, mean, rstd, num_groups, activation):
     channels = input.shape[1]
-    d_input = torch.empty_like(input)
+    # channels_last_3d, *not* the input's own format: the real op relayouts a
+    # non-channels-last `input` and always returns a channels-last `d_input`,
+    # so promising `empty_like(input)` here would hand torch.compile the wrong
+    # strides for any contiguous NCDHW input -- silently, since eager never
+    # consults the fake kernel.
+    d_input = torch.empty_like(input, memory_format=_CL_FORMAT)
     d_weight = input.new_empty(
         channels if weight is not None else 0,
         dtype=weight.dtype if weight is not None else torch.float32,
@@ -1234,6 +1398,12 @@ def _(grad_out, input, weight, bias, mean, rstd, num_groups, activation):
 def _setup_context(ctx, inputs, output):
     input, num_groups, weight, bias, eps, activation, out_dtype = inputs
     _out, mean, rstd = output
+    # Outputs 1 and 2 are backward state, not results: nothing produces a
+    # gradient for them.  Without this they come back requiring grad, and
+    # differentiating through them *succeeds* -- autograd materializes an
+    # all-zero cotangent for the unused `out` and runs the whole backward to
+    # return zeros, which is a plausible wrong answer rather than an error.
+    ctx.mark_non_differentiable(mean, rstd)
     ctx.save_for_backward(input, weight, bias, mean, rstd)
     ctx.num_groups = num_groups
     ctx.activation = activation
@@ -1308,6 +1478,19 @@ def is_supported(
     channel count divisible by ``num_groups``, and affine parameters whose
     dtype ``F.group_norm`` would itself accept for this input (equal to the
     input's, or fp32 under autocast, which is what autocast would produce).
+    Shapes ``F.group_norm`` itself rejects are rejected here too, so that
+    branching on this predicate can never turn a stock ``ValueError`` into an
+    answer (see :func:`_one_value_per_channel`).
+
+    ``True`` promises the *first* derivative only: the backward is itself a
+    custom op with no autograd formula, so a second ``torch.autograd.grad``
+    raises where stock ``F.group_norm`` would succeed.  Callers that need a
+    gradient penalty or a Hessian-vector product must not take this path.
+
+    Note that this is a capability predicate, not a layout classifier: for
+    shapes whose spatial *and* channel extents make the contiguous and
+    channels-last-3d stride patterns coincide (e.g. ``(N, C, 1, 1, 1)``), a
+    plain contiguous tensor is accepted, correctly -- it is the same bytes.
     """
     if activation not in SUPPORTED_ACTIVATIONS:
         return False
@@ -1321,6 +1504,8 @@ def is_supported(
         return False
     channels = input.shape[1]
     if channels % num_groups != 0 or input.numel() == 0:
+        return False
+    if _one_value_per_channel(input, num_groups):
         return False
     if not input.is_contiguous(memory_format=_CL_FORMAT):
         return False
