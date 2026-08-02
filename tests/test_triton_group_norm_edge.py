@@ -1520,3 +1520,182 @@ def test_dweight_blocks_are_covered_when_there_are_more_of_them_than_tiles(
     )
     assert plan.grid_dx == plan.dwdb_progs
     _parity(shape, groups, seed=13)
+
+
+# ---------------------------------------------------------------------------
+# the kernel-failure boundary
+# ---------------------------------------------------------------------------
+
+
+def test_kernel_failures_are_tagged_and_carry_their_cause():
+    """Everything the launch region raises comes out as ``TritonKernelError``.
+
+    The tag is what lets a caller with a fallback (``FastGroupNorm``'s ladder)
+    catch *exactly* "the kernel is broken" instead of catching ``Exception`` and
+    then trying to enumerate every framework mechanism -- saved-tensor pack
+    hooks, ``torch.utils.checkpoint``'s recompute control flow, functorch --
+    that legitimately raises through a forward.  The region it wraps is closed
+    (allocations and launches, no autograd-observable op), so a blanket catch
+    inside it is sound where one at the call site is not.
+
+    The tag must survive the *type* of the original error, whatever it was: a
+    mismatched Triton release raises ``TypeError``/``AttributeError`` from a
+    changed signature, an unwritable JIT cache ``OSError``, a bad launch
+    ``RuntimeError``.
+    """
+    for original in (
+        RuntimeError("launch failed"),
+        TypeError("triton API changed"),
+        AttributeError("no such attribute"),
+        OSError("unwritable cache dir"),
+        ImportError("no module named triton"),
+    ):
+
+        @tgn._tag_kernel_failures
+        def _boom():
+            raise original
+
+        with pytest.raises(tgn.TritonKernelError) as caught:
+            _boom()
+        assert caught.value.__cause__ is original
+        assert type(original).__name__ in str(caught.value)
+
+
+def test_out_of_memory_is_not_tagged_as_a_kernel_failure():
+    """An OOM is a resource condition, and every fallback allocates as much.
+
+    Tagging it would make the ladder retry on a rung that is about to OOM in
+    the same place, and would latch a rung off for the rest of the process on a
+    transient, per-rank event.  It has to come out unchanged.
+    """
+
+    @tgn._tag_kernel_failures
+    def _oom():
+        raise torch.OutOfMemoryError("simulated OOM")
+
+    with pytest.raises(torch.OutOfMemoryError):
+        _oom()
+    assert not issubclass(torch.OutOfMemoryError, tgn.TritonKernelError)
+
+
+def test_contract_violations_are_not_tagged():
+    """``_validate``'s ``ValueError``s are caller errors, and stay loud.
+
+    ``is_supported`` accepts exactly what ``_validate`` accepts, so a caller
+    that branches on the predicate can never see one; if the two ever disagree,
+    the failure must not be laundered into "the kernel is broken" and silently
+    fall back.
+    """
+    with pytest.raises(ValueError, match="activation must be one of"):
+        tgn._validate(torch.zeros(1, 8, 2, 2, 2), 8, None, None, "gelu")
+    with pytest.raises(ValueError, match="expected a 5-D"):
+        tgn._validate(torch.zeros(1, 8, 2, 2), 8, None, None, None)
+
+
+@pytest.mark.gpu
+def test_a_real_launch_failure_is_tagged(monkeypatch):
+    """End to end: break the launch and the public op raises the tagged type."""
+    x = torch.randn(1, 64, 4, 4, 4, device="cuda").to(memory_format=CL)
+
+    def _broken(*args, **kwargs):
+        raise RuntimeError("simulated HIP launch failure")
+
+    tgn._ensure_kernels()
+    monkeypatch.setattr(tgn, "_stats_partial_kernel", _Unlaunchable(_broken))
+    with pytest.raises(tgn.TritonKernelError):
+        torch.ops.scaffold_gn.group_norm(x, 8, None, None, EPS, None, None)
+
+
+class _Unlaunchable:
+    """A stand-in for a ``triton.jit`` kernel whose launch raises."""
+
+    def __init__(self, fn):
+        self._fn = fn
+
+    def __getitem__(self, grid):
+        return self._fn
+
+
+# ---------------------------------------------------------------------------
+# the fused activation on non-finite values
+# ---------------------------------------------------------------------------
+
+#: NaN, +Inf, -Inf, -0.0 and four ordinary values.  ``tl.maximum(y, 0)`` returns
+#: the non-NaN operand and ``tl.where(y > 0, y, 0)`` fails ``NaN > 0``, so both
+#: of the obvious spellings map NaN to 0.0 where ``F.relu`` propagates it.
+_SPECIALS = [float("nan"), float("inf"), float("-inf"), -0.0, 0.0, -1.0, 1.0, 2.0]
+
+
+def _zero_weight_case(activation, seed=3):
+    """A case whose pre-activation is exactly ``bias``, elementwise.
+
+    Poisoning the *input* can only produce NaN pre-activations -- one non-finite
+    value makes the whole group's statistics NaN -- so the values that actually
+    distinguish the spellings of ReLU have to be placed directly.  A zero
+    ``weight`` does that: ``xhat * 0 + bias == bias``.
+    """
+    x = torch.randn(
+        1,
+        64,
+        4,
+        4,
+        4,
+        device="cuda",
+        generator=torch.Generator("cuda").manual_seed(seed),
+    ).to(memory_format=CL)
+    weight = torch.zeros(64, device="cuda")
+    bias = torch.tensor(_SPECIALS * 8, device="cuda")
+    reference = F.group_norm(x, 8, weight, bias, EPS)
+    if activation == "relu":
+        reference = F.relu(reference)
+    return x, weight, bias, reference
+
+
+@pytest.mark.gpu
+def test_fused_relu_matches_f_relu_on_nan_inf_and_negative_zero():
+    """The fused store must be ``F.relu``, bit for bit, on every special value.
+
+    NaN in, NaN out -- and that matters beyond numerics: ScaFFold aborts a run
+    whose loss goes non-finite, so an activation that turns a diverging NaN into
+    a finite 0.0 makes the forward look healthy while the backward is still NaN,
+    and the run checkpoints a broken model.  ``-Inf`` and both signed zeros must
+    come out as ``+0.0``, never ``-0.0``.
+    """
+    x, weight, bias, reference = _zero_weight_case("relu")
+    out, _mean, _rstd = torch.ops.scaffold_gn.group_norm(
+        x, 8, weight, bias, EPS, "relu", None
+    )
+    assert torch.equal(out.cpu().view(torch.int32), reference.cpu().view(torch.int32))
+    # ... and the control: without the fusion the same values pass through.
+    plain, _m, _r = torch.ops.scaffold_gn.group_norm(
+        x, 8, weight, bias, EPS, None, None
+    )
+    assert plain[0, 0, 0, 0, 0].isnan() and plain[0, 1, 0, 0, 0].isinf()
+
+
+@pytest.mark.gpu
+def test_fused_relu_backward_gates_like_threshold_backward():
+    """ReLU's backward is ``result <= 0 ? 0 : grad``, so a NaN passes.
+
+    The kernel recomputes the pre-activation and must gate with the same
+    complement: ``pre > 0 ? dy : 0`` reads identically on every finite value and
+    silently zeroes the NaN lane, which is the backward half of the same defect.
+    """
+    x, weight, bias, _reference = _zero_weight_case("relu")
+    grad_out = torch.ones_like(x)
+
+    weight = weight.requires_grad_(True)
+    bias = bias.requires_grad_(True)
+    xg = x.clone().requires_grad_(True)
+    reference = F.relu(F.group_norm(xg, 8, weight, bias, EPS))
+    reference.backward(grad_out)
+    ref_dbias = bias.grad.detach().clone()
+    ref_dx = xg.grad.detach().clone()
+
+    weight.grad = bias.grad = xg.grad = None
+    triton_group_norm(xg, 8, weight, bias, EPS, "relu").backward(grad_out)
+
+    # d_bias counts exactly the elements whose gradient the gate let through.
+    assert ref_dbias[0].item() == 64, "the reference gated the NaN lane off"
+    assert torch.equal(bias.grad.cpu(), ref_dbias.cpu())
+    assert torch.equal(xg.grad.cpu(), ref_dx.cpu())

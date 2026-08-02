@@ -74,10 +74,10 @@ def run():
             gn_mod._get_compiled_group_norm,
         )
         if compiled:
-            gn_mod._use_compiled = lambda t: type(t) is torch.Tensor
+            gn_mod._use_compiled = lambda t, **kw: type(t) is torch.Tensor
             gn_mod._get_compiled_group_norm = lambda: F.group_norm
         else:
-            gn_mod._use_compiled = lambda t: False
+            gn_mod._use_compiled = lambda t, **kw: False
         try:
             norm.zero_grad(set_to_none=True)
             x = local.clone().requires_grad_(True)

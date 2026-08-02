@@ -364,14 +364,17 @@ def test_tensor_subclass_input_stays_eager():
 def test_compile_failure_falls_back_to_eager(monkeypatch, caplog):
     """A broken compiler degrades to the stock kernel instead of killing the run.
 
-    Simulated by making the compiled callable raise; the module must return the
-    eager result, warn once, and stop trying for the rest of the process.
+    Simulated by making the compiled callable raise the real thing Dynamo and
+    Inductor raise (``BackendCompilerFailed``/``Unsupported`` share the
+    ``TorchDynamoException`` root the ladder allowlists); the module must return
+    the eager result, warn once, and stop trying for the rest of the process.
     """
+    import torch._dynamo.exc
 
     def _raises(*args, **kwargs):
-        raise RuntimeError("simulated Inductor failure")
+        raise torch._dynamo.exc.Unsupported("simulated Inductor failure")
 
-    monkeypatch.setattr(gn_mod, "_use_compiled", lambda _input: True)
+    monkeypatch.setattr(gn_mod, "_use_compiled", lambda _input, **kw: True)
     monkeypatch.setattr(gn_mod, "_get_compiled_group_norm", lambda: _raises)
     gn_mod._compile_failed = False
 
@@ -397,10 +400,12 @@ def test_triton_failure_falls_back_to_the_compiled_kernel(monkeypatch, caplog):
     predicate on and making its kernel raise; the compiled stand-in must then be
     the one that answers, exactly once, with the Triton path latched off.
     """
+    from ScaFFold.unet.triton_group_norm import TritonKernelError
+
     compiled_calls = []
 
     def _raises(*args, **kwargs):
-        raise RuntimeError("simulated Triton failure")
+        raise TritonKernelError("simulated Triton failure")
 
     def _recording(input, num_groups, weight, bias, eps):
         compiled_calls.append(type(input))
@@ -408,7 +413,7 @@ def test_triton_failure_falls_back_to_the_compiled_kernel(monkeypatch, caplog):
 
     monkeypatch.setattr(gn_mod, "_use_triton", lambda *a, **kw: True)
     monkeypatch.setattr(gn_mod, "_get_triton_module", _raises)
-    monkeypatch.setattr(gn_mod, "_use_compiled", lambda _input: True)
+    monkeypatch.setattr(gn_mod, "_use_compiled", lambda _input, **kw: True)
     monkeypatch.setattr(gn_mod, "_get_compiled_group_norm", lambda: _recording)
     gn_mod._triton_failed = False
     gn_mod._compile_failed = False
@@ -455,7 +460,7 @@ def test_checkpoint_recompute_stop_is_re_raised(monkeypatch, rung):
         monkeypatch.setattr(gn_mod, "_use_triton", lambda *a, **kw: True)
         monkeypatch.setattr(gn_mod, "_get_triton_module", _raises)
     else:
-        monkeypatch.setattr(gn_mod, "_use_compiled", lambda _input: True)
+        monkeypatch.setattr(gn_mod, "_use_compiled", lambda _input, **kw: True)
         monkeypatch.setattr(gn_mod, "_get_compiled_group_norm", lambda: _raises)
     gn_mod._triton_failed = False
     gn_mod._compile_failed = False
@@ -476,7 +481,9 @@ def test_cpu_activation_checkpointing_keeps_the_fast_path(monkeypatch):
     non-checkpointed run and the fast path must still be live afterwards -- a
     swallowed recompute-stop shows up as a latched-off kernel here.
     """
-    monkeypatch.setattr(gn_mod, "_use_compiled", lambda t: type(t) is torch.Tensor)
+    monkeypatch.setattr(
+        gn_mod, "_use_compiled", lambda t, **kw: type(t) is torch.Tensor
+    )
     monkeypatch.setattr(
         gn_mod, "_get_compiled_group_norm", lambda: nn.functional.group_norm
     )
@@ -735,7 +742,9 @@ def test_dctensor_routes_through_compiled_kernel(monkeypatch, dc_cpu):
         seen.append(type(input))
         return nn.functional.group_norm(input, num_groups, weight, bias, eps)
 
-    monkeypatch.setattr(gn_mod, "_use_compiled", lambda t: type(t) is torch.Tensor)
+    monkeypatch.setattr(
+        gn_mod, "_use_compiled", lambda t, **kw: type(t) is torch.Tensor
+    )
     monkeypatch.setattr(gn_mod, "_get_compiled_group_norm", lambda: _recording)
 
     fast = _seeded_norm()
@@ -760,7 +769,9 @@ def test_dctensor_gradients_reach_the_layer_upstream(monkeypatch, dc_cpu):
     while GroupNorm's own weight/bias still look healthy.
     """
     distconv, ps = dc_cpu
-    monkeypatch.setattr(gn_mod, "_use_compiled", lambda t: type(t) is torch.Tensor)
+    monkeypatch.setattr(
+        gn_mod, "_use_compiled", lambda t, **kw: type(t) is torch.Tensor
+    )
     monkeypatch.setattr(
         gn_mod, "_get_compiled_group_norm", lambda: nn.functional.group_norm
     )
@@ -827,11 +838,14 @@ def test_dctensor_on_cpu_never_invokes_torch_compile(monkeypatch, dc_cpu):
 def test_dctensor_compile_failure_falls_back_to_eager(monkeypatch, caplog, dc_cpu):
     """A broken compiler degrades the wrapped path to eager, like the plain one."""
     distconv, ps = dc_cpu
+    import torch._dynamo.exc
 
     def _raises(*args, **kwargs):
-        raise RuntimeError("simulated Inductor failure")
+        raise torch._dynamo.exc.Unsupported("simulated Inductor failure")
 
-    monkeypatch.setattr(gn_mod, "_use_compiled", lambda t: type(t) is torch.Tensor)
+    monkeypatch.setattr(
+        gn_mod, "_use_compiled", lambda t, **kw: type(t) is torch.Tensor
+    )
     monkeypatch.setattr(gn_mod, "_get_compiled_group_norm", lambda: _raises)
     gn_mod._compile_failed = False
 
@@ -1131,10 +1145,15 @@ def test_gpu_triton_matches_eager(activation, autocast):
 
     ``(1, 64, 32^3)`` channels-last is the production shape family at unit-test
     size.  Three claims at once: the routing really picks Triton when nothing is
-    forced (the output comes back channels-last, which is the one thing *only*
-    that path does -- eager and Inductor both return contiguous); the values and
-    gradients match the eager reference within reduction-order noise; and the
-    fused activation equals an explicit ReLU on the eager result.
+    forced; the values and gradients match the eager reference within
+    reduction-order noise; and the fused activation equals an explicit ReLU on
+    the eager result.
+
+    The rung is established by spying on the entry point rather than by
+    inspecting the output's layout: every rung now returns the *input's* memory
+    format, deliberately (a fallback that returned contiguous re-broke the
+    channels-last chain for every convolution after it), so layout no longer
+    distinguishes them.  The layout is asserted separately, of both.
     """
     device = torch.device("cuda")
     generator = torch.Generator(device=device).manual_seed(11)
@@ -1148,11 +1167,15 @@ def test_gpu_triton_matches_eager(activation, autocast):
         fast.weight.normal_(1.0, 0.1, generator=generator)
         fast.bias.normal_(0.0, 0.1, generator=generator)
 
+    calls = []
+    original_triton_forward = FastGroupNorm._triton_forward
+
     def run(triton):
         gn_mod.set_triton_enabled(triton)
         gn_mod.set_compile_enabled(False)  # eager reference, not Inductor
         inp = x.clone().requires_grad_(True)
         fast.zero_grad(set_to_none=True)
+        before = len(calls)
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=autocast):
             out = fast(inp)
         out.backward(grad_out.to(out.dtype))
@@ -1161,16 +1184,28 @@ def test_gpu_triton_matches_eager(activation, autocast):
             inp.grad.detach().clone(),
             fast.weight.grad.detach().clone(),
             fast.bias.grad.detach().clone(),
+            len(calls) - before,
         )
 
-    eager = run(False)
-    triton = run(None)  # None = the production default, i.e. no override at all
+    def spy(self, local):
+        calls.append(tuple(local.shape))
+        return original_triton_forward(self, local)
+
+    FastGroupNorm._triton_forward = spy
+    try:
+        eager = run(False)
+        triton = run(None)  # None = the production default, no override at all
+    finally:
+        FastGroupNorm._triton_forward = original_triton_forward
     assert not gn_mod._triton_failed
 
-    assert _channels_last(triton[0]), "Triton path was not taken (output not NDHWC)"
-    # ... and the control: stock GroupNorm really does return contiguous here,
-    # so the assertion above is a discriminating signal and not a tautology.
-    assert not _channels_last(eager[0])
+    assert triton[4] == 1, "Triton path was not taken"
+    # ... and the control: the reference really did *not* take it, so the
+    # comparison below is between two kernels and not one kernel with itself.
+    assert eager[4] == 0
+    # Both preserve the input's channels-last layout; that is the contract now,
+    # not a rung signature.
+    assert _channels_last(triton[0]) and _channels_last(eager[0])
     _assert_close(triton[0], eager[0], 1e-5, "output")
     _assert_close(triton[1], eager[1], 1e-4, "d_input")
     _assert_close(triton[2], eager[2], 1e-4, "d_weight")

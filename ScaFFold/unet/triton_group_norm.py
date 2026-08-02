@@ -311,8 +311,8 @@ same reduction noise a 134M-element fp32 reduction has anywhere).
 Fused activation
 ================
 ``activation="relu"`` folds the ReLU into the forward store.  In a store-bound
-kernel that is free (one ``tl.maximum``) and it removes an entire 2B streaming
-pass.  Measured against ``F.relu(triton_group_norm(x))``: 39% off the forward
+kernel that is free (one compare and one select) and it removes an entire 2B
+streaming pass.  Measured against ``F.relu(triton_group_norm(x))``: 39% off the forward
 and 35% off fwd+bwd at ``[1,64,256^3]`` (6.83 -> 4.20 ms and 17.82 -> 11.61
 ms), 38%/35% at ``[1,128,128^3]``, 34%/30% at ``[1,256,64^3]``, tapering to
 21%/9% at ``[1,512,32^3]`` and below, where the call is host bound and there is
@@ -327,6 +327,20 @@ alternative, testing ``y > 0`` on the saved output, would need the output kept
 alive *in addition to* ``x`` (which the GroupNorm backward needs regardless),
 and in bf16/fp16 it would also mis-gate any element whose positive
 pre-activation rounded to zero on the store.
+
+Both the store and the gate are spelled as the *complement* of the usual test
+(``tl.where(y <= 0, 0, y)``, ``tl.where(pre <= 0, 0, dy)``) rather than as
+``tl.maximum(y, 0)`` / ``tl.where(pre > 0, dy, 0)``.  The two are identical on
+every finite value but not on NaN: ``tl.maximum`` returns the *non*-NaN operand
+and ``NaN > 0`` is False, so both of the usual spellings silently map a NaN to
+0.0, while ``F.relu`` propagates it and ``threshold_backward(grad, result, 0)``
+-- ReLU's real backward -- passes its gradient (``NaN <= 0`` is False too).
+Matching ``F.relu`` here is not pedantry: a diverging run whose forward comes
+back finite because the fused activation ate the NaN passes straight through
+ScaFFold's non-finite-loss abort and checkpoints a broken model.  ``+-Inf`` and
+``-0.0`` are bit-identical under either spelling (``-0.0`` flushes to ``+0.0``,
+as ``F.relu`` does).  Cost: nil, measured -- see ``FastGroupNorm``'s tests and
+``review/gn-dctensor/wiring-fixes``.
 
 Composition
 ===========
@@ -403,7 +417,40 @@ __all__ = [
     "GNConfig",
     "default_config",
     "SUPPORTED_ACTIVATIONS",
+    "TritonKernelError",
 ]
+
+
+class TritonKernelError(RuntimeError):
+    """A failure of the Triton kernels themselves, with the original as ``__cause__``.
+
+    Raised in place of whatever ``_forward``/``_backward`` raised -- a missing or
+    mismatched ``triton``, an unwritable JIT cache, a compile error, a launch
+    failure, an API change between Triton releases.  It exists so that a caller
+    with a fallback (``ScaFFold.unet.group_norm``'s ladder) can catch *exactly*
+    "the kernel is broken" and nothing else, instead of catching ``Exception``
+    and trying to enumerate every framework mechanism that legitimately raises
+    through a forward -- saved-tensor pack hooks, ``torch.utils.checkpoint``'s
+    recompute control flow, functorch, a user's offloading hook.
+
+    Two things are deliberately *not* tagged and therefore propagate unchanged:
+
+    * ``torch.OutOfMemoryError``, which is a resource condition rather than a
+      defect (every fallback allocates an output of the same size, so retrying
+      one is a second, differently-shaped OOM at a call site the caller did not
+      ask about), and
+    * the ``ValueError``s ``_validate`` raises, which are contract violations by
+      the caller.  ``is_supported`` accepts exactly what ``_validate`` accepts,
+      so a caller that branches on it can never see one; if one escapes, that
+      is a bug in this module and must be loud.
+
+    The tagged region contains no autograd-observable work -- allocations and
+    kernel launches only, with ``save_for_backward`` happening in
+    ``_setup_context`` strictly *after* ``_forward`` returns -- so an exception
+    that carries this type is guaranteed to have been raised before the op saved
+    anything.  That is what makes retrying the call on another kernel safe.
+    """
+
 
 #: The activations that may be fused into the forward store.
 SUPPORTED_ACTIVATIONS = (None, "relu")
@@ -951,7 +998,14 @@ def _build_kernels():
             xhat = (x - mean) * rstd
             y = xhat * w + b
             if RELU:
-                y = tl.maximum(y, 0.0)
+                # `tl.maximum(y, 0.0)` and `tl.where(y > 0, y, 0.0)` both map NaN
+                # to 0.0 (the first returns the non-NaN operand, the second
+                # because `NaN > 0` is False), while `F.relu` propagates it.
+                # Testing the *complement* keeps NaN on the pass-through side:
+                # `NaN <= 0` is also False, so NaN falls to `y`.  Bit-identical
+                # to `F.relu` on NaN, +-Inf and -0.0 (which both flush to +0.0),
+                # for one comparison and one select -- see the module docstring.
+                y = tl.where(y <= 0.0, 0.0, y)
             tl.store(Y + base + off, y.to(Y.dtype.element_ty), mask=m)
 
     # ------------------------------------------------------------- backward --
@@ -1032,8 +1086,12 @@ def _build_kernels():
                 # Identical expression (and therefore identical rounding) to
                 # the forward's pre-activation, so the sign test agrees with
                 # the forward bit for bit.  Masked lanes carry dy == 0, so
-                # gating cannot resurrect them.
-                dy = tl.where(xhat * w + b > 0.0, dy, 0.0)
+                # gating cannot resurrect them.  Spelled as the *complement*
+                # (`pre <= 0` zeroes) rather than `pre > 0` passes, so that a
+                # NaN pre-activation passes the gradient through: that is what
+                # `threshold_backward(grad, result, 0)` -- ReLU's real backward
+                # -- does, since `NaN <= 0` is False.  See the forward store.
+                dy = tl.where(xhat * w + b <= 0.0, 0.0, dy)
             dyw = dy * w
             acc1 += tl.sum(tl.sum(dyw, 2), 0)
             acc2 += tl.sum(tl.sum(dyw * xhat, 2), 0)
@@ -1178,7 +1236,10 @@ def _build_kernels():
                 dy = tl.load(DY + base + off, mask=m, other=0.0).to(tl.float32)
                 xhat = (x - mean) * rstd
                 if RELU:
-                    dy = tl.where(xhat * w + b > 0.0, dy, 0.0)
+                    # Same complement spelling as _bwd_partial_kernel: a NaN
+                    # pre-activation must pass the gradient, exactly as
+                    # `threshold_backward(grad, result, 0)` does.
+                    dy = tl.where(xhat * w + b <= 0.0, 0.0, dy)
                 dyw = dy * w
                 dx = rstd * (dyw - c1 - xhat * c2)
                 tl.store(DX + base + off, dx.to(DX.dtype.element_ty), mask=m)
@@ -1239,6 +1300,38 @@ def _shape_of(input: torch.Tensor):
     return n, channels, spatial
 
 
+def _tag_kernel_failures(fn):
+    """Re-raise anything ``fn`` raises as :class:`TritonKernelError`.
+
+    Applied to the two functions that do nothing but import Triton, allocate
+    scratch and launch kernels.  The region is *closed*: it runs no
+    autograd-observable op, so a blanket ``except Exception`` here cannot
+    swallow framework control flow the way one at the call site would -- there
+    is no pack hook, no recompute stop and no functorch layer inside it.  That
+    closure is what lets the caller's fallback ladder use a one-element
+    allowlist instead of an ever-growing denylist.
+
+    ``torch.OutOfMemoryError`` is passed through untagged; see
+    :class:`TritonKernelError`.
+    """
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except torch.OutOfMemoryError:
+            raise
+        except TritonKernelError:
+            raise
+        except Exception as e:
+            raise TritonKernelError(
+                f"{fn.__name__} failed ({type(e).__name__}: {e})"
+            ) from e
+
+    return wrapper
+
+
+@_tag_kernel_failures
 def _forward(input, num_groups, weight, bias, eps, activation, out_dtype):
     _ensure_kernels()
     n, channels, spatial = _shape_of(input)
@@ -1304,6 +1397,7 @@ def _forward(input, num_groups, weight, bias, eps, activation, out_dtype):
     return out, mean, rstd
 
 
+@_tag_kernel_failures
 def _backward(grad_out, input, weight, bias, mean, rstd, num_groups, activation):
     _ensure_kernels()
     n, channels, spatial = _shape_of(input)
