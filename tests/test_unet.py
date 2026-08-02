@@ -204,13 +204,12 @@ def test_up_pad_guarded_when_diffs_zero():
 # The decoder skip concatenation.
 #
 # ``Up.forward`` no longer calls ``torch.cat`` directly; it goes through
-# ``ScaFFold.unet.triton_cat.skip_concat``, which may legitimately emit a
-# narrower dtype than ``torch.cat`` would when autocast is on (see the ``Up``
-# docstring).  Everything below pins the part that must NOT change: outside
-# autocast the block is bitwise what it was, the ``F.pad`` path still works,
-# and both the ``trilinear`` and ``ConvTranspose3d`` branches agree with an
-# explicit ``torch.cat`` reference.  The kernel's own parity tests live in
-# ``tests/test_triton_cat.py``.
+# ``unet_parts._skip_concat``, which may legitimately emit a narrower dtype
+# than ``torch.cat`` would when autocast is on (see the ``Up`` docstring).
+# Everything below pins the part that must NOT change: outside autocast the
+# block is bitwise what it was, the ``F.pad`` path still works, and both the
+# ``trilinear`` and ``ConvTranspose3d`` branches agree with an explicit
+# ``torch.cat`` reference.
 # --------------------------------------------------------------------------- #
 @pytest.mark.parametrize("trilinear", [False, True])
 def test_up_matches_an_explicit_torch_cat_reference(trilinear):
@@ -285,16 +284,16 @@ def test_up_gradients_match_an_explicit_torch_cat_reference():
 def test_up_concatenation_keeps_channels_last():
     """The concatenation must not break the layout chain it exists to preserve.
 
-    Asserted on ``skip_concat`` with two channels-last halves rather than on a
+    Asserted on ``_skip_concat`` with two channels-last halves rather than on a
     whole ``Up`` block: on CPU ``nn.ConvTranspose3d`` returns a *contiguous*
     tensor whatever it is handed, so the block's own inputs to the
     concatenation are not both channels-last there and the block-level
     assertion would be measuring the convolution's layout policy, not this
-    one's.  On GPU with ``PYTORCH_MIOPEN_SUGGEST_NHWC=1`` -- the configuration
-    the kernel exists for -- both halves are channels-last and this is the
-    property ``Up`` relies on.
+    one's.  On GPU with ``PYTORCH_MIOPEN_SUGGEST_NHWC=1`` -- the production
+    configuration -- both halves are channels-last and this is the property
+    ``Up`` relies on.
     """
-    from ScaFFold.unet.triton_cat import skip_concat
+    from ScaFFold.unet.unet_parts import _skip_concat as skip_concat
 
     generator = torch.Generator().manual_seed(14)
     x1 = torch.randn(1, 16, 16, 16, 16, generator=generator).contiguous(
