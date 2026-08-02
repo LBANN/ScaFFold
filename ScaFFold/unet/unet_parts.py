@@ -14,13 +14,13 @@
 
 """Parts of the U-Net model"""
 
-import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from ScaFFold.utils.perf_measure import annotate
 
 from .group_norm import FastGroupNorm
+from .triton_cat import skip_concat
 
 _doubleconv_annotate = annotate(fmt="DoubleConv.{}")
 _down_annotate = annotate(fmt="Down.{}")
@@ -92,7 +92,30 @@ class Down(nn.Module):
 
 
 class Up(nn.Module):
-    """Upscaling then double conv"""
+    """Upscaling then double conv
+
+    The skip concatenation goes through :func:`ScaFFold.unet.triton_cat.skip_concat`
+    rather than ``torch.cat``.  That does two things, both of which leave the
+    tensor the following convolution reads *bitwise* unchanged (verified in
+    ``tests/test_triton_cat.py``):
+
+    * It emits the dtype the convolution will use instead of ``torch.cat``'s
+      promoted one.  Under ``torch.autocast`` the two halves do not have the
+      same dtype -- the skip comes from a GroupNorm, an fp32-policy op, and the
+      upsampled half comes from a ``ConvTranspose3d`` and is bf16 -- so ``cat``
+      widens the bf16 half to fp32, concatenates at fp32, and the convolution
+      then narrows the whole double-width result straight back down.  Three
+      full-resolution passes to deliver one.
+    * It runs a channels-last-native kernel, which matters most for the
+      *backward*: ``cat``'s backward is a narrowed view that every consumer
+      then forces contiguous, and that strided copy reaches only 51-63% of this
+      device's streaming roofline against the kernel's 90-103%.
+
+    Both rest on ``self.conv`` beginning with a convolution, which the
+    constructor below guarantees on either branch.  ``skip_concat`` is total:
+    anything its ``is_supported`` declines -- CPU, non-channels-last, no Triton
+    -- falls back to ``torch.cat``.
+    """
 
     def __init__(self, in_channels, out_channels, group_norm_groups, trilinear=True):
         super().__init__()
@@ -135,7 +158,9 @@ class Up(nn.Module):
         # if you have padding issues, see
         # https://github.com/HaiyongJiang/U-Net-Pytorch-Unstructured-Buggy/commit/0e854509c2cea854e247a9c615f175f76fbb2e3a
         # https://github.com/xiaopeng-liao/Pytorch-UNet/commit/8ebac70e633bac59fc22bb5195e513d5832fb3bd
-        x = torch.cat([x2, x1], dim=1)
+        # torch.cat([x2, x1], dim=1) with the dtype and the layout the
+        # convolution below actually wants; see the class docstring.
+        x = skip_concat(x2, x1)
         return self.conv(x)
 
 
