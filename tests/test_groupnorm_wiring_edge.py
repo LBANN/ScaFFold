@@ -491,6 +491,72 @@ def test_a_global_latch_does_not_demote_a_module_that_already_used_the_rung(
     assert fresh._compiled_ok is False
 
 
+@pytest.mark.parametrize("rung", ["triton", "compiled"])
+def test_a_proven_rung_does_not_degrade_while_a_backward_replays_it(monkeypatch, rung):
+    """A fallback *during a recompute* corrupts rather than degrades.
+
+    The latch already refuses to demote a module that has used a rung, but the
+    fallback itself sidestepped that: the failing call still got answered from
+    the next rung down, and if that call is ``torch.utils.checkpoint``'s
+    recompute of a forward that ran on the failing rung, the recomputed forward
+    saves a different set of tensors than the original did and torch rejects
+    the whole step (``CheckpointError``; on one measured shape a GPU memory
+    fault instead).  Neither is a degradation, so this one case re-raises.
+
+    It is narrow on purpose -- ``_replaying_a_forward()`` is false in an
+    ordinary forward, where ``test_a_global_latch_does_not_demote_a_module_...``
+    still requires the fallback -- and the second half here pins the other side
+    of the narrowness: a module that has *not* used the rung degrades even
+    inside the backward, because the forward it is replaying went down the
+    ladder too and the two agree.
+    """
+    import torch._dynamo.exc
+    import torch.utils.checkpoint as checkpoint_mod
+
+    from ScaFFold.unet.triton_group_norm import TritonKernelError
+
+    failure = TritonKernelError if rung == "triton" else torch._dynamo.exc.Unsupported
+    latch = "_triton_failed" if rung == "triton" else "_compile_failed"
+    proven_flag = "_triton_ok" if rung == "triton" else "_compiled_ok"
+
+    def make_kernel(fail_always):
+        def _kernel(input, num_groups, weight, bias, eps, *activation):
+            if fail_always or gn_mod._replaying_a_forward():
+                raise failure("simulated kernel failure")
+            return F.group_norm(input, num_groups, weight, bias, eps)
+
+        return _kernel
+
+    def run(fail_always):
+        gn_mod._triton_failed = False
+        gn_mod._compile_failed = False
+        kernel = make_kernel(fail_always)
+        if rung == "triton":
+            monkeypatch.setattr(gn_mod, "_use_triton", lambda *a, **kw: True)
+            module_stub = type("_Stub", (), {"triton_group_norm": staticmethod(kernel)})
+            monkeypatch.setattr(gn_mod, "_get_triton_module", lambda: module_stub)
+        else:
+            monkeypatch.setattr(gn_mod, "_use_compiled", lambda t, **kw: True)
+            monkeypatch.setattr(gn_mod, "_get_compiled_group_norm", lambda: kernel)
+        module = FastGroupNorm(_GROUPS, 16)
+        x = torch.randn(1, 16, 4, 4, 4, requires_grad=True)
+        out = checkpoint_mod.checkpoint(module, x, use_reentrant=False)
+        out.pow(2).sum().backward()
+        return module, x
+
+    # Proven in the forward, failing in the recompute: answering from another
+    # rung would be the metadata mismatch, so the failure has to come back out.
+    with pytest.raises(failure):
+        run(fail_always=False)
+
+    # Never served by the rung: the forward already went down the ladder, so
+    # the recompute doing the same agrees with it and the step survives.
+    module, x = run(fail_always=True)
+    assert getattr(module, proven_flag) is False
+    assert getattr(gn_mod, latch) is True
+    assert torch.isfinite(x.grad).all()
+
+
 def test_a_latch_flip_mid_forward_is_not_a_numerics_error(monkeypatch):
     """Two rungs inside one forward still compose (values, not bits, agree)."""
     monkeypatch.setattr(
@@ -615,7 +681,8 @@ def test_gpu_triton_rung_inside_a_compiled_region(monkeypatch, fullgraph):
 
 
 @pytest.mark.gpu
-def test_gpu_the_fallback_path_traces_under_fullgraph(monkeypatch):
+@pytest.mark.parametrize("proven", [False, True])
+def test_gpu_the_fallback_path_traces_under_fullgraph(monkeypatch, proven):
     """A rung failure *while Dynamo is tracing* must still fall back, not die.
 
     The handler used to call ``logger.warning``, which Dynamo cannot trace
@@ -625,6 +692,12 @@ def test_gpu_the_fallback_path_traces_under_fullgraph(monkeypatch):
     most, since the thing it is reacting to is usually a compile-time failure.
     Nothing in ScaFFold compiles ``FastGroupNorm.forward`` today; this pins the
     claim that it can.
+
+    Both halves of the handler's guard have to trace, which is why ``proven``
+    is parametrized: with ``_triton_ok`` false Dynamo folds the ``and`` away
+    without ever looking at ``_replaying_a_forward()``, so only the ``True``
+    arm reaches it -- and a probe Dynamo cannot trace there would be the same
+    defect as the logging call, reintroduced.
     """
     import torch._dynamo
 
@@ -648,7 +721,7 @@ def test_gpu_the_fallback_path_traces_under_fullgraph(monkeypatch):
 
     monkeypatch.setattr(gn_mod, "_get_triton_module", _BrokenKernelModule)
     gn_mod._triton_failed = False
-    module._triton_ok = False
+    module._triton_ok = proven
     torch._dynamo.reset()
 
     compiled = torch.compile(lambda t: module(t), fullgraph=True, dynamic=False)

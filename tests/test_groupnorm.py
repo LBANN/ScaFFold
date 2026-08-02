@@ -697,6 +697,95 @@ def test_recompile_limit_is_raised_never_lowered():
         setattr(config, name, original)
 
 
+def test_the_compiled_region_carries_its_own_recompile_limit(monkeypatch):
+    """The global limit is thread-local, so the region must carry one too.
+
+    ``torch._dynamo.config`` keeps user overrides in a ``ContextVar``
+    ("User overrides are thread-local", ``torch/utils/_config_module.py``), so
+    what :func:`_raise_recompile_limit` writes is invisible from every *other*
+    thread -- and one of those threads matters: ``torch.utils.checkpoint``'s
+    non-reentrant recompute runs inside the backward pass, i.e. on the autograd
+    engine's device worker thread.  On a ``DCTensor`` that recompute has to
+    compile (it reaches this module with ``__torch_function__`` subclass
+    handling disabled, which is part of Dynamo's ``GLOBAL_STATE`` guard, so it
+    misses every entry the forward built), and there the limit read the stock 8
+    however large the global had been set -- ``FailOnRecompileLimitHit``, run
+    over.  ``torch.compile``'s ``recompile_limit=`` is applied by Dynamo around
+    the compile itself, on whichever thread that compile happens on, which is
+    the only spelling that reaches the worker; this pins that we ask for it.
+    """
+    seen = {}
+
+    def _fake_compile(fn, **kwargs):
+        seen.update(kwargs)
+        return fn
+
+    monkeypatch.setattr(torch, "compile", _fake_compile)
+    assert gn_mod._compile_group_norm() is gn_mod._group_norm
+    assert seen.get("recompile_limit") == gn_mod._MIN_RECOMPILE_LIMIT
+    assert seen.get("fullgraph") is True and seen.get("dynamic") is False
+
+
+def test_compiling_still_works_without_a_per_region_limit(monkeypatch):
+    """A torch too old for ``recompile_limit=`` must still get a callable.
+
+    The keyword is the fix for the worker thread, not a requirement for
+    compiling at all; dropping the whole rung on a ``TypeError`` would be a far
+    bigger regression than the case it addresses.
+    """
+    calls = []
+
+    def _fake_compile(fn, **kwargs):
+        calls.append(kwargs)
+        if "recompile_limit" in kwargs:
+            raise TypeError("compile() got an unexpected keyword 'recompile_limit'")
+        return fn
+
+    monkeypatch.setattr(torch, "compile", _fake_compile)
+    assert gn_mod._compile_group_norm() is gn_mod._group_norm
+    assert len(calls) == 2 and "recompile_limit" not in calls[1]
+
+
+def test_a_recompile_limit_hit_is_a_kernel_failure_not_a_crash(monkeypatch, caplog):
+    """``FailOnRecompileLimitHit`` has to land in the ladder, not in the run.
+
+    It is what ``fullgraph=True`` raises when a frame needs more cache entries
+    than the recompile limit allows, and -- unlike every other Dynamo failure --
+    it derives straight from ``Exception`` rather than from
+    ``TorchDynamoException``, so an allowlist that names only the latter lets it
+    escape and kill the step (observed at ``5943389``).  It is raised while
+    compiling, before the callable has run or saved anything, so the eager
+    retry underneath it is safe.
+    """
+    import torch._dynamo.exc
+
+    limit_hit = torch._dynamo.exc.FailOnRecompileLimitHit
+    assert not issubclass(limit_hit, torch._dynamo.exc.TorchDynamoException), (
+        "naming it separately is only needed while it sits outside that root"
+    )
+
+    def _kernel(*args, **kwargs):
+        raise limit_hit("simulated recompile limit hit")
+
+    monkeypatch.setattr(
+        gn_mod, "_use_compiled", lambda t, **kw: type(t) is torch.Tensor
+    )
+    monkeypatch.setattr(gn_mod, "_get_compiled_group_norm", lambda: _kernel)
+    gn_mod._compile_failed = False
+
+    fast = _seeded_norm()
+    x = _make_input(seed=51, channels=16, size=4)
+    expected = nn.functional.group_norm(x, _GROUPS, fast.weight, fast.bias, fast.eps)
+
+    with caplog.at_level(logging.WARNING, logger=gn_mod.__name__):
+        out = fast(x)
+
+    assert torch.allclose(out, expected), "the eager fallback did not run"
+    assert gn_mod._compile_failed is True, "the failure did not latch the rung off"
+    assert fast._compiled_ok is False
+    assert any("falling back" in record.message for record in caplog.records)
+
+
 # ---------------------------------------------------------------------------
 # DCTensor routing: unwrap -> compiled kernel -> rewrap
 # ---------------------------------------------------------------------------
@@ -1126,6 +1215,144 @@ def test_gpu_activation_checkpointing_matches_eager():
     assert not gn_mod._compile_failed
     assert_agrees(compiled, eager, "checkpointed grad")
     assert_agrees(compiled_nockpt, compiled, "grad")
+
+
+@pytest.mark.gpu
+def test_gpu_the_recompile_limit_holds_on_a_worker_thread():
+    """Past Dynamo's stock 8 entries, compiling from a thread that never set it.
+
+    ``torch._dynamo.config``'s user overrides live in a ``ContextVar``, so the
+    limit :func:`_raise_recompile_limit` writes on the main thread is not the
+    limit another thread reads -- and the compiles that matter happen on
+    another thread, because ``torch.utils.checkpoint``'s recompute runs inside
+    the backward pass, on the autograd engine's device worker.  This drives the
+    same shape of traffic directly: entries live on ``_group_norm``'s code
+    object and are shared between threads, so a worker that pushes the count
+    past 8 is exactly the situation the recompute creates.  Before the
+    per-region ``recompile_limit=``, the ninth compile raised
+    ``FailOnRecompileLimitHit`` here.
+
+    ``torch._dynamo.reset()`` first because those entries also accumulate
+    across the whole test session, which would otherwise decide the outcome.
+    """
+    import threading
+
+    torch._dynamo.reset()
+    gn_mod.set_triton_enabled(False)  # this is the compiled rung's limit
+    gn_mod.set_compile_enabled(True)
+    gn_mod._compile_failed = False
+
+    device = torch.device("cuda")
+    # Nine distinct channel counts: nine cache entries, one more than the stock
+    # limit allows, and the one that overflows must land on the worker thread.
+    norms = [FastGroupNorm(_GROUPS, 8 * n).to(device) for n in range(1, 10)]
+    failures = []
+
+    def run(subset):
+        try:
+            for norm in subset:
+                norm(torch.randn(1, norm.num_channels, 2, 2, 2, device=device))
+        except BaseException as error:  # noqa: BLE001 - re-raised below
+            failures.append(error)
+
+    run(norms[:2])
+    worker = threading.Thread(target=run, args=(norms[2:],))
+    worker.start()
+    worker.join()
+
+    if failures:
+        raise AssertionError(f"compiling off the main thread failed: {failures[0]}")
+    assert gn_mod._compile_failed is False, "the rung latched itself off"
+    assert all(norm._compiled_ok for norm in norms), (
+        "some module never had a call served by the compiled rung"
+    )
+
+
+@pytest.mark.gpu
+def test_gpu_checkpointed_dctensor_recompute_keeps_the_compiled_rung(dc_cuda):
+    """The three-way combination that used to die: ckpt + compiled rung + DCTensor.
+
+    ``activation_checkpointing: true`` with ``SCAFFOLD_GROUPNORM_TRITON=0`` on
+    DistConv activations is a supported configuration and it crashed: the
+    recompute reaches this module with ``__torch_function__`` subclass handling
+    *disabled* (DistConv's backward runs below it), which is part of Dynamo's
+    ``GLOBAL_STATE`` guard, so it misses every cache entry the forward built and
+    compiles a second set beside them -- twice the shapes, past 8 -- on the
+    autograd worker thread, where the module's raised limit was invisible.  Each
+    pair of the three is fine on its own; all three together raised
+    ``FailOnRecompileLimitHit`` (at ``5943389``) or, once the ladder caught it
+    and dropped a *proven* module to eager mid-recompute, ``CheckpointError``.
+
+    Five norms is the smallest count that reproduces it: 5 forward entries plus
+    5 recompute entries is 10, and the ninth compile is the one that overflows.
+    The convolutions are what make the block's backward run below torch-function
+    (a bare unwrap does not), and the loss is taken on the ``DCTensor`` for the
+    same reason the trainer's is.
+    """
+    import threading
+
+    import torch.utils.checkpoint
+
+    distconv, ps = dc_cuda
+    device = torch.device("cuda")
+    channels = (8, 16, 24, 32, 40)
+
+    torch._dynamo.reset()
+    gn_mod.set_triton_enabled(False)
+    gn_mod.set_compile_enabled(True)
+    gn_mod._compile_failed = False
+
+    torch.manual_seed(5)
+    norms = [FastGroupNorm(_GROUPS, c).to(device) for c in channels]
+    convs = [
+        nn.Conv3d(previous, c, 1, bias=False).to(device)
+        for previous, c in zip((1,) + channels[:-1], channels)
+    ]
+    tail = nn.Conv3d(channels[-1], 1, 1, bias=False).to(device)
+
+    # Where each GroupNorm call happens, as Dynamo's GLOBAL_STATE guard sees it.
+    states = set()
+
+    def block(t):
+        for conv, norm in zip(convs, norms):
+            states.add(
+                (
+                    threading.current_thread() is threading.main_thread(),
+                    torch._C._is_torch_function_enabled(),
+                )
+            )
+            t = norm(conv(t))
+        return tail(t)
+
+    x = torch.randn(1, 1, 4, 4, 4, device=device)
+
+    def step(checkpointing):
+        for parameter in [x] + [
+            p for m in convs + norms + [tail] for p in m.parameters()
+        ]:
+            parameter.grad = None
+        x.requires_grad_(True)
+        wrapped = distconv.DCTensor.from_shard(x, ps)
+        if checkpointing:
+            out = torch.utils.checkpoint.checkpoint(block, wrapped, use_reentrant=False)
+        else:
+            out = block(wrapped)
+        out.float().square().mean().backward()
+        return [norm.weight.grad.detach().clone() for norm in norms]
+
+    checkpointed = step(True)
+    step(True)  # a second step must not compile anything new either
+    direct = step(False)
+
+    assert (False, False) in states, (
+        "the recompute did not run below torch-function off the main thread; "
+        "this configuration no longer reproduces the guard split it targets"
+    )
+    assert gn_mod._compile_failed is False, "the compiled rung latched itself off"
+    assert all(norm._compiled_ok for norm in norms), "a norm never ran compiled"
+    for index, (recomputed, plain) in enumerate(zip(checkpointed, direct)):
+        assert torch.isfinite(recomputed).all(), index
+        _assert_close(recomputed, plain, 1e-4, f"norm {index} weight grad")
 
 
 # ---------------------------------------------------------------------------

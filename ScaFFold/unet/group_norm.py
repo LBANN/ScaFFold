@@ -72,7 +72,9 @@ failure is caught, logged once and retried on the next rung down.
 caught on ``triton_group_norm.TritonKernelError``, which that module raises for
 anything its launch region produces; the compiled rung on
 ``torch._dynamo.exc.TorchDynamoException``, the root of every Dynamo and
-Inductor compile failure.  Everything else propagates -- saved-tensor pack
+Inductor compile failure, *plus* ``FailOnRecompileLimitHit``, which despite the
+name derives from ``Exception`` and not from that root (see
+:func:`_compiled_kernel_failures`).  Everything else propagates -- saved-tensor pack
 hooks, ``torch.utils.checkpoint``'s recompute control flow, a user's offloading
 hook, ``torch.OutOfMemoryError``, an error from a shape the kernel mishandles
 badly enough to corrupt the graph.  The previous shape of this code caught
@@ -98,6 +100,17 @@ exact opposite of the contract above (measured; matching the output memory
 format is *not* sufficient on its own).  Keeping a proven rung pins each
 module's choice for the life of the process, so forward and recompute always
 agree.
+
+The same reasoning bounds the *fallback* itself, which the latch alone does not:
+a proven module still has to answer the call its rung just failed, and answering
+it eagerly is exactly the flip the paragraph above forbids -- if that call is a
+checkpoint recompute.  So the fallback is declined in the one case where it
+would corrupt rather than degrade: a module proven on the rung, failing while an
+autograd graph task is in flight (:func:`_replaying_a_forward`), re-raises.
+Every other failure -- and in particular every *first* failure, which is what a
+broken Triton install, an unwritable Inductor cache or a missing compiler
+produce -- still degrades, which is where the "must not kill a multi-node run"
+contract actually lives.
 
 Note that a latch is process-local: under DDP one rank can end up running a
 different kernel from its peers.  All three kernels agree to fp32 rounding, not
@@ -161,8 +174,13 @@ SUPPORTED_ACTIVATIONS = (None, "relu")
 #: UNet presents one entry per distinct activation shape (5 at scale 7) times
 #: grad-enabled/no-grad (training vs. evaluation), i.e. 10 -- above the stock
 #: limit of 8, which would silently drop the whole model back to eager mid-run.
-#: The traced function is a single ``F.group_norm`` call, so the extra entries
-#: cost only their one-time compilation.
+#: ``activation_checkpointing`` on a ``DCTensor`` doubles that again: the
+#: recompute reaches this module with ``__torch_function__`` subclass handling
+#: *disabled* (DistConv's backward runs below it), which is part of Dynamo's
+#: ``GLOBAL_STATE`` guard, so the recomputed forward misses every entry the
+#: original forward built and compiles a second set beside it -- 20 for the same
+#: 5 shapes (measured).  The traced function is a single ``F.group_norm`` call,
+#: so the extra entries cost only their one-time compilation.
 _MIN_RECOMPILE_LIMIT = 64
 
 # Lazily built on the first eligible forward: importing ScaFFold must not drag
@@ -265,18 +283,54 @@ def _group_norm(input, num_groups, weight, bias, eps):
 
 
 def _raise_recompile_limit():
-    """Lift Dynamo's per-function recompile cap to cover every UNet GN shape.
+    """Lift Dynamo's *global* recompile cap to cover every UNet GN shape.
 
     Only ever raises it, so a caller that deliberately set a larger limit keeps
     theirs -- but note the converse: a limit deliberately set *smaller* than
     ours is clobbered up to ``_MIN_RECOMPILE_LIMIT``. ``cache_size_limit`` is
     the older spelling of ``recompile_limit``; set whichever exists.
+
+    This is the *portable* half of the mitigation and, on its own, not a
+    sufficient one: ``torch._dynamo.config`` stores user overrides in a
+    ``ContextVar`` (``torch/utils/_config_module.py``: "User overrides are
+    thread-local"), so an assignment made here is invisible to every other
+    thread, which keeps reading the stock default of 8.  That matters because
+    ``torch.utils.checkpoint``'s non-reentrant recompute runs inside the
+    backward pass, i.e. on the autograd engine's device worker thread, and a
+    recompute that has to compile -- which it does on a ``DCTensor``, see
+    ``_MIN_RECOMPILE_LIMIT`` -- would hit 8 there no matter what this function
+    wrote on the main thread.  :func:`_compile_group_norm` therefore also asks
+    ``torch.compile`` for a per-region limit, which Dynamo applies on whichever
+    thread is compiling.
     """
     config = torch._dynamo.config
     for name in ("recompile_limit", "cache_size_limit"):
         current = getattr(config, name, None)
         if isinstance(current, int) and current < _MIN_RECOMPILE_LIMIT:
             setattr(config, name, _MIN_RECOMPILE_LIMIT)
+
+
+def _compile_group_norm():
+    """``torch.compile`` :func:`_group_norm` with a thread-proof recompile cap.
+
+    ``recompile_limit=`` is the per-region spelling of the cap: Dynamo applies
+    it with ``config.patch()`` around the compile itself, on whatever thread
+    that compile happens on, which is the only spelling that survives the
+    autograd worker thread (see :func:`_raise_recompile_limit`).  Older torches
+    have no such keyword -- there the global assignment is all there is, and the
+    checkpoint-recompute case is simply out of reach.
+    """
+    try:
+        return torch.compile(
+            _group_norm,
+            dynamic=False,
+            fullgraph=True,
+            recompile_limit=_MIN_RECOMPILE_LIMIT,
+        )
+    except TypeError:
+        # A torch too old for the keyword: still compile, because the rung is
+        # worth far more than the one configuration the keyword rescues.
+        return torch.compile(_group_norm, dynamic=False, fullgraph=True)
 
 
 def _get_compiled_group_norm():
@@ -292,7 +346,7 @@ def _get_compiled_group_norm():
     global _compiled_group_norm
     if _compiled_group_norm is None:
         _raise_recompile_limit()
-        _compiled_group_norm = torch.compile(_group_norm, dynamic=False, fullgraph=True)
+        _compiled_group_norm = _compile_group_norm()
     return _compiled_group_norm
 
 
@@ -348,9 +402,19 @@ def _compiled_kernel_failures():
     (``fullgraph=True`` met something untraceable), ``BackendCompilerFailed``
     and its ``InductorError`` subclass (the backend, and therefore also an
     unwritable Inductor cache or a broken C++/Triton toolchain), and
-    ``InternalTorchDynamoError``.  All of them are raised while *compiling*,
-    i.e. before the compiled callable has executed or saved anything, which is
-    what makes the fallback safe to retry.
+    ``InternalTorchDynamoError``.
+
+    ``FailOnRecompileLimitHit`` -- raised when a frame needs more cache entries
+    than the recompile limit allows, which under ``fullgraph=True`` is a hard
+    error rather than a drop to eager -- is *not* under that root: it derives
+    straight from ``Exception`` (``torch/_dynamo/exc.py``), so catching only
+    ``TorchDynamoException`` lets it kill the run.  It is named separately
+    rather than assumed, and only added when it really is outside the root, so
+    a torch that later reparents it does not produce a duplicate entry.
+
+    All of these are raised while *compiling*, i.e. before the compiled callable
+    has executed or saved anything, which is what makes the fallback safe to
+    retry.
 
     Resolved on demand and cached: importing ``torch._dynamo`` is precisely the
     cost :func:`_get_compiled_group_norm` defers.  An empty tuple (a torch
@@ -360,12 +424,54 @@ def _compiled_kernel_failures():
     global _COMPILED_KERNEL_FAILURES
     if _COMPILED_KERNEL_FAILURES is None:
         try:
-            import torch._dynamo.exc
-
-            _COMPILED_KERNEL_FAILURES = (torch._dynamo.exc.TorchDynamoException,)
+            import torch._dynamo.exc as dynamo_exc
         except ImportError:  # pragma: no cover - torch always ships it
             _COMPILED_KERNEL_FAILURES = ()
+        else:
+            failures = [dynamo_exc.TorchDynamoException]
+            limit_hit = getattr(dynamo_exc, "FailOnRecompileLimitHit", None)
+            if isinstance(limit_hit, type) and not issubclass(
+                limit_hit, dynamo_exc.TorchDynamoException
+            ):
+                failures.append(limit_hit)
+            _COMPILED_KERNEL_FAILURES = tuple(failures)
     return _COMPILED_KERNEL_FAILURES
+
+
+def _replaying_a_forward():
+    """``True`` while this thread is executing inside an autograd graph task.
+
+    ``torch._C._current_graph_task_id()`` is ``-1`` outside a backward pass and
+    the running task's id inside one; it is the same signal
+    ``torch.utils.checkpoint`` keys its own recompute bookkeeping on
+    (``torch/utils/checkpoint.py``'s ``unpack_hook``).
+
+    A GroupNorm *forward* that runs while a backward is in flight is not a new
+    call: it is a checkpoint recompute (or a double backward) replaying a
+    forward that has already happened and whose saved tensors are already held.
+    That is the one place where quietly answering on a different rung than the
+    original forward used is not a fallback but a corruption -- the rungs save
+    different tensors for backward, so the recompute's saved set no longer
+    matches (measured: ``CheckpointError: Recomputed values ... have different
+    metadata``, and on one shape a GPU memory fault instead).  See
+    :meth:`FastGroupNorm.forward`.
+
+    ``is_compiling()`` first, for the same reason :func:`_warn_rung_failure`
+    checks it: the probe below is a ``torch._C`` builtin returning an ``int``,
+    which Dynamo cannot trace ("Unsupported torch.* op returned non-Tensor"),
+    so a caller who wraps this ``forward`` in ``torch.compile(fullgraph=True)``
+    would get a hard error where the fallback belongs.  Dynamo folds it to
+    ``True`` at trace time, leaving ``False`` here as a constant -- which is
+    also the right answer: tracing is not replaying, and the recompute this
+    guards against runs with Dynamo disabled anyway
+    (``torch.utils.checkpoint``'s ``_run_fn_with_dynamo_disabled``).
+    """
+    if torch.compiler.is_compiling():
+        return False
+    task_id = getattr(torch._C, "_current_graph_task_id", None)
+    if task_id is None:  # pragma: no cover - every supported torch has it
+        return False
+    return task_id() != -1
 
 
 #: ``True`` while a ``torch.func`` transform (``vmap``/``grad``/``jvp``) is on
@@ -714,6 +820,12 @@ class FastGroupNorm(nn.GroupNorm):
                     _warn_rung_failure(
                         "Triton GroupNorm", e, "compiled kernel", TRITON_ENV_VAR
                     )
+                # ... with one exception, shared with the compiled rung below
+                # and explained there: a module already proven on this rung must
+                # not be answered from a different one while a backward is
+                # replaying its forward.
+                if self._triton_ok and _replaying_a_forward():
+                    raise
             else:
                 # Only written once: nn.Module.__setattr__ is not free, and
                 # after the first success this reads a class attribute.
@@ -739,6 +851,17 @@ class FastGroupNorm(nn.GroupNorm):
                 _warn_rung_failure(
                     "torch.compile of GroupNorm", e, "eager kernel", COMPILE_ENV_VAR
                 )
+            # The one call this rung must not answer eagerly: a module already
+            # proven on it, failing while a backward is in flight, is a
+            # checkpoint recompute of a forward that *did* run compiled.  The
+            # rungs save different tensors, so handing back the eager result
+            # makes the recomputed saved set disagree with the saved one and
+            # torch rejects the step -- a `CheckpointError`, or worse (both
+            # measured).  Degrading is for modules with nothing to contradict;
+            # here the honest answer is the original exception, which at least
+            # names the rung and the shape that could not be served.
+            if self._compiled_ok and _replaying_a_forward():
+                raise
             return self._eager_forward(input)
         else:
             if not self._compiled_ok:
