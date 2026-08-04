@@ -82,7 +82,6 @@ See the specifications from [the benchmarking page.](https://software.llnl.gov/b
 * Train a UNet
     * Based on this work (link) which demonstrated that pretraining a UNet on synthetic fractals like this yielded signficant performance improvements
 
-
 ### Generating the fractal classes
 
 Fractals are generated via an [Iterated Function System (IFS)](https://en.wikipedia.org/wiki/Iterated_function_system), which are composed of affine transformations. In our case, one affine transformation is determined by a set of 12 randomly generated parameters: the first 9 compose a 3x3 rotation matrix, and the last 3 compose a translation matrix:
@@ -167,6 +166,14 @@ For n  in n_volumes:
 
     3. Save volume and mask  to files
 ```
+
+### U-Net architecture
+
+ScaFFold trains a configurable 3D U-Net for semantic segmentation. Each encoder block applies two 3D convolutions with GroupNorm and ReLU, preceded by 2x downsampling with `MaxPool3d` after the first block. Decoder blocks upsample with `ConvTranspose3d`, concatenate the matching encoder skip connection, and apply the same double-convolution block. The final `OutConv` maps the last feature volume to per-voxel class logits.
+
+The schematic below shows the scale 8 configuration, with a `256^3` input volume, five downsampling stages, five skip-connected upsampling stages, and a 6-class output mask.
+
+![Scale 8 3D U-Net architecture](ScaFFold/readme_figs/unet_arch.png)
 
 ### Performance Profiling
 
