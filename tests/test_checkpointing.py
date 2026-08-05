@@ -94,7 +94,7 @@ class _FakeCudaEvent:
 
 
 # ---------------------------------------------------------------------------
-# F10 -- atomic writes + fallback + no swallowing
+# Atomic writes + fallback + no swallowing
 # ---------------------------------------------------------------------------
 
 
@@ -191,7 +191,7 @@ def test_save_errors_not_swallowed(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# R04 -- async save failures are reported, and the run's LAST save is consumed
+# Async save failures are reported, and the run's LAST save is consumed
 # ---------------------------------------------------------------------------
 
 
@@ -272,7 +272,7 @@ def test_final_async_save_failure_fails_the_run(tiny_trainer, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# R05 -- a rank-0 write failure fails every rank with the same error
+# A rank-0 write failure fails every rank with the same error
 # ---------------------------------------------------------------------------
 
 # Two-rank script: rank 0's torch.save fails. Both ranks must come out of
@@ -370,7 +370,7 @@ def test_rank0_save_failure_fails_all_ranks(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# F41 -- race-free best decision (cached best loss, no per-save probe)
+# Race-free best decision (cached best loss, no per-save probe)
 # ---------------------------------------------------------------------------
 
 
@@ -428,7 +428,7 @@ def test_async_best_decision_not_racy(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# R02 -- a from-scratch cleanup drops the deleted run's best, not just its files
+# A from-scratch cleanup drops the deleted run's best, not just its files
 # ---------------------------------------------------------------------------
 
 
@@ -466,7 +466,7 @@ def test_cleanup_from_scratch_resets_best(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# R07 -- checkpoint debris (.tmp.<pid>, .corrupt) does not accumulate
+# Checkpoint debris (.tmp.<pid>, .corrupt) does not accumulate
 # ---------------------------------------------------------------------------
 
 
@@ -519,7 +519,7 @@ def test_init_sweeps_orphaned_tmp_files(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# R08 -- an improving epoch serializes the state dict once, not twice
+# An improving epoch serializes the state dict once, not twice
 # ---------------------------------------------------------------------------
 
 
@@ -625,7 +625,8 @@ def test_cleanup_rank0_fs_error_travels_through_the_broadcast(tmp_path, monkeypa
     ``_remove_checkpoint_files`` globs and stats the run directory; on a shared
     filesystem those can raise (ESTALE, EACCES) even though each individual
     unlink is already tolerated. That happens between the drain and the
-    broadcast, so an unfenced raise re-creates exactly the hazard R05 closed.
+    broadcast, so an unfenced raise would strand the peers in an unmatched
+    collective -- the hazard that reporting through the broadcast closes.
     """
     mgr, _ = _make_manager(tmp_path)
     mgr.dist_enabled = True
@@ -686,7 +687,7 @@ def test_init_survives_an_unlistable_run_dir(tmp_path, monkeypatch, capsys):
 
 
 # ---------------------------------------------------------------------------
-# F71 -- CPU tensors are cloned into the snapshot
+# CPU tensors are cloned into the snapshot
 # ---------------------------------------------------------------------------
 
 
@@ -706,7 +707,7 @@ def test_cpu_tensors_cloned(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# R09 -- the warmup snapshot is host-resident, not a device-side copy
+# The warmup snapshot is host-resident, not a device-side copy
 # ---------------------------------------------------------------------------
 
 
@@ -815,7 +816,7 @@ def test_snapshot_restore_round_trips_values_and_devices(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# F50 -- a final checkpoint is written when the run exits between intervals
+# A final checkpoint is written when the run exits between intervals
 # ---------------------------------------------------------------------------
 
 
@@ -858,7 +859,7 @@ def test_final_checkpoint_on_convergence(tiny_trainer, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# R03 -- a diverged epoch aborts instead of checkpointing NaN weights
+# A diverged epoch aborts instead of checkpointing NaN weights
 # ---------------------------------------------------------------------------
 
 
@@ -906,7 +907,7 @@ def test_divergence_aborts_before_poisoning_checkpoint(tiny_trainer, monkeypatch
 
 
 # ---------------------------------------------------------------------------
-# F49 -- GradScaler-skipped steps do not advance the optimizer-step counter
+# GradScaler-skipped steps do not advance the optimizer-step counter
 # ---------------------------------------------------------------------------
 
 
@@ -956,7 +957,7 @@ def test_skipped_step_not_counted():
 
 
 # ---------------------------------------------------------------------------
-# F72 -- on resume only rank 0 reads the checkpoint file; peers get the
+# On resume only rank 0 reads the checkpoint file; peers get the
 # deserialized state over the process group (no N-way filesystem read storm)
 # ---------------------------------------------------------------------------
 

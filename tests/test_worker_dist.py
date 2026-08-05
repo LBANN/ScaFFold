@@ -243,7 +243,7 @@ def test_worker_singleton_smoke(monkeypatch, tiny_config, tiny_dataset):
 
 
 # ---------------------------------------------------------------------------
-# R44: the activation-checkpointing config flag reaches the model
+# The activation-checkpointing config flag reaches the model
 # ---------------------------------------------------------------------------
 
 
@@ -271,7 +271,7 @@ def test_activation_checkpointing_flag_reaches_the_model(
 
 
 # ---------------------------------------------------------------------------
-# Local size detection (R23)
+# Local size detection
 # ---------------------------------------------------------------------------
 
 _LOCAL_SIZE_CASES = [

@@ -12,7 +12,7 @@
 #
 # SPDX-License-Identifier: (Apache-2.0)
 
-"""Dataset provenance: the commit stamped on a dataset is ScaFFold's (R35).
+"""Dataset provenance: the commit stamped on a dataset is ScaFFold's.
 
 ``meta.yaml``'s ``code_commit``, the published ``<timestamp>__<commit>``
 directory name, and the ``dataset_reuse_enforce_commit_id`` gate all key off

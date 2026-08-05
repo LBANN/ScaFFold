@@ -92,7 +92,7 @@ def _seed_category(fract_base: Path, *, point_num: int, keep: range) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# F09: non-finite weighted instances are retried / fall back, never saved
+# Non-finite weighted instances are retried / fall back, never saved
 # ---------------------------------------------------------------------------
 
 
@@ -142,7 +142,7 @@ def test_nonfinite_instance_saved_finite(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# F09 defense: points_to_voxelgrid rejects non-finite input
+# Defense in depth: points_to_voxelgrid rejects non-finite input
 # ---------------------------------------------------------------------------
 
 
@@ -157,7 +157,7 @@ def test_voxelgrid_rejects_nonfinite(bad):
 
 
 # ---------------------------------------------------------------------------
-# F32: instance save is atomic and resume handles temp / truncated files
+# Instance save is atomic and resume handles temp / truncated files
 # ---------------------------------------------------------------------------
 
 
@@ -235,7 +235,7 @@ def test_resume_rejects_truncated(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# R36: a category's IFS parameters are parsed once, not once per instance
+# A category's IFS parameters are parsed once, not once per instance
 # ---------------------------------------------------------------------------
 
 
@@ -292,7 +292,7 @@ def test_category_params_parsed_once_per_category(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# F62: mask scanner requires exactly one file per id
+# Mask scanner requires exactly one file per id
 # ---------------------------------------------------------------------------
 
 
@@ -322,7 +322,7 @@ def test_mask_stem_index_rejects_ambiguous(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# F64: isotropic + centered normalization; the scale knob is rejected
+# Isotropic + centered normalization; the scale knob is rejected
 # ---------------------------------------------------------------------------
 
 
@@ -365,7 +365,7 @@ def test_scale_config_rejected():
 
 
 # ---------------------------------------------------------------------------
-# F34: rasterization scatters point indices instead of traversing a dense grid
+# Rasterization scatters point indices instead of traversing a dense grid
 # ---------------------------------------------------------------------------
 
 
@@ -442,7 +442,7 @@ def test_scatter_paint_matches_boolean_mask():
 
 
 # ---------------------------------------------------------------------------
-# F66: instance point clouds are stored and loaded as float32
+# Instance point clouds are stored and loaded as float32
 # ---------------------------------------------------------------------------
 
 
@@ -483,7 +483,7 @@ def test_dataset_version_bumped_past_float64_era():
 
 
 # ---------------------------------------------------------------------------
-# R33: voxel centering is a whole voxel, not half of one
+# Voxel centering is a whole voxel, not half of one
 # ---------------------------------------------------------------------------
 
 

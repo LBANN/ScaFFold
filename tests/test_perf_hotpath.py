@@ -33,7 +33,7 @@ def _reference_onehot(labels, num_classes):
 
 
 def test_labels_to_onehot_matches_one_hot_and_is_float32_contiguous():
-    # F12: the scatter-based one-hot must be bit-identical to the
+    # The scatter-based one-hot must be bit-identical to the
     # F.one_hot().permute().float() chain, but float32 (not an int64
     # intermediate) and contiguous in channel-first layout.
     torch.manual_seed(0)
@@ -49,7 +49,7 @@ def test_labels_to_onehot_matches_one_hot_and_is_float32_contiguous():
 
 
 def test_ce_log_probs_path_matches_cross_entropy():
-    # F20: feeding a precomputed log_softmax via NLL must equal computing CE
+    # Feeding a precomputed log_softmax via NLL must equal computing CE
     # from raw logits, for both weighted and unweighted cases, with no mesh.
     torch.manual_seed(1)
     b, c = 2, 5
@@ -68,7 +68,7 @@ def test_ce_log_probs_path_matches_cross_entropy():
 
 
 def test_ce_uses_single_spatial_collective(monkeypatch):
-    # F19: the CE numerator and its normalizer are reduced together in one
+    # The CE numerator and its normalizer are reduced together in one
     # SpatialAllReduce, not two. Count applications; the packed path issues
     # exactly one per CE call (down from two).
     import ScaFFold.utils.losses as losses
@@ -95,7 +95,7 @@ def test_ce_uses_single_spatial_collective(monkeypatch):
 
 
 def test_torch_profiler_context_is_bounded(monkeypatch):
-    # F47: the profiler must be built with a bounded schedule (not RECORD for
+    # The profiler must be built with a bounded schedule (not RECORD for
     # every step) and with the expensive record_shapes/with_stack options off
     # by default, so a long run cannot grow an unbounded trace.
     import ScaFFold.utils.perf_measure as pm
@@ -129,7 +129,7 @@ def _module_source(module):
 
 
 def test_training_batch_returns_detached_dice(tiny_trainer):
-    # F51: the dice score returned from a batch must be detached so the epoch
+    # The dice score returned from a batch must be detached so the epoch
     # accumulator does not retain each batch's autograd graph. Run one real
     # CPU batch (ps=None path) and inspect the returned tensor.
     trainer = tiny_trainer()
@@ -142,7 +142,7 @@ def test_training_batch_returns_detached_dice(tiny_trainer):
 
 
 def test_zero_grad_uses_set_to_none(tiny_trainer):
-    # F52: after a batch, grads should be released (None) rather than zeroed
+    # After a batch, grads should be released (None) rather than zeroed
     # buffers, avoiding a per-step memset over all gradient memory.
     trainer = tiny_trainer()
     batch = next(iter(trainer.train_loader))
@@ -153,7 +153,7 @@ def test_zero_grad_uses_set_to_none(tiny_trainer):
 
 
 def test_evaluate_defers_item_sync_to_end():
-    # F22: the validation loop must not call .item() per batch. Verify the
+    # The validation loop must not call .item() per batch. Verify the
     # foreground stats helper returns a tensor sum (no host sync) and that the
     # source has no per-batch .item() inside the loop.
     import ScaFFold.utils.evaluate as ev
@@ -169,7 +169,7 @@ def test_evaluate_defers_item_sync_to_end():
 
 
 def test_evaluate_copies_are_non_blocking():
-    # F54: both eval H2D copies must pass non_blocking=True to exploit the
+    # Both eval H2D copies must pass non_blocking=True to exploit the
     # pinned-memory loaders.
     import ScaFFold.utils.evaluate as ev
 
@@ -178,7 +178,7 @@ def test_evaluate_copies_are_non_blocking():
 
 
 def test_training_batch_gathers_mem_only_first_batch():
-    # F18: the epoch loop must not request mem-stat gathering for every batch
+    # The epoch loop must not request mem-stat gathering for every batch
     # (which resets peak counters and issues collectives inside the timed
     # region). It should gate on the first batch of the run.
     import ScaFFold.utils.trainer as tr
@@ -191,7 +191,7 @@ def test_training_batch_gathers_mem_only_first_batch():
 
 
 # ---------------------------------------------------------------------------
-# R41: warmup covers the ragged final batch
+# Warmup covers the ragged final batch
 #
 # Warmup only ever runs the *leading* batches of the train loader, which are
 # all local_batch_size wide, and neither loader drops its last batch. When a

@@ -38,7 +38,7 @@ import torch
 import ScaFFold.cli as cli
 
 # ---------------------------------------------------------------------------
-# resolve_run_dir matrix (F02)
+# resolve_run_dir matrix
 # ---------------------------------------------------------------------------
 
 
@@ -128,7 +128,7 @@ def test_same_second_run_dirs_distinct(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# stats-file header handling on resume (F01) + step counters (F14)
+# stats-file header handling on resume + step counters
 # ---------------------------------------------------------------------------
 
 from types import SimpleNamespace  # noqa: E402

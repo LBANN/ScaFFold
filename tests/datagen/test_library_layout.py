@@ -12,7 +12,7 @@
 #
 # SPDX-License-Identifier: (Apache-2.0)
 
-"""The fractal library is keyed by the seed that produced it (R29).
+"""The fractal library is keyed by the seed that produced it.
 
 Categories and instances are *derived from* ``config.seed``: the IFS parameters
 come from a seed-keyed candidate stream and every instance point cloud is

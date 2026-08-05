@@ -64,7 +64,7 @@ def test_at_least_one_attempt_per_rank_when_work_remains():
 
 
 # ---------------------------------------------------------------------------
-# R30: the initial work scan is made once on rank 0 and broadcast.
+# The initial work scan is made once on rank 0 and broadcast.
 #
 # ``categories_remaining`` gates a while loop that contains collectives, so it
 # must be identical on every rank. Deriving it from a per-rank filesystem scan
@@ -313,7 +313,7 @@ def test_peer_raises_on_broadcast_scan_error(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# R31: category CSVs appear complete or not at all.
+# Category CSVs appear complete or not at all.
 #
 # A category file truncated by a killed job is still counted as "done" by the
 # resume scan, so nothing ever regenerates it: instance generation then dies

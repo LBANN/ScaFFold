@@ -156,9 +156,8 @@ class CheckpointManager:
                 # already committed to the broadcast below. Individual unlinks
                 # are tolerated inside, but the glob/stat around them can still
                 # raise on a shared filesystem (ESTALE, EACCES), and raising in
-                # this window strands the peers in an unmatched collective --
-                # the R05 hazard. Report the failure through the broadcast, like
-                # a failed write.
+                # this window strands the peers in an unmatched collective.
+                # Report the failure through the broadcast, like a failed write.
                 try:
                     self._remove_checkpoint_files()
                 except Exception as e:
@@ -209,7 +208,7 @@ class CheckpointManager:
         chance to clear them.
 
         Sweeping at construction is safe because run directories are per-run
-        and not shared between concurrently running jobs (F55), so any temp
+        and not shared between concurrently running jobs, so any temp
         file here belongs to a dead process -- except one from this pid, which
         another manager in this process could still be writing.
 

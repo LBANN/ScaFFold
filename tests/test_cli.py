@@ -135,7 +135,7 @@ def run_cli(monkeypatch, argv, *, comm=None, sync_env=True):
 
 
 # ---------------------------------------------------------------------------
-# R13: the MPI world must span the whole job
+# The MPI world must span the whole job
 # ---------------------------------------------------------------------------
 
 
@@ -220,7 +220,7 @@ def test_no_launcher_env_is_not_a_mismatch(monkeypatch, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# R17: the restart script is generated at the true job scale
+# The restart script is generated at the true job scale
 # ---------------------------------------------------------------------------
 
 
@@ -253,7 +253,7 @@ def test_restart_script_gets_the_mpi_world_size(monkeypatch, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# R18: the restart pre-check is a rank-0 decision, broadcast to everyone
+# The restart pre-check is a rank-0 decision, broadcast to everyone
 # ---------------------------------------------------------------------------
 
 
@@ -414,7 +414,7 @@ def test_fresh_run_records_no_restart_state(monkeypatch, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# R19: generate_fractals is not a benchmark run
+# generate_fractals is not a benchmark run
 # ---------------------------------------------------------------------------
 
 
@@ -465,7 +465,7 @@ def test_benchmark_still_creates_its_run_dir(monkeypatch, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# R20: auxiliary keys set in YAML must survive; CLI > YAML > argparse default
+# Auxiliary keys set in YAML must survive; CLI > YAML > argparse default
 # ---------------------------------------------------------------------------
 
 
@@ -533,7 +533,7 @@ def test_run_config_records_the_effective_aux_values(monkeypatch, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# R25: an out-of-range bottleneck is rejected before any work starts
+# An out-of-range bottleneck is rejected before any work starts
 # ---------------------------------------------------------------------------
 
 
@@ -626,7 +626,7 @@ def test_unknown_error_types_degrade_to_runtime_error():
 
 
 # ---------------------------------------------------------------------------
-# The whole config path survives a restart (R20/R22 together)
+# The whole config path survives a restart
 # ---------------------------------------------------------------------------
 
 

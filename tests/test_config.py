@@ -99,7 +99,7 @@ def test_invalid_type_message_names_type(tmp_path):
 
 
 def test_activation_checkpointing_is_a_real_option():
-    """R44: activation checkpointing is reachable from a config, defaulting off.
+    """Activation checkpointing is reachable from a config, defaulting off.
 
     The U-Net has always had ``use_checkpointing``, but with no config key and
     no caller it could not be turned on: any attempt was rejected as an unknown
@@ -308,7 +308,7 @@ def test_list_valued_key_rejected_in_run_config(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# The base config is preserved under a name of its own (R22)
+# The base config is preserved under a name of its own
 # ---------------------------------------------------------------------------
 
 
@@ -365,7 +365,7 @@ def test_base_config_copy_never_clobbers_merged_config(
 
 
 # ---------------------------------------------------------------------------
-# unet_bottleneck_dim range (R25)
+# unet_bottleneck_dim range
 # ---------------------------------------------------------------------------
 
 

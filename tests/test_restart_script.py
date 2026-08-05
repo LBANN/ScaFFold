@@ -188,7 +188,7 @@ def test_generated_script_is_valid_bash(monkeypatch, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# R14: combined ``--flag=value`` tokens
+# Combined ``--flag=value`` tokens
 # ---------------------------------------------------------------------------
 
 
@@ -263,7 +263,7 @@ def test_run_dir_placeholder_is_substituted(monkeypatch, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# R17: launch-shape sniffing must match the rank side
+# Launch-shape sniffing must match the rank side
 # ---------------------------------------------------------------------------
 
 # Every variable ``ScaFFold.utils.distributed.get_world_size`` honors. The

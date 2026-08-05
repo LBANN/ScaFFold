@@ -165,7 +165,7 @@ def _run(evaluate, ps, net, batches, n_categories):
 
 
 # ---------------------------------------------------------------------------
-# F05: reported Dice must be the hard (argmax) segmentation Dice
+# Reported Dice must be the hard (argmax) segmentation Dice
 # ---------------------------------------------------------------------------
 
 
@@ -241,7 +241,7 @@ def test_imperfect_model_dice_below_one(eval_env):
 
 
 # ---------------------------------------------------------------------------
-# F23: the degenerate single-class path must be rejected, not faked
+# The degenerate single-class path must be rejected, not faked
 # ---------------------------------------------------------------------------
 
 
@@ -255,7 +255,7 @@ def test_n_categories_zero_rejected(eval_env):
 
 
 # ---------------------------------------------------------------------------
-# F53: val_loss_avg must be sample-weighted, not equal-weighted per batch
+# val_loss_avg must be sample-weighted, not equal-weighted per batch
 # ---------------------------------------------------------------------------
 
 

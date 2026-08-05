@@ -326,7 +326,8 @@ def tiny_v1_dataset(tmp_path):
     Same shape as ``tiny_dataset`` but: no ``meta.yaml`` (so the loader falls
     back to the legacy path), channels-last volumes ``(N, N, N, 3)``, and masks
     holding raw values that get remapped through the per-split ``mask_values``
-    pickle. Needed by the F42 dataset-loading tests.
+    pickle. Needed by the dataset-loading tests that cover legacy label
+    remapping.
     """
 
     def make(

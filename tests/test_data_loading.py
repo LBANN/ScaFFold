@@ -112,7 +112,7 @@ def _build_v1_split_dataset(
 
 
 # ---------------------------------------------------------------------------
-# F11: index -> file mapping must not depend on os.listdir order
+# Index -> file mapping must not depend on os.listdir order
 # ---------------------------------------------------------------------------
 
 
@@ -256,7 +256,7 @@ def test_ids_guard_digest_device_follows_backend(
 
 
 # ---------------------------------------------------------------------------
-# F42: legacy label remapping must use one global (union) table
+# Legacy label remapping must use one global (union) table
 # ---------------------------------------------------------------------------
 
 
@@ -394,7 +394,7 @@ def test_v2_datasets_unaffected(tiny_dataset):
 
 
 # ---------------------------------------------------------------------------
-# F43: id -> path resolved once at init; no per-item directory scans
+# id -> path resolved once at init; no per-item directory scans
 # ---------------------------------------------------------------------------
 
 
@@ -446,7 +446,7 @@ def test_duplicate_stem_raises(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# F13: narrow (int16) mask carrier, widened to long on the compute device
+# Narrow (int16) mask carrier, widened to long on the compute device
 # ---------------------------------------------------------------------------
 
 
@@ -475,7 +475,7 @@ def test_mask_carrier_is_narrow_int16(tiny_dataset):
 
 
 # ---------------------------------------------------------------------------
-# F21: non-sharded volume prep is zero-copy (no redundant full-volume copy)
+# Non-sharded volume prep is zero-copy (no redundant full-volume copy)
 # ---------------------------------------------------------------------------
 
 
@@ -525,7 +525,7 @@ def test_nonsharded_getitem_tensors_bit_identical(tiny_dataset):
 
 
 # ---------------------------------------------------------------------------
-# F24: mask-only accessor loads the mask without touching the image volume
+# Mask-only accessor loads the mask without touching the image volume
 # ---------------------------------------------------------------------------
 
 
@@ -597,7 +597,7 @@ def test_load_mask_only_v1_legacy(tiny_v1_dataset, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# R28: a *present but broken* meta.yaml must not be mistaken for a v1 dataset
+# A *present but broken* meta.yaml must not be mistaken for a v1 dataset
 # ---------------------------------------------------------------------------
 
 
@@ -637,7 +637,7 @@ def test_broken_meta_raises_instead_of_silent_legacy(tmp_path, broken_meta):
 
 
 # ---------------------------------------------------------------------------
-# R32: uneven spatial shards are accepted but computed wrong (known, unfixed)
+# Uneven spatial shards are accepted but computed wrong (known, unfixed)
 # ---------------------------------------------------------------------------
 
 
@@ -724,7 +724,7 @@ def _build_v2_sparse_label_dataset(root: Path, label: int) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# R34: the int16 carrier guard must bound the largest class *id*, not the count
+# The int16 carrier guard must bound the largest class *id*, not the count
 # ---------------------------------------------------------------------------
 
 

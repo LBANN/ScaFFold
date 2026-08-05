@@ -236,7 +236,7 @@ def test_torchrun_gloo_two_ranks(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# R21: memory diagnostics on a CPU-only run
+# Memory diagnostics on a CPU-only run
 # ---------------------------------------------------------------------------
 
 

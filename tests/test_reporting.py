@@ -30,7 +30,7 @@ from ScaFFold.viz import standard_viz
 
 
 class TestFiguresDir:
-    """F45: standard_viz.main() creates figures_path with idempotence."""
+    """standard_viz.main() creates figures_path with idempotence."""
 
     def test_figures_dir_idempotent(self, tmp_path):
         """Generate figures twice into same run_dir; second call should succeed."""
@@ -58,7 +58,7 @@ class TestFiguresDir:
 
 
 class TestFigureLifetime:
-    """R43: standard_viz closes every figure it opens.
+    """standard_viz closes every figure it opens.
 
     ``worker.main`` calls ``standard_viz.main`` in-process once per sweep
     combination, and pyplot keeps a strong reference to every unclosed figure,
@@ -102,7 +102,7 @@ class TestFigureLifetime:
 
 
 class TestDiceFigure:
-    """F70: Validation Dice figure saved as val_dice.png, not val_loss.png."""
+    """Validation Dice figure saved as val_dice.png, not val_loss.png."""
 
     def test_dice_figure_filename(self, tmp_path):
         """Save Dice figure as val_dice.png; val_loss.png (if present) contains loss series."""
@@ -179,7 +179,7 @@ class TestDiceFigure:
 
 
 class TestMaskPanelLabels:
-    """F69: plot_img_and_mask labels panels with correct class index, not off-by-one."""
+    """plot_img_and_mask labels panels with correct class index, not off-by-one."""
 
     def test_mask_panel_labels(self):
         """Render a 3-class mask; check that each panel title matches the class shown."""
@@ -214,7 +214,7 @@ class TestMaskPanelLabels:
 
 
 class TestVisualizerVolume:
-    """F65: data_visualizer renders 4D channels-first volumes from volumegen."""
+    """data_visualizer renders 4D channels-first volumes from volumegen."""
 
     def test_visualizer_accepts_4d_volume(self, tmp_path):
         """4D float volume (3, N, N, N) renders without exception."""
@@ -268,7 +268,7 @@ class TestVisualizerVolume:
 
 
 class TestTorchProfiler:
-    """F68: Torch profiler enabled independently of Caliper even when CALI_CONFIG set."""
+    """Torch profiler enabled independently of Caliper even when CALI_CONFIG set."""
 
     def test_torch_profiler_independent_of_caliper(self, monkeypatch):
         """Both profilers come up together when both are requested.
@@ -319,7 +319,7 @@ class TestTorchProfiler:
 
 
 class TestProfilerTraceExport:
-    """R15: a failed trace export must not strand the other ranks."""
+    """A failed trace export must not strand the other ranks."""
 
     @staticmethod
     def _unstepped_profiler():
@@ -404,7 +404,7 @@ class TestProfilerTraceExport:
         assert Path(path).exists()
 
     def test_trace_lands_in_the_run_dir(self, tmp_path, caplog):
-        """R23: the trace goes to the run dir, not whatever CWD happens to be."""
+        """The trace goes to the run dir, not whatever CWD happens to be."""
         import ScaFFold.worker as worker
 
         prof = self._stepped_profiler()
@@ -425,7 +425,7 @@ class TestProfilerTraceExport:
     def test_trace_name_counts_nodes_not_ranks(
         self, tmp_path, world_size, ranks_per_node, expected
     ):
-        """R23: the N field is a node count, and never rounds a node away."""
+        """The N field is a node count, and never rounds a node away."""
         import ScaFFold.worker as worker
 
         prof = self._stepped_profiler()
@@ -444,7 +444,7 @@ class TestProfilerTraceExport:
 
 
 class TestProfileTorchGate:
-    """R24: PROFILE_TORCH is parsed like every other profiler flag."""
+    """PROFILE_TORCH is parsed like every other profiler flag."""
 
     @staticmethod
     def _reload_with(monkeypatch_context, value):
@@ -509,7 +509,7 @@ class TestProfileTorchGate:
 
 
 class TestProfilerSchedule:
-    """R26: the schedule must not record everything before the first step."""
+    """The schedule must not record everything before the first step."""
 
     @staticmethod
     def _context_with(monkeypatch_context, env):

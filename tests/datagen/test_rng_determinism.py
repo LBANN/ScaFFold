@@ -34,7 +34,7 @@ import numpy as np
 from ScaFFold.datagen import category_search as cs
 
 # ---------------------------------------------------------------------------
-# F06: seed_numba controls the njit RNG stream
+# seed_numba controls the njit RNG stream
 # ---------------------------------------------------------------------------
 
 
@@ -64,7 +64,7 @@ def test_seed_numba_controls_njit_stream(fresh_python):
 
 
 # ---------------------------------------------------------------------------
-# F06: whole-instance generation is deterministic across fresh processes
+# Whole-instance generation is deterministic across fresh processes
 # ---------------------------------------------------------------------------
 
 
@@ -106,7 +106,7 @@ def test_instance_generation_deterministic(fresh_python):
 
 
 # ---------------------------------------------------------------------------
-# F06: per-item seed derivation is independent of rank/world-size layout
+# Per-item seed derivation is independent of rank/world-size layout
 # ---------------------------------------------------------------------------
 
 
@@ -165,7 +165,7 @@ def _run_search_loop(write_dir, base_seed, rank, attempt_start, n_wanted, accept
 
 
 # ---------------------------------------------------------------------------
-# F07: resume continues the candidate stream instead of replaying it
+# Resume continues the candidate stream instead of replaying it
 # ---------------------------------------------------------------------------
 
 
@@ -211,7 +211,7 @@ def test_resume_continues_param_stream(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# F07: duplicate candidates are rejected by the dedup guard
+# Duplicate candidates are rejected by the dedup guard
 # ---------------------------------------------------------------------------
 
 
@@ -240,7 +240,7 @@ def test_duplicate_candidate_skipped(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# F63: index allocation fills gaps and never overwrites an existing file
+# Index allocation fills gaps and never overwrites an existing file
 # ---------------------------------------------------------------------------
 
 

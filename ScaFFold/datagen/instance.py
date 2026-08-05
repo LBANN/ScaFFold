@@ -349,8 +349,9 @@ def main(config: Config):
     # One-entry cache of the most recently parsed category CSV. The work list
     # is built category-major and block-sliced, so every rank's items for a
     # given category are contiguous: a single entry is enough to turn the
-    # per-item re-parse (145 identical reads of the same small file off the
-    # shared filesystem, per category) into one parse per category per rank.
+    # per-item re-parse -- one redundant read of the same small file off the
+    # shared filesystem for every instance generated in the category -- into
+    # one parse per category per rank.
     # ``generate_instance_points`` copies before scaling, so sharing the parsed
     # array across instances cannot leak weights from one item into the next.
     cached_category = None

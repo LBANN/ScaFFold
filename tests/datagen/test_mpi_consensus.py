@@ -344,7 +344,7 @@ def test_generation_success_finalizes_and_returns(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# R27: rank 0 must never die between the collectives its peers have entered.
+# Rank 0 must never die between the collectives its peers have entered.
 # Every rank-0-only step of the consensus (the reuse/generate decision and the
 # final meta-write + rename) is wrapped so a failure travels to the peers as a
 # broadcast sentinel instead of stranding them in ``bcast``/``Barrier``.
@@ -592,7 +592,7 @@ def test_interrupt_during_generation_reaches_the_consensus(tmp_path, monkeypatch
 
 
 # ---------------------------------------------------------------------------
-# R37: orphaned staging dirs are reclaimed instead of accumulating forever.
+# Orphaned staging dirs are reclaimed instead of accumulating forever.
 # ---------------------------------------------------------------------------
 
 
@@ -716,7 +716,7 @@ def test_live_generation_survives_on_its_heartbeat_alone(tmp_path):
 
 
 def test_dead_staging_dir_with_stale_heartbeat_is_reclaimed(tmp_path):
-    """The heartbeat must not turn cleanup into a no-op (R37 still holds)."""
+    """The heartbeat must not stop orphaned staging dirs being reclaimed."""
     base = tmp_path / "cid"
     base.mkdir(parents=True)
 
@@ -772,7 +772,7 @@ def test_heartbeat_respects_its_interval(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# R28: meta.yaml is published atomically, so no reader ever sees a partial one.
+# meta.yaml is published atomically, so no reader ever sees a partial one.
 # ---------------------------------------------------------------------------
 
 
