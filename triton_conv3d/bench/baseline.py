@@ -20,11 +20,11 @@ the output header, and regression-tested in ``tests/test_infra.py``.
 
 1.  ``torch.backends.cudnn.benchmark = True``.  ScaFFold sets this at startup
     unless ``more_determinism`` is on (``ScaFFold/worker.py:171``), and so does
-    the profiling harness the reference numbers come from
-    (``work/report/prof_bench.py:125``).  On ROCm the flag decides whether
-    PyTorch asks MIOpen for an exhaustive *find* or lets it answer from its AI
-    heuristic.  The two answers are not close.  For ``conv 64->64 k3 @ 128^3``,
-    forward, measured with ``MIOPEN_ENABLE_LOGGING=1``::
+    the profiling harness the reference numbers come from.  On ROCm the flag
+    decides whether PyTorch asks MIOpen for an exhaustive *find* or lets it
+    answer from its AI heuristic.  The two answers are not close.  For
+    ``conv 64->64 k3 @ 128^3``, forward, measured with
+    ``MIOPEN_ENABLE_LOGGING=1``::
 
         benchmark=False  findMode DYNAMIC_HYBRID(5), no search
             DeviceGroupedConvFwdMultipleABD_Xdl_CShuffle<256,64,64,32,

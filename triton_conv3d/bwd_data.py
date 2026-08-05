@@ -118,11 +118,10 @@ def _tuned(bm: int, bn: int, bk: int, warps: int, group_m: int = 6) -> ConvConfi
 #: the other way round would make ``512 -> 256`` in this table and ``512 -> 256``
 #: in the forward's mean different things, which is a trap not worth setting.
 #:
-#: Source: ``work/triton-conv/m2_bwd.json`` -- 21 problems, 1468 timed
-#: configurations, analysed by ``work/triton-conv/m2_analyze.py``.  Only
-#: channel pairs that were actually timed appear; a miss falls to the heuristic
-#: on the effective widths, which is a real gap and not an extrapolation dressed
-#: up as a measurement.
+#: Drawn from a backward-data sweep over 21 problems and 1468 timed
+#: configurations.  Only channel pairs that were actually timed appear; a miss
+#: falls to the heuristic on the effective widths, which is a real gap and not
+#: an extrapolation dressed up as a measurement.
 #:
 #: Three things this table records that the forward's does *not*:
 #:
@@ -162,11 +161,11 @@ _TUNED_BWD: dict[tuple, ConvConfig] = {
     # (``p' = 0``) and a reduction of just ``Cout = 6``, so it is a different
     # regime from every entry above and gets its own key.
     #
-    # ``num_warps = 2``, not the 4 M2 shipped, and that is the only axis of this
-    # entry that moved: M2's sweep drew ``num_warps`` from ``{4, 8, seed}``, so
-    # 1 and 2 were never timed at any site in this project.  Raced at all three
-    # head volumes (``work/triton-conv/tune/warps_bwdd.json``) 2 is 1.099x,
-    # 1.057x and 1.101x over 4, and 8 is 0.89-0.90x.  The reduction here is
+    # ``num_warps = 2``, not the 4 the original sweep shipped, and that is the
+    # only axis of this entry that moved: that sweep drew ``num_warps`` from
+    # ``{4, 8, seed}``, so 1 and 2 were never timed at any site in this
+    # project.  Raced at all three head volumes, 2 is 1.099x, 1.057x and 1.101x
+    # over 4, and 8 is 0.89-0.90x.  The reduction here is
     # ``Cout * taps = 6``, one MFMA fragment deep, so a second pair of waves has
     # nothing to reduce and only replicates the addressing.  1 warp is within
     # noise of 2 at this site and is 0.245x at ``128 -> 128 @ 66^3``, so the

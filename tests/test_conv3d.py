@@ -20,8 +20,7 @@ Every other property here fails loudly; that one fails silently, as a plausible
 wrong gradient at every shard boundary of a large run, because the halo DistConv
 adds below autograd is invisible to a module-level adapter and the halo this one
 adds instead is only right where the plan says it is.  The exchange itself
-needs real ranks and lives in
-``work/triton-conv/review/halo/stage2_dist.py``.
+needs real ranks and is exercised by a separate multi-rank harness.
 
 Tolerances come from ``triton_conv3d.reference``'s policy (an fp64 reference and
 a dtype/K-derived bound, or MIOpen's own error where that is looser).  Nothing
@@ -289,7 +288,7 @@ def test_the_gate_asks_the_predicates_about_the_tensor_the_kernel_will_see():
     this process has no process group to exchange over.  The plan is made, and
     the predicates are asked about the halo'd extent -- ``8 -> 10`` on D -- at
     the padding the exchange leaves behind.  The multi-rank half of this lives
-    in ``work/triton-conv/review/halo/stage2_dist.py``.
+    in a separate harness that needs real ranks.
     """
     conv = _gpu_conv()
     x = _gpu_input((1, 16, 8, 8, 8))
@@ -390,8 +389,8 @@ def test_a_kernel_failure_after_the_halo_falls_back_without_exchanging_twice(
     own padding on the unexchanged shard, the answer has an independent
     reference: what ``nn.Conv3d`` computes on the original input.
 
-    The multi-rank half, with real slabs on a real mesh, is
-    ``work/triton-conv/review/halo/stage2_dist.py``'s ``fallback`` stage.
+    The multi-rank half, with real slabs on a real mesh, needs real ranks and
+    lives in a separate harness.
     """
     import distconv
     import distconv.distconv as dc
@@ -1087,8 +1086,7 @@ def test_the_triton_rung_performs_no_halo_exchange_at_one_shard():
     ``forward_halo_exchange`` has no ``num_shards == 1`` early-out, so today
     every convolution concatenates two zero slabs onto each of the three
     sharded dims: 54 calls and 3.797 ms/step of pure copying at
-    ``dc_num_shards=(1,1,1)`` (``work/upstream-repros/DISTCONV_ACTIONS.md``).  Taking the
-    Triton rung removes all of them, and leaves the caller's ``_tensor``
+    ``dc_num_shards=(1,1,1)``.  Taking the Triton rung removes all of them, and leaves the caller's ``_tensor``
     un-narrowed and still channels-last for the consumers downstream of it.
     """
     import distconv

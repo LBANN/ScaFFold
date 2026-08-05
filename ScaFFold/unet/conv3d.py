@@ -25,7 +25,7 @@ Two kernels, tried in order:
    where it lies, which is the layout ``worker.py`` already puts every
    convolution parameter in.  Measured at **1.26x of the MIOpen step** at
    ScaFFold's scale-7 single-GPU configuration, with the backward-weight
-   direction reproducible at no cost -- see ``work/triton-conv/STATUS.md``.
+   direction reproducible at no cost.
 2. **MIOpen**, via ``nn.Conv3d.forward``, which is what every rejection falls
    back to and what defines the semantics the Triton rung must match.
 
@@ -91,8 +91,7 @@ tolerance argument in it.  At ``dc_num_shards = (1, 1, 1)`` every dim is unsplit
 :class:`_Halo3d` is not applied at all, and the rung is stage 1's exactly:
 ``forward_halo_exchange`` allocates its receive buffers with ``zeros_like`` and
 posts nothing when ``shard_ind`` is 0 on every axis, so the 3.797 ms/step of
-zero-slab ``cat`` copies ``work/upstream-repros/DISTCONV_ACTIONS.md`` prices at one shard just
-disappear.
+zero-slab ``cat`` copies measured at one shard just disappear.
 
 Every fact that argument rests on is checked *positively* before the rung is
 taken -- see :func:`_halo_plan`, which returns ``None`` for anything it could not
@@ -673,8 +672,7 @@ def _policy_declines(x_shape, w_shape, stride, padding, dilation):
 
     Empty since 2026-08-04, and the arguments are kept so a future entry has
     somewhere to go.  It held three rules, and re-measuring every one of them
-    against the shipped kernels retired all three
-    (``work/triton-conv/review/CONV_REMEASURE.md``; per-site sums over all
+    against the shipped kernels retired all three (per-site sums over all
     three directions, kernel time with 95% intervals):
 
     * ``Cin == 3``, the stem, blocked at a quoted **0.53x**.  That figure was
@@ -1438,9 +1436,8 @@ def _transposed_policy_declines(x_shape, w_shape):
       ``gather_gemm``'s tuning, not of this kernel, whose N axis carries
       ``Cout * taps`` and is 8x wider for it.
 
-    So the four sites were measured directly rather than inherited
-    (``work/triton-conv/m5_shipped_{fwd,bwd-data,bwd-weight}.json``, config A,
-    Triton over MIOpen per direction):
+    So the four sites were measured directly rather than inherited (config A,
+    Triton over MIOpen, per direction):
 
     ===========================  =====  ========  ==========
     site                           fwd  bwd-data  bwd-weight
@@ -1459,10 +1456,8 @@ def _transposed_policy_declines(x_shape, w_shape):
 
     Checked again at the level that decides it, because those are *kernel* times
     and this ladder's per-call cost is not zero: on the real model at config A,
-    interleaved, 12 steps per arm
-    (``work/triton-conv/bin/convT_config_a.py``), the whole ladder is worth
-    **0.51 ms/step** and a variant that keeps only ``up3``/``up4`` on the rung is
-    worth 0.65 -- a 0.14 ms difference inside a 1.5 ms spread, i.e. not a
+    interleaved, 12 steps per arm, the whole ladder is worth **0.51 ms/step**
+    and a variant that keeps only ``up3``/``up4`` on the rung is worth 0.65 -- a 0.14 ms difference inside a 1.5 ms spread, i.e. not a
     measurement, so there is nothing here to write an entry from.  What *is*
     measurable is that the gap between 0.51 and the 0.9 ms the kernel times
     project is per-call Python and launch overhead (~0.10 ms per forward and

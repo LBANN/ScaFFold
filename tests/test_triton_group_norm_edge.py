@@ -16,8 +16,7 @@
 
 Companion to ``tests/test_triton_group_norm.py``, written independently during
 an audit of the kernel.  It covers the ground the author's suite does not, and
-pins the divergences that audit found.  See
-``work/gn-dctensor/KERNEL_REVIEW.md`` for the full write-up.
+pins the divergences that audit found.
 
 The two structural gaps this file closes:
 

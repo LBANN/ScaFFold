@@ -960,7 +960,7 @@ def test_dctensor_two_shards_matches_eager_and_normalizes_per_shard():
     halves of the claim the fast path rests on: bit-identical to the eager
     wrapped route, and normalizing the local shard rather than the global
     volume (which is DistConv's existing semantics, not something this change
-    introduces -- see the R32/R39 notes for the upstream discussion).
+    introduces).
     """
     script = (
         Path(__file__).resolve().parent
@@ -1177,7 +1177,7 @@ def test_gpu_steady_state_does_not_recompile():
 # Two tests below run the whole UNet twice, changing only which rung serves
 # GroupNorm, and ask whether the gradients agree.  *How* that is asked matters
 # more than it looks, and both tests used to ask it in a way that could only
-# pass by luck.  Measurements: ``work/triton-conv/review/GN_CHECKPOINT_TEST.md``.
+# pass by luck.
 #
 # **Per-parameter relative L2 under bf16 autocast is not a bounded quantity for
 # this model.**  Against an fp64 reference, every arm -- eager, compiled and

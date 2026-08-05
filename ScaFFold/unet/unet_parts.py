@@ -189,7 +189,7 @@ class Up(nn.Module):
     contiguous, at 51-63% of this device's streaming roofline against the
     kernel's 90-103% -- but it was worth a further 0.08 ms of the step, which
     did not justify a second hand-written kernel in a benchmark other people
-    have to trust.  ``work/skip-path/RESULTS.md`` has the numbers.
+    have to trust.
     """
 
     def __init__(self, in_channels, out_channels, group_norm_groups, trilinear=True):

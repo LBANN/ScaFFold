@@ -78,24 +78,22 @@ not occur".  DistConv does do that -- but ScaFFold does not route its
 convolutions through DistConv any more (``ScaFFold/unet/conv3d.py`` performs the
 halo exchange itself, and only on axes that are *genuinely split*), so the
 kernel is handed ``padding = (1,1,1)`` at one GPU and ``(0,1,1)`` at two or
-four.  Measured inside running steps at all four configurations
-(``work/triton-conv/review/SHAPE_AUDIT.md``): every ``k = 3`` site is padded,
-and the veto fired at **eight of them**.
+four.  A shape census taken inside running steps at all four configurations
+settled it: every ``k = 3`` site is padded, and the veto fired at **eight of
+them**.
 
 It was then raced rather than argued about.  On the padded production form of
 all 18 affected cells, the wide tile against the pinned one, one interleaved
-block per cell with 95% intervals
-(``work/triton-conv/review/OPTIMIZATION_ROUND3.md`` §1): the wide tile wins
-**18 of 18**, geometric mean **1.946x**, range 1.137x-5.336x.  The
-two-dimensional predicate is real and it costs something; it costs far less
-than the arithmetic intensity the wide tile buys.  Both clauses are gone.
+block per cell with 95% intervals: the wide tile wins **18 of 18**, geometric
+mean **1.946x**, range 1.137x-5.336x.  The two-dimensional predicate is real
+and it costs something; it costs far less than the arithmetic intensity the
+wide tile buys.  Both clauses are gone.
 
 Correctness was never what they protected, and that too is measured rather than
 assumed: forcing every tuned ``TAP_BLOCK > 1`` row onto the padded form of its
 own channel pair is bitwise exact against an fp64 reference, in both paddings,
-including the ``PADDED and ROW_ALIGNED`` corner, in bf16 and fp32
-(``work/triton-conv/bin/padded_tap_probe.py``).  It does not overflow LDS and it
-does not move the workspace bound.
+including the ``PADDED and ROW_ALIGNED`` corner, in bf16 and fp32.  It does not
+overflow LDS and it does not move the workspace bound.
 
 Determinism
 ===========
@@ -450,8 +448,8 @@ class BwdWeightConfig(ConvConfig):
     #: six, and it is the same device fact that makes ``GROUP_M`` want to be a
     #: multiple of six in the gather kernel.  **Measured at 1.006x** -- inside
     #: the round-to-round spread -- so it buys nothing; it is on by default only
-    #: because every number in M3_RESULTS was taken with it on, and turning it
-    #: off would make those numbers describe a kernel nobody ran.
+    #: because every number in this direction's sweep was taken with it on, and
+    #: turning it off would make those numbers describe a kernel nobody ran.
     NUM_XCD: int = 6
 
     @property
@@ -565,16 +563,15 @@ def default_bwd_weight_config(
     on the axis it actually splits, so H and W keep the module's ``padding = 1``
     and an unsharded run keeps all three.  The clause was documented as
     unreachable ("no real ScaFFold convolution is padded -- DistConv halos them
-    all"), which was true of the MIOpen rung and false of the shipped one; it
-    cost a step-level projection a factor of three before anyone checked
-    (``work/triton-conv/review/SHAPE_AUDIT.md``).
+    all"), which was true of the MIOpen rung and false of the shipped one; a
+    shape census inside running steps caught it, but only after it had cost a
+    step-level projection a factor of three.
 
     It is gone as of 2026-08-05, on a measurement rather than on the
     observation that its premise was false.  Raced on the padded production
     form of the six channel pairs that reach it, the widened tile against the
-    pinned one, one interleaved block per cell with 95% intervals
-    (``work/triton-conv/review/opt3/defwide_adapter.json``): widening wins
-    **6 of 6**, 1.263x-2.084x, every interval clear of 1.000.  At
+    pinned one, one interleaved block per cell with 95% intervals: widening
+    wins **6 of 6**, 1.263x-2.084x, every interval clear of 1.000.  At
     ``64 -> 128`` the widened *heuristic* beats that pair's tuned row as well
     (2.084x against 1.867x at ``66x128^2``), which is why the table now carries
     the wider tile there.
@@ -834,24 +831,24 @@ def _tuned(bm: int, bnc: int, tb: int, bk: int, warps: int,
 #: the convolution a reader would name, as in the other two tables, even though
 #: this direction's GEMM has ``Cout`` on M and ``taps * Cin`` on N.
 #:
-#: Source: ``work/triton-conv/m3_bwd.json``.  Only channel pairs that were
-#: actually timed appear; a miss falls to :func:`default_bwd_weight_config` plus
-#: :func:`split_count`, which is a real gap and not an extrapolation dressed up
-#: as a measurement.
+#: Drawn from a backward-weight sweep over the corpus.  Only channel pairs that
+#: were actually timed appear; a miss falls to
+#: :func:`default_bwd_weight_config` plus :func:`split_count`, which is a real
+#: gap and not an extrapolation dressed up as a measurement.
 #:
 #: ``SPLIT_K`` is left at 0 -- "derive from the shape" -- in every entry, and
 #: that is a finding rather than an omission.  The same channel pair occurs at
 #: volumes three orders of magnitude apart, the split count is the one knob that
 #: genuinely has to follow the volume, and pinning a sweep's winner would carry
-#: one volume's answer to every other.  See M3_RESULTS 5.
+#: one volume's answer to every other.
 #:
 #: **``matrix_instr_nonkdim`` is 32 in this table and 16 in every other table in
 #: the package.**  That is not an inconsistency, it is the measurement.  This
 #: direction's ``tl.dot(tl.trans(a), b)`` lowers on gfx942 to an *element-wise*
 #: transpose of A through LDS -- 128 two-byte ``ds_read_u16`` per loop body
 #: against 16 ``ds_read_b128`` for the untransposed operand, at a structural
-#: 50.00% bank-conflict rate -- which leaves the LDS pipe ~65% busy while the
-#: matrix core idles at ~32% (``work/triton-conv/review/BWDW_OPTIMIZATION.md`` §1, counters).
+#: 50.00% bank-conflict rate -- which by hardware counters leaves the LDS pipe
+#: ~65% busy while the matrix core idles at ~32%.
 #: The 32x32x8 fragment halves the MFMA instruction count for identical FLOPs
 #: and so stops the MFMA stream competing with that transpose for issue slots.
 #: It does *not* remove the transpose: the ``nk32`` ISA still emits 128
@@ -863,7 +860,7 @@ def _tuned(bm: int, bnc: int, tb: int, bk: int, warps: int,
 #:
 #: Raced per *volume* against the identical tile at ``nonkdim=16``, one
 #: interleaved block per site, 27 sites covering every ``k=3, Cin >= 64`` cell
-#: in the corpus bar the 2 GiB cliff (``work/triton-conv/tune/nk_bwdw.json``):
+#: in the corpus bar the 2 GiB cliff:
 #:
 #:   ============  =========================================  ======
 #:   pair          gain by volume                             shipped
@@ -884,15 +881,14 @@ def _tuned(bm: int, bnc: int, tb: int, bk: int, warps: int,
 #:   ============  =========================================  ======
 #:
 #: The last two rows are why this was raced per volume rather than per pair.
-#: ``BWDW_OPTIMIZATION.md`` §3.1 reports ``nk32`` winning **13 of 13** and
-#: "never losing"; every one of those 13 was a ``Cout <= 512`` site, and at
-#: ``Cout = 1024`` the sign reverses at two of the three volumes each pair has.
+#: An earlier per-pair race had ``nk32`` winning **13 of 13** and never losing;
+#: every one of those 13 was a ``Cout <= 512`` site, and at ``Cout = 1024`` the
+#: sign reverses at two of the three volumes each pair has.
 #: Both pairs keep ``nonkdim=16``.  The transposed operator's weight gradient
-#: runs this same kernel and was raced too (7 sites,
-#: ``work/triton-conv/tune/nk_convT.json``): 0.934-1.056x, no consistent sign,
-#: so :func:`default_bwd_weight_config` -- which is the only thing serving it,
-#: and also serves fp32 and every untuned pair, including the four
-#: 2048-channel backward-weight sites of a scale-8 run -- **stays at 16**.
+#: runs this same kernel and was raced too (7 sites): 0.934-1.056x, no
+#: consistent sign, so :func:`default_bwd_weight_config` -- which is the only
+#: thing serving it, and also serves fp32 and every untuned pair, including the
+#: four 2048-channel backward-weight sites of a scale-8 run -- **stays at 16**.
 #: (Until 2026-08-05 it also served the eight padded production sites whose
 #: tuned row widens ``TAP_BLOCK``, because the resolver declined those rows;
 #: it no longer does, and those eight now run the table.)  A heuristic is the
@@ -905,7 +901,7 @@ def _tuned(bm: int, bnc: int, tb: int, bk: int, warps: int,
 #: different MFMA fragment sums the same products in a different order.  They
 #: are still bitwise *reproducible*, which is what the determinism claim says:
 #: the split-K partition, the reduction's tiling and its ``tl.sum`` order are
-#: all unchanged, and ``work/triton-conv/review/bwd/det_verify.py`` was re-run on this table.
+#: all unchanged, and the run-to-run determinism check was re-run on this table.
 _TUNED_BWD_W: dict[tuple, BwdWeightConfig] = {
     # The segmentation head, which until now had no row at all and no ``nk``
     # question either: ``BLOCK_M`` is ``Cout = 6`` rounded up to 16, so
@@ -913,8 +909,7 @@ _TUNED_BWD_W: dict[tuple, BwdWeightConfig] = {
     # What does apply is ``num_warps``, which no sweep in this project has ever
     # taken below 4 (``candidate_bwd_weight_configs`` draws it from
     # ``{4, 8, seed}``).  Raced at all three head volumes, 1 warp is 1.044x,
-    # 1.052x and 1.033x over the heuristic's 4
-    # (``work/triton-conv/tune/warps_bwdw.json``).  It is still a **loss**
+    # 1.052x and 1.033x over the heuristic's 4.  It is still a **loss**
     # against MIOpen at two of those three volumes (0.73x, 0.93x, 1.19x); the
     # row is here so the number the adapter's block-list is built from is the
     # best this kernel can do, not the best it happened to be doing.
@@ -929,8 +924,7 @@ _TUNED_BWD_W: dict[tuple, BwdWeightConfig] = {
     # ``nonkdim=32`` wins, and it wins at all three of that pair's volumes:
     # 1.128x @ 64^3, 1.112x @ 32x128^2, 1.069x @ 64x128^2.  The other three
     # pairs measure 0.926-1.056x with no consistent sign and stay on
-    # ``default_bwd_weight_config``, i.e. at 16
-    # (``work/triton-conv/tune/nk_convT.json``).  The split is the mechanism,
+    # ``default_bwd_weight_config``, i.e. at 16.  The split is the mechanism,
     # not luck: this pair is the only transposed site whose tile is
     # ``BLOCK_M = 128``; the other three reach ``BLOCK_M = 256``, which already
     # amortises the transpose, and that is the same boundary the ``k=3`` rows
@@ -940,7 +934,8 @@ _TUNED_BWD_W: dict[tuple, BwdWeightConfig] = {
     **{
         tune_key(torch.bfloat16, cin, cout, (3, 3, 3)): cfg
         for (cin, cout), cfg in {
-            # The UNet stem, and the row that refutes ``OPTIMIZATION.md`` D4.
+            # The UNet stem, and the row that refutes the standing verdict that
+            # ``conv 3->64`` is hopeless and belongs on MIOpen.
             # It is the forward's disease one axis over: ``BLOCK_NC =
             # _pow2_at_most(Cin, 256) = 16`` against ``Cin = 3``, times
             # ``TAP_BLOCK = 16`` covering 27 taps in two groups, is **512 issued
@@ -974,7 +969,6 @@ _TUNED_BWD_W: dict[tuple, BwdWeightConfig] = {
             # ``BLOCK_NC`` / ``TAP_BLOCK`` only decide which columns a program
             # owns, never the order a column is summed in.  So no determinism
             # baseline moves and the 168.8 MiB workspace bound is unchanged.
-            # ``work/triton-conv/review/LOSS_OPTIMIZATION.md`` §1.2.
             (3, 64): _tuned(64, 4, 16, 64, 1, nk=16),
             # Cout = 64 is where TAP_BLOCK earns its existence: the tile can only
             # get to 512 columns through the taps, and getting there is worth
@@ -984,8 +978,7 @@ _TUNED_BWD_W: dict[tuple, BwdWeightConfig] = {
             # for a 128-row tile, and it wants one.  Raced against the
             # ``64x512x16/tb8`` row it replaces, one interleaved block per cell,
             # kernel-only, 95% intervals -- **both** forms, because this table
-            # is shared and the padded form is not the only caller
-            # (``review/opt3/r64x128_{adapter,distconv}.json``):
+            # is shared and the padded form is not the only caller:
             #   padded   66x128^2  1.6928 vs 1.9896 ms -- 1.177x [1.165,1.189]
             #   padded   34x128^2  0.8760 vs 1.0036    -- 1.145x [1.140,1.151]
             #   padded   64^3      0.4277 vs 0.5059    -- 1.183x [1.180,1.185]
@@ -1078,10 +1071,9 @@ def bwd_weight_config(
     :func:`default_bwd_weight_config` with ``TAP_BLOCK`` pinned to 1.
 
     Raced arm against arm on the padded production form of all 18 affected
-    cells (``work/triton-conv/review/OPTIMIZATION_ROUND3.md`` §1; the tuned row
-    forced against the config the decline produced, in one interleaved block
-    per cell, CUDA-graph replay, 95% intervals): the tuned row is faster in
-    **18 of 18**, geometric mean **1.946x**, range 1.137x-5.336x, every
+    cells (the tuned row forced against the config the decline produced, in one
+    interleaved block per cell, CUDA-graph replay, 95% intervals): the tuned row
+    is faster in **18 of 18**, geometric mean **1.946x**, range 1.137x-5.336x, every
     interval clear of 1.000.  Worst cell was the stem, ``3->64 k3 @ 130x256^2``,
     at 7.9505 ms declined against 1.4910 ms with the row.
 
@@ -1090,10 +1082,9 @@ def bwd_weight_config(
     1.7-1.9x at ``Cout = 64`` where the tile has no height to trade.
 
     That race forces the row; what the *shipped* resolver then delivers was
-    measured separately, over the whole corpus in the production shape, at the
-    commit before this clause was removed and at the commit after
-    (``work/triton-conv/review/HEAD_MEASUREMENT.md`` §3).  **1.813x** geometric
-    mean over the 21 backward-weight cells of those six channel pairs,
+    measured separately, over the whole corpus in the production shape, before
+    this clause was removed and after.  **1.813x** geometric mean over the 21
+    backward-weight cells of those six channel pairs,
     105.5 ms summed to 57.5 ms, worst cell the stem at 8.0000 ms to 1.523 ms.
     The forced-row 1.946x above is the counterfactual and this is the delivered
     figure; quote this one for the shipped kernel.
@@ -1121,12 +1112,12 @@ def bwd_weight_config(
     pure function of the shape and the config.  See the module docstring.
 
     That inequality is **measured**, not inferred, and it is wider than the
-    split count suggests (``work/triton-conv/review/verify3/ulp_bf16.json``, one
-    ordinary draw per cell, the six pairs at both production paddings).  In bf16
-    the old and new configs disagree at **10 of 12 cells**, but
-    :func:`split_count` moves at only 5 of them: the other five move because the
-    row changes ``matrix_instr_nonkdim`` from 16 to 32, and a different MFMA
-    fragment sums the same products in a different order within one ``BLOCK_K``.
+    split count suggests (one ordinary draw per cell, the six pairs at both
+    production paddings).  In bf16 the old and new configs disagree at **10 of
+    12 cells**, but :func:`split_count` moves at only 5 of them: the other five
+    move because the row changes ``matrix_instr_nonkdim`` from 16 to 32, and a
+    different MFMA fragment sums the same products in a different order within
+    one ``BLOCK_K``.
     The one pair that stays bitwise identical, ``3 -> 64``, is the one whose new
     row keeps both ``nonkdim`` and ``BLOCK_K``.  So the thing to check before
     asserting two configs agree is not the split count alone.  The disagreement
@@ -1324,7 +1315,7 @@ def conv3d_backward_weight(
     mirrors ``torch.nn.grad.conv3d_weight``.
 
     ``deterministic`` defaults to **True**, which is a deliberate divergence
-    from PLAN.md 3.4's ``deterministic=None`` following
+    from the original design, where ``deterministic=None`` was to follow
     ``torch.are_deterministic_algorithms_enabled()``.  The atomic path exists to
     price determinism, not to be selected; if it were the default whenever
     torch's flag is off then every ScaFFold run would silently get the

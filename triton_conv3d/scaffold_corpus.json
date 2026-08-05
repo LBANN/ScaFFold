@@ -1,5 +1,5 @@
 {
- "source": "model-analysis/unet_shapes.py via work/report/data",
+ "source": "model-analysis/unet_shapes.py",
  "configs": [
   {
    "tag": "A",
