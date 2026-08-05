@@ -40,8 +40,12 @@ _TORCH_DTYPE = {
 }
 
 #: Mantissa bits, including the implicit leading one.
-_MANTISSA_BITS = {torch.float64: 53, torch.float32: 24, torch.bfloat16: 8,
-                  torch.float16: 11}
+_MANTISSA_BITS = {
+    torch.float64: 53,
+    torch.float32: 24,
+    torch.bfloat16: 8,
+    torch.float16: 11,
+}
 
 
 def torch_dtype(problem: ConvProblem) -> torch.dtype:
@@ -98,22 +102,26 @@ def make_inputs(
     gen = torch.Generator(device=device).manual_seed(seed)
     thin = exact and density is not None and density < 1.0
 
-    def draw(shape: tuple[int, ...], offset: int,
-             activation: bool = False) -> torch.Tensor:
+    def draw(
+        shape: tuple[int, ...], offset: int, activation: bool = False
+    ) -> torch.Tensor:
         g = torch.Generator(device=device).manual_seed(seed + offset)
         if exact:
             # {-1, 0, 1}: products are exact and sums stay small.
-            t = torch.randint(-1, 2, shape, generator=g, device=device,
-                              dtype=torch.int8).to(dtype)
+            t = torch.randint(
+                -1, 2, shape, generator=g, device=device, dtype=torch.int8
+            ).to(dtype)
             if thin and activation:
                 # A separate stream, offset far enough that it cannot collide
                 # with any operand's *value* stream: those are seed + 0..3, and
                 # a mask drawn from one of them would correlate the zeros with
                 # the signs of another tensor.
                 gm = torch.Generator(device=device).manual_seed(
-                    seed + offset + (1 << 20))
-                t = t * (torch.rand(shape, generator=gm, device=device)
-                         < density).to(dtype)
+                    seed + offset + (1 << 20)
+                )
+                t = t * (torch.rand(shape, generator=gm, device=device) < density).to(
+                    dtype
+                )
         else:
             t = torch.randn(shape, generator=g, device=device, dtype=torch.float32)
             t = t.to(dtype)
@@ -124,7 +132,9 @@ def make_inputs(
     out: dict[str, torch.Tensor] = {
         "input": draw(problem.input_shape, 0, True).contiguous(memory_format=fmt),
         "weight": draw(problem.weight_shape, 1).contiguous(memory_format=fmt),
-        "grad_output": draw(problem.output_shape, 2, True).contiguous(memory_format=fmt),
+        "grad_output": draw(problem.output_shape, 2, True).contiguous(
+            memory_format=fmt
+        ),
     }
     out["bias"] = draw((problem.cout,), 3) if problem.bias else None
     return out

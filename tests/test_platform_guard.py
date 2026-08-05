@@ -171,7 +171,7 @@ def test_the_arch_feature_suffixes_are_not_part_of_the_comparison(monkeypatch):
 
 
 def test_a_device_that_cannot_be_answered_for_is_not_the_tuned_one(monkeypatch):
-    """"I could not find out" is not "yes"; the description says which."""
+    """ "I could not find out" is not "yes"; the description says which."""
 
     def explode(index):
         raise RuntimeError("HIP error: no device")
@@ -318,9 +318,9 @@ def test_each_ladders_setter_is_the_override_for_that_ladder(
 def test_the_env_var_opt_in_reaches_the_guard(monkeypatch, module):
     """``SCAFFOLD_*_TRITON=1`` and the setter are the same statement."""
     monkeypatch.setenv(module.TRITON_ENV_VAR, "1")
-    monkeypatch.setattr(module, "_triton_override", _rungs._env_override(
-        module.TRITON_ENV_VAR
-    ))
+    monkeypatch.setattr(
+        module, "_triton_override", _rungs._env_override(module.TRITON_ENV_VAR)
+    )
     _fake_device(monkeypatch, _UNTUNED["mi300x"])
     assert _rungs._platform_declines(_cuda(), module._triton_override) is False
 
@@ -492,8 +492,9 @@ def test_a_whole_unet_step_asks_the_hardware_once(monkeypatch):
     asked = []
     _fake_device(monkeypatch, _MI300A, count=asked)
     torch.manual_seed(0)
-    model = UNet(n_channels=3, n_classes=2, trilinear=False, layers=2,
-                 group_norm_groups=8)
+    model = UNet(
+        n_channels=3, n_classes=2, trilinear=False, layers=2, group_norm_groups=8
+    )
     model = model.cuda().to(memory_format=_CHANNELS_LAST)
     x = _gpu_input((1, 3, 16, 16, 16), dtype=torch.float32)
     with torch.no_grad():

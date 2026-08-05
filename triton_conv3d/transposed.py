@@ -96,7 +96,6 @@ exactly the same reason.
 from __future__ import annotations
 
 import dataclasses
-import math
 from typing import Sequence
 
 import torch
@@ -104,14 +103,16 @@ import triton
 import triton.language as tl
 
 from .gather_gemm import (
-    ConvConfig,
     _LDS_BYTES,
     _MFMA_KDIM,
+    ConvConfig,
     _check_out,
     _index_dtype,
     _pow2_at_most,
     _triple,
     conv3d_forward,
+)
+from .gather_gemm import (
     is_supported as _is_supported_fwd,
 )
 from .reduce_gemm import conv3d_backward_weight, is_supported_bwd_weight
@@ -142,25 +143,50 @@ __all__ = [
 
 @triton.jit
 def _convT3d_fwd_kernel(
-    X, W, Y, BIAS,
+    X,
+    W,
+    Y,
+    BIAS,
     # Sizes.  ``M_TOTAL`` is ``BATCH * IN_D * IN_H * IN_W`` -- the *input*
     # volume, because that is what a scatter is indexed by.
-    BATCH, IN_D, IN_H, IN_W,
-    CIN, COUT, M_TOTAL,
+    BATCH,
+    IN_D,
+    IN_H,
+    IN_W,
+    CIN,
+    COUT,
+    M_TOTAL,
     # Element strides.  The channel stride of X and Y is 1 by construction --
     # that is what NDHWC means -- so it is neither passed nor multiplied by.
-    stride_xn, stride_xd, stride_xh, stride_xw,
+    stride_xn,
+    stride_xd,
+    stride_xh,
+    stride_xw,
     # The weight over the effective GEMM's axes: the fused tap index, the
     # reduction axis K (Cin), and the output axis N (Cout).  Which of the two
     # channel strides is 1 is a constexpr (``W_ORDER``), as in the forward.
-    stride_wt, stride_wk, stride_wn,
-    stride_yn, stride_yd, stride_yh, stride_yw,
-    KD: tl.constexpr, KH: tl.constexpr, KW: tl.constexpr,
-    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_NC: tl.constexpr,
-    BLOCK_K: tl.constexpr, BLOCK_K_COUNT: tl.constexpr,
-    TAP_BLOCK: tl.constexpr, GROUP_M: tl.constexpr,
-    HAS_BIAS: tl.constexpr, EVEN_K: tl.constexpr, EVEN_N: tl.constexpr,
-    INDEX_DTYPE: tl.constexpr, INPUT_PRECISION: tl.constexpr,
+    stride_wt,
+    stride_wk,
+    stride_wn,
+    stride_yn,
+    stride_yd,
+    stride_yh,
+    stride_yw,
+    KD: tl.constexpr,
+    KH: tl.constexpr,
+    KW: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_NC: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    BLOCK_K_COUNT: tl.constexpr,
+    TAP_BLOCK: tl.constexpr,
+    GROUP_M: tl.constexpr,
+    HAS_BIAS: tl.constexpr,
+    EVEN_K: tl.constexpr,
+    EVEN_N: tl.constexpr,
+    INDEX_DTYPE: tl.constexpr,
+    INPUT_PRECISION: tl.constexpr,
     W_ORDER: tl.constexpr,
 ):
     # -- which tile this program owns --------------------------------------
@@ -252,10 +278,7 @@ def _convT3d_fwd_kernel(
     if W_ORDER == 0:
         w_col = tap.to(INDEX_DTYPE) * stride_wt + offs_n.to(INDEX_DTYPE)
     else:
-        w_col = (
-            tap.to(INDEX_DTYPE) * stride_wt
-            + offs_n.to(INDEX_DTYPE) * stride_wn
-        )
+        w_col = tap.to(INDEX_DTYPE) * stride_wt + offs_n.to(INDEX_DTYPE) * stride_wn
 
     acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
 
@@ -383,8 +406,9 @@ def _fit_transposed(
     while cfg.lds_bytes(dtype) > _LDS_BYTES:
         half_k, half_m, half_n = cfg.BLOCK_K // 2, cfg.BLOCK_M // 2, cfg.BLOCK_N // 2
         if half_k >= kdim and half_k % kdim == 0:
-            cfg = dataclasses.replace(cfg, BLOCK_K=half_k,
-                                      kpack=1 if half_k <= 16 else cfg.kpack)
+            cfg = dataclasses.replace(
+                cfg, BLOCK_K=half_k, kpack=1 if half_k <= 16 else cfg.kpack
+            )
         elif half_m >= nk and half_m % nk == 0:
             cfg = dataclasses.replace(cfg, BLOCK_M=half_m)
         elif half_n >= cfg.TAP_BLOCK * nk and half_n % nk == 0:
@@ -394,8 +418,8 @@ def _fit_transposed(
     while (
         cfg.BLOCK_M > max(16, nk)
         and (cfg.BLOCK_M // 2) % nk == 0
-        and (-(-m // cfg.BLOCK_M) * -(-cout // cfg.BLOCK_NC)
-             * (taps // cfg.TAP_BLOCK)) < _MIN_PROGRAMS
+        and (-(-m // cfg.BLOCK_M) * -(-cout // cfg.BLOCK_NC) * (taps // cfg.TAP_BLOCK))
+        < _MIN_PROGRAMS
     ):
         cfg = dataclasses.replace(cfg, BLOCK_M=cfg.BLOCK_M // 2)
     warps = max(1, min(cfg.num_warps, cfg.BLOCK_M * cfg.BLOCK_N // 256))
@@ -432,26 +456,42 @@ def default_transposed_config(
     block_n = tap_block * block_nc
     return _fit_transposed(
         TransposedConfig(
-            BLOCK_M=block_m, BLOCK_N=block_n, BLOCK_K=block_k, GROUP_M=6,
+            BLOCK_M=block_m,
+            BLOCK_N=block_n,
+            BLOCK_K=block_k,
+            GROUP_M=6,
             num_warps=8 if block_n >= 256 or block_k >= 128 else 4,
-            num_stages=2, matrix_instr_nonkdim=nonkdim,
-            kpack=1 if block_k <= 16 else 2, TAP_BLOCK=tap_block,
+            num_stages=2,
+            matrix_instr_nonkdim=nonkdim,
+            kpack=1 if block_k <= 16 else 2,
+            TAP_BLOCK=tap_block,
         ),
-        m, cout, taps, dtype,
+        m,
+        cout,
+        taps,
+        dtype,
     )
 
 
-def _tuned(bm: int, bnc: int, tb: int, bk: int, warps: int,
-           group_m: int = 6) -> TransposedConfig:
+def _tuned(
+    bm: int, bnc: int, tb: int, bk: int, warps: int, group_m: int = 6
+) -> TransposedConfig:
     return TransposedConfig(
-        BLOCK_M=bm, BLOCK_N=tb * bnc, BLOCK_K=bk, GROUP_M=group_m,
-        num_warps=warps, num_stages=2, matrix_instr_nonkdim=16,
-        kpack=1 if bk <= 16 else 2, TAP_BLOCK=tb,
+        BLOCK_M=bm,
+        BLOCK_N=tb * bnc,
+        BLOCK_K=bk,
+        GROUP_M=group_m,
+        num_warps=warps,
+        num_stages=2,
+        matrix_instr_nonkdim=16,
+        kpack=1 if bk <= 16 else 2,
+        TAP_BLOCK=tb,
     )
 
 
-def transposed_tune_key(dtype: torch.dtype, cin: int, cout: int,
-                        kernel: tuple[int, ...]) -> tuple:
+def transposed_tune_key(
+    dtype: torch.dtype, cin: int, cout: int, kernel: tuple[int, ...]
+) -> tuple:
     return (str(dtype), cin, cout, tuple(kernel))
 
 
@@ -498,7 +538,10 @@ def register_tuned_transposed(dtype, cin, cout, kernel, config) -> None:
 
 
 def transposed_config(
-    m: int, cin: int, cout: int, kernel: Sequence[int],
+    m: int,
+    cin: int,
+    cout: int,
+    kernel: Sequence[int],
     dtype: torch.dtype = torch.bfloat16,
 ) -> TransposedConfig:
     """The config :func:`conv_transpose3d_forward` would pick for this problem."""
@@ -530,9 +573,14 @@ _SEED_TILES: tuple[tuple[int, int, int, int], ...] = (
 
 
 def candidate_transposed_configs(
-    m: int, cin: int, cout: int, taps: int,
+    m: int,
+    cin: int,
+    cout: int,
+    taps: int,
     dtype: torch.dtype = torch.bfloat16,
-    *, tap_blocks: Sequence[int] = (1, 2, 4, 8), nonkdims: Sequence[int] = (16, 32),
+    *,
+    tap_blocks: Sequence[int] = (1, 2, 4, 8),
+    nonkdims: Sequence[int] = (16, 32),
 ) -> list[TransposedConfig]:
     """Configs worth timing for one transposed problem, pruned to legal ones."""
     n2 = max(16, triton.next_power_of_2(cout))
@@ -549,14 +597,21 @@ def candidate_transposed_configs(
             for warps in {4, 8, seed_warps}:
                 for nonkdim in nonkdims:
                     cfg = TransposedConfig(
-                        BLOCK_M=bm, BLOCK_N=tb * bnc, BLOCK_K=bk, GROUP_M=6,
-                        num_warps=warps, num_stages=2,
+                        BLOCK_M=bm,
+                        BLOCK_N=tb * bnc,
+                        BLOCK_K=bk,
+                        GROUP_M=6,
+                        num_warps=warps,
+                        num_stages=2,
                         matrix_instr_nonkdim=nonkdim,
-                        kpack=1 if bk <= 16 else 2, TAP_BLOCK=tb,
+                        kpack=1 if bk <= 16 else 2,
+                        TAP_BLOCK=tb,
                     )
-                    if (cfg.validate(dtype) is not None
-                            or cfg.lds_bytes(dtype) > _LDS_BYTES
-                            or cfg in seen):
+                    if (
+                        cfg.validate(dtype) is not None
+                        or cfg.lds_bytes(dtype) > _LDS_BYTES
+                        or cfg in seen
+                    ):
                         continue
                     seen.add(cfg)
                     out.append(cfg)
@@ -623,9 +678,11 @@ def _transposed_weight_plan(w: torch.Tensor) -> tuple[int, int, int, int] | None
         st = s[2]
     else:
         st = 0  # one tap: ``tap`` is always 0, so any stride is the right one
-    if ((kw > 1 and s[4] != st)
-            or (kh > 1 and s[3] != st * kw)
-            or (kd > 1 and s[2] != st * kw * kh)):
+    if (
+        (kw > 1 and s[4] != st)
+        or (kh > 1 and s[3] != st * kw)
+        or (kd > 1 and s[2] != st * kw * kh)
+    ):
         return None
     if cout == 1 or s[1] == 1:
         return (_W_N_CONTIG, st, s[0], 1)
@@ -649,7 +706,12 @@ def _transposed_out_spatial(
 
 
 def _transposed_shape_ok(
-    x: torch.Tensor, w: torch.Tensor, stride, padding, output_padding, dilation,
+    x: torch.Tensor,
+    w: torch.Tensor,
+    stride,
+    padding,
+    output_padding,
+    dilation,
     groups: int,
 ) -> tuple[int, int, int] | None:
     """The kernel triple if this is a ``kernel == stride`` upsample, else ``None``.
@@ -724,8 +786,7 @@ def is_supported_transposed(
     of the ordinary convolution were also expected to agree until ``stride > 1``
     showed that they do not.
     """
-    k = _transposed_shape_ok(x, w, stride, padding, output_padding, dilation,
-                             groups)
+    k = _transposed_shape_ok(x, w, stride, padding, output_padding, dilation, groups)
     if k is None:
         return False
     if x.dtype != w.dtype or x.dtype not in _MFMA_KDIM:
@@ -745,9 +806,14 @@ def is_supported_transposed(
         # the right length silently applies every other value.
         # ``torch.conv_transpose3d`` rejects both; so does this.  ``Cout`` is
         # ``w.shape[1]`` here, not ``w.shape[0]``.
-        if (bias.dim() != 1 or int(bias.shape[0]) != int(w.shape[1])
-                or bias.dtype != x.dtype or not bias.is_cuda
-                or bias.device != x.device or bias.stride(0) != 1):
+        if (
+            bias.dim() != 1
+            or int(bias.shape[0]) != int(w.shape[1])
+            or bias.dtype != x.dtype
+            or not bias.is_cuda
+            or bias.device != x.device
+            or bias.stride(0) != 1
+        ):
             return False
     return True
 
@@ -771,8 +837,9 @@ def is_supported_transposed_bwd_data(
     ``kernel == stride`` upsample at all, and that ``input_shape`` is the shape
     this ``grad_output`` came from.
     """
-    k = _transposed_shape_ok(grad_output, w, stride, padding, output_padding,
-                             dilation, groups)
+    k = _transposed_shape_ok(
+        grad_output, w, stride, padding, output_padding, dilation, groups
+    )
     if k is None:
         return False
     try:
@@ -837,9 +904,7 @@ def is_supported_transposed_bwd_weight(
         return False
     if any(int(v) < 1 for v in x.shape[2:]):
         return False
-    return bool(
-        is_supported_bwd_weight(grad_output, (ws[0], ws[1], *k), x, k, 0, 1, 1)
-    )
+    return bool(is_supported_bwd_weight(grad_output, (ws[0], ws[1], *k), x, k, 0, 1, 1))
 
 
 def is_supported_transposed_all(
@@ -868,8 +933,9 @@ def is_supported_transposed_all(
     zeros and answer ``False`` -- a fallback to the caller's other kernel, which
     is the safe direction.
     """
-    if not is_supported_transposed(x, w, bias, stride, padding, output_padding,
-                                   dilation, groups):
+    if not is_supported_transposed(
+        x, w, bias, stride, padding, output_padding, dilation, groups
+    ):
         return False
     k = tuple(int(v) for v in w.shape[2:])
     grad_shape = (int(x.shape[0]), int(w.shape[1])) + _transposed_out_spatial(
@@ -882,7 +948,13 @@ def is_supported_transposed_all(
         return False
     return bool(
         is_supported_transposed_bwd_weight(
-            x, tuple(w.shape), grad, stride, padding, output_padding, dilation,
+            x,
+            tuple(w.shape),
+            grad,
+            stride,
+            padding,
+            output_padding,
+            dilation,
             groups,
         )
     )
@@ -915,8 +987,9 @@ def conv_transpose3d_forward(
     out-of-bounds device write with no error and an NCDHW one is a full-rate
     kernel returning a scrambled answer.
     """
-    if not is_supported_transposed(x, w, bias, stride, padding, output_padding,
-                                   dilation, groups):
+    if not is_supported_transposed(
+        x, w, bias, stride, padding, output_padding, dilation, groups
+    ):
         raise NotImplementedError(
             f"unsupported: x={tuple(x.shape)}/{x.dtype} w={tuple(w.shape)} "
             f"stride={stride} padding={padding} output_padding={output_padding} "
@@ -929,8 +1002,7 @@ def conv_transpose3d_forward(
     x = x.contiguous(memory_format=torch.channels_last_3d)
     n, cin, in_d, in_h, in_w = (int(v) for v in x.shape)
     cout = int(w.shape[1])
-    out_d, out_h, out_w = _transposed_out_spatial((in_d, in_h, in_w),
-                                                  (kd, kh, kw))
+    out_d, out_h, out_w = _transposed_out_spatial((in_d, in_h, in_w), (kd, kh, kw))
 
     y_shape = (n, cout, out_d, out_h, out_w)
     if out is None:
@@ -938,8 +1010,12 @@ def conv_transpose3d_forward(
         # it ``torch.empty(shape).contiguous(memory_format=...)`` allocates NCDHW
         # and then copies the whole thing -- 235x, measured on the gather
         # kernel's identically-shaped defect.
-        y = torch.empty(y_shape, device=x.device, dtype=x.dtype,
-                        memory_format=torch.channels_last_3d)
+        y = torch.empty(
+            y_shape,
+            device=x.device,
+            dtype=x.dtype,
+            memory_format=torch.channels_last_3d,
+        )
     else:
         y = out
         _check_out(y, y_shape, x)
@@ -973,17 +1049,38 @@ def conv_transpose3d_forward(
         * (taps // config.TAP_BLOCK),
     )
     _convT3d_fwd_kernel[grid](
-        x, wt, y, bias,
-        n, in_d, in_h, in_w,
-        cin, cout, m_total,
-        x.stride(0), x.stride(2), x.stride(3), x.stride(4),
-        plan[1], plan[2], plan[3],
-        y.stride(0), y.stride(2), y.stride(3), y.stride(4),
-        KD=kd, KH=kh, KW=kw,
-        BLOCK_M=config.BLOCK_M, BLOCK_N=config.BLOCK_N,
-        BLOCK_NC=config.BLOCK_NC, BLOCK_K=config.BLOCK_K,
+        x,
+        wt,
+        y,
+        bias,
+        n,
+        in_d,
+        in_h,
+        in_w,
+        cin,
+        cout,
+        m_total,
+        x.stride(0),
+        x.stride(2),
+        x.stride(3),
+        x.stride(4),
+        plan[1],
+        plan[2],
+        plan[3],
+        y.stride(0),
+        y.stride(2),
+        y.stride(3),
+        y.stride(4),
+        KD=kd,
+        KH=kh,
+        KW=kw,
+        BLOCK_M=config.BLOCK_M,
+        BLOCK_N=config.BLOCK_N,
+        BLOCK_NC=config.BLOCK_NC,
+        BLOCK_K=config.BLOCK_K,
         BLOCK_K_COUNT=triton.cdiv(cin, config.BLOCK_K),
-        TAP_BLOCK=config.TAP_BLOCK, GROUP_M=config.GROUP_M,
+        TAP_BLOCK=config.TAP_BLOCK,
+        GROUP_M=config.GROUP_M,
         HAS_BIAS=bias is not None,
         EVEN_K=(cin % config.BLOCK_K == 0),
         EVEN_N=(cout % config.BLOCK_NC == 0),
@@ -1021,8 +1118,7 @@ def conv_transpose3d_backward_data(
     a reduction of ``grad_output`` and not part of this direction at all.
     """
     if not is_supported_transposed_bwd_data(
-        grad_output, w, input_shape, stride, padding, output_padding, dilation,
-        groups
+        grad_output, w, input_shape, stride, padding, output_padding, dilation, groups
     ):
         raise NotImplementedError(
             f"unsupported: grad_output={tuple(grad_output.shape)}/"
@@ -1032,8 +1128,7 @@ def conv_transpose3d_backward_data(
             f"dilation={dilation} groups={groups}"
         )
     k = tuple(int(v) for v in w.shape[2:])
-    return conv3d_forward(grad_output, w, None, k, 0, 1, 1, config=config,
-                          out=out)
+    return conv3d_forward(grad_output, w, None, k, 0, 1, 1, config=config, out=out)
 
 
 def conv_transpose3d_backward_weight(
@@ -1065,8 +1160,7 @@ def conv_transpose3d_backward_weight(
     in, so the optimizer's elementwise update is contiguous.
     """
     if not is_supported_transposed_bwd_weight(
-        x, weight_shape, grad_output, stride, padding, output_padding, dilation,
-        groups
+        x, weight_shape, grad_output, stride, padding, output_padding, dilation, groups
     ):
         raise NotImplementedError(
             f"unsupported: x={tuple(x.shape)}/{x.dtype} "
@@ -1078,8 +1172,16 @@ def conv_transpose3d_backward_weight(
     ws = tuple(int(v) for v in weight_shape)
     k = ws[2:]
     return conv3d_backward_weight(
-        grad_output, ws, x, k, 0, 1, 1,
-        config=config, workspace=workspace, out=out,
+        grad_output,
+        ws,
+        x,
+        k,
+        0,
+        1,
+        1,
+        config=config,
+        workspace=workspace,
+        out=out,
         deterministic=deterministic,
     )
 
@@ -1098,8 +1200,12 @@ def grad_transposed_weight_empty(
     which ``conv3d_backward_weight``'s ``out=`` check catches.
     """
     k = _triple(kernel, "kernel")
-    return torch.empty((cin, cout, *k), dtype=dtype, device=device,
-                       memory_format=torch.channels_last_3d)
+    return torch.empty(
+        (cin, cout, *k),
+        dtype=dtype,
+        device=device,
+        memory_format=torch.channels_last_3d,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1133,11 +1239,10 @@ def verify_isa_transposed(
         w = w.contiguous(memory_format=torch.channels_last_3d)
     elif weight_layout != "tkn":
         raise ValueError(f"unknown weight_layout {weight_layout!r}")
-    x = torch.randn((n, cin, d, h, wd), device="cuda",
-                    dtype=torch.bfloat16).contiguous(
-        memory_format=torch.channels_last_3d)
-    cfg = config or transposed_config(n * d * h * wd, cin, cout, k,
-                                      torch.bfloat16)
+    x = torch.randn((n, cin, d, h, wd), device="cuda", dtype=torch.bfloat16).contiguous(
+        memory_format=torch.channels_last_3d
+    )
+    cfg = config or transposed_config(n * d * h * wd, cin, cout, k, torch.bfloat16)
     y = conv_transpose3d_forward(x, w, None, k, config=cfg)
     torch.cuda.synchronize()
     print(

@@ -30,7 +30,6 @@ against another formula.
 
 from __future__ import annotations
 
-import dataclasses
 import math
 
 import pytest
@@ -38,7 +37,7 @@ import torch
 import torch.nn.functional as F
 
 from triton_conv3d import reference
-from triton_conv3d.gather_gemm import ConvConfig, is_supported
+from triton_conv3d.gather_gemm import is_supported
 from triton_conv3d.shapes import ConvProblem, scaffold_corpus
 from triton_conv3d.transposed import (
     TransposedConfig,
@@ -59,11 +58,23 @@ from triton_conv3d.transposed import (
 requires_gpu = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
 
 
-def _problem(name, cin, cout, spatial, k=(2, 2, 2), *, bias=False,
-             dtype="bf16", n=1) -> ConvProblem:
-    return ConvProblem(name, cin, cout, spatial, k, k, (0, 0, 0), n=n,
-                       transposed=True, bias=bias, dtype=dtype,
-                       sites=("synthetic",))
+def _problem(
+    name, cin, cout, spatial, k=(2, 2, 2), *, bias=False, dtype="bf16", n=1
+) -> ConvProblem:
+    return ConvProblem(
+        name,
+        cin,
+        cout,
+        spatial,
+        k,
+        k,
+        (0, 0, 0),
+        n=n,
+        transposed=True,
+        bias=bias,
+        dtype=dtype,
+        sites=("synthetic",),
+    )
 
 
 #: Synthetic problems chosen to break the scatter rather than to be fast.  Each
@@ -109,10 +120,19 @@ EDGE: list[ConvProblem] = [
 #: extents are deliberately not powers of two so ``BLOCK_M`` does not divide
 #: ``M`` and the store's rows wrap.
 CORPUS_PAIRS: list[ConvProblem] = [
-    _problem(f"{p.cin}to{p.cout}-corpus", p.cin, p.cout, (3, 4, 5),
-             tuple(p.kernel), bias=p.bias)
-    for p in {(q.cin, q.cout, tuple(q.kernel), q.bias): q
-              for q in scaffold_corpus() if q.transposed}.values()
+    _problem(
+        f"{p.cin}to{p.cout}-corpus",
+        p.cin,
+        p.cout,
+        (3, 4, 5),
+        tuple(p.kernel),
+        bias=p.bias,
+    )
+    for p in {
+        (q.cin, q.cout, tuple(q.kernel), q.bias): q
+        for q in scaffold_corpus()
+        if q.transposed
+    }.values()
 ]
 
 
@@ -132,7 +152,9 @@ def _ops(problem: ConvProblem, seed: int = 0, direction="fwd") -> dict:
     """
     dtype = reference.torch_dtype(problem)
     return reference.make_inputs(
-        problem, seed=seed, exact=True,
+        problem,
+        seed=seed,
+        exact=True,
         density=reference.exact_density(problem, direction, dtype=dtype),
     )
 
@@ -149,14 +171,20 @@ def _fwd(problem: ConvProblem, ops: dict, **kw) -> torch.Tensor:
 
 def _bwd_data(problem: ConvProblem, ops: dict, **kw) -> torch.Tensor:
     return conv_transpose3d_backward_data(
-        ops["grad_output"], ops["weight"], problem.input_shape, problem.stride,
+        ops["grad_output"],
+        ops["weight"],
+        problem.input_shape,
+        problem.stride,
         **kw,
     )
 
 
 def _bwd_weight(problem: ConvProblem, ops: dict, **kw) -> torch.Tensor:
     return conv_transpose3d_backward_weight(
-        ops["input"], problem.weight_shape, ops["grad_output"], problem.stride,
+        ops["input"],
+        problem.weight_shape,
+        ops["grad_output"],
+        problem.stride,
         **kw,
     )
 
@@ -183,8 +211,7 @@ def test_the_windows_tile_the_output_exactly_once():
                     for kd in range(k[0]):
                         for kh in range(k[1]):
                             for kw in range(k[2]):
-                                hits[d * k[0] + kd, h * k[1] + kh,
-                                     w * k[2] + kw] += 1
+                                hits[d * k[0] + kd, h * k[1] + kh, w * k[2] + kw] += 1
         assert torch.equal(hits, torch.ones_like(hits)), k
 
     # ``k=3, s=2`` overlaps: the windows cover some voxels twice.  If this ever
@@ -211,9 +238,11 @@ def test_transposed_flops_have_no_phantom_tap_factor():
     So the count is derived here from first principles: one MAC per (output
     voxel, output channel, input channel), times two.
     """
-    for cin, cout, spatial, k in [(128, 64, (4, 5, 6), (2, 2, 2)),
-                                  (32, 32, (3, 3, 3), (3, 3, 3)),
-                                  (16, 8, (2, 3, 4), (1, 2, 4))]:
+    for cin, cout, spatial, k in [
+        (128, 64, (4, 5, 6), (2, 2, 2)),
+        (32, 32, (3, 3, 3), (3, 3, 3)),
+        (16, 8, (2, 3, 4), (1, 2, 4)),
+    ]:
         p = _problem("f", cin, cout, spatial, k)
         out_vol = math.prod(p.out_spatial)
         macs = out_vol * cout * cin
@@ -242,11 +271,12 @@ def test_the_gemm_decomposition_matches_the_kernels_grid():
         taps = p.tap_count
         assert n == p.cout * taps
         assert m == p.n * math.prod(p.spatial)
-        cfg = transposed_config(m, p.cin, p.cout, p.kernel,
-                                reference.torch_dtype(p))
+        cfg = transposed_config(m, p.cin, p.cout, p.kernel, reference.torch_dtype(p))
         assert taps % cfg.TAP_BLOCK == 0, (p.label, cfg)
-        columns = (taps // cfg.TAP_BLOCK) * cfg.TAP_BLOCK * (
-            -(-p.cout // cfg.BLOCK_NC) * cfg.BLOCK_NC
+        columns = (
+            (taps // cfg.TAP_BLOCK)
+            * cfg.TAP_BLOCK
+            * (-(-p.cout // cfg.BLOCK_NC) * cfg.BLOCK_NC)
         )
         assert columns >= n, (p.label, cfg)
 
@@ -256,8 +286,7 @@ def test_the_gemm_decomposition_matches_the_kernels_grid():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("problem", EDGE + CORPUS_PAIRS,
-                         ids=_ids(EDGE + CORPUS_PAIRS))
+@pytest.mark.parametrize("problem", EDGE + CORPUS_PAIRS, ids=_ids(EDGE + CORPUS_PAIRS))
 def test_selected_config_is_legal_for_every_shape(problem: ConvProblem):
     """An illegal MFMA config does not fail, it silently emits vector FMA.
 
@@ -285,8 +314,9 @@ def test_every_candidate_config_is_legal(problem: ConvProblem):
     """
     dtype = reference.torch_dtype(problem)
     m = problem.n * math.prod(problem.spatial)
-    cands = candidate_transposed_configs(m, problem.cin, problem.cout,
-                                         problem.tap_count, dtype)
+    cands = candidate_transposed_configs(
+        m, problem.cin, problem.cout, problem.tap_count, dtype
+    )
     assert cands
     for cfg in cands:
         assert cfg.validate(dtype) is None, cfg
@@ -302,8 +332,14 @@ def test_the_fp32_config_fits_lds():
     ScaFFold configuration.  This kernel's tile is *wider* than that one's
     (``TAP_BLOCK`` multiplies the column count), so the same hole is closer.
     """
-    for cin, cout, taps in [(1024, 512, 8), (512, 256, 8), (256, 128, 8),
-                            (128, 64, 8), (64, 64, 27), (2048, 1024, 8)]:
+    for cin, cout, taps in [
+        (1024, 512, 8),
+        (512, 256, 8),
+        (256, 128, 8),
+        (128, 64, 8),
+        (64, 64, 27),
+        (2048, 1024, 8),
+    ]:
         for dtype in (torch.float32, torch.bfloat16, torch.float16):
             cfg = default_transposed_config(1 << 16, cin, cout, taps, dtype)
             assert cfg.validate(dtype) is None, (cin, cout, dtype, cfg)
@@ -340,18 +376,23 @@ def test_is_supported_declines_what_the_tiling_argument_does_not_cover():
     # is why the positive control below is on the GPU.
     assert not is_supported_transposed(x, w, None, 2, 0, 0, 1, 1)  # not cuda
     for stride, padding, output_padding, dilation, groups in [
-        (1, 0, 0, 1, 1),     # k != s: the windows overlap
-        (3, 0, 0, 1, 1),     # k != s: the windows leave gaps
-        (2, 1, 0, 1, 1),     # padding crops the tiled result
-        (2, 0, 1, 1, 1),     # output_padding extends it asymmetrically
-        (2, 0, 0, 2, 1),     # dilation interleaves the window with holes
-        (2, 0, 0, 1, 2),     # groups
-        ((2, 2, 1), 0, 0, 1, 1),   # anisotropic mismatch on one axis only
+        (1, 0, 0, 1, 1),  # k != s: the windows overlap
+        (3, 0, 0, 1, 1),  # k != s: the windows leave gaps
+        (2, 1, 0, 1, 1),  # padding crops the tiled result
+        (2, 0, 1, 1, 1),  # output_padding extends it asymmetrically
+        (2, 0, 0, 2, 1),  # dilation interleaves the window with holes
+        (2, 0, 0, 1, 2),  # groups
+        ((2, 2, 1), 0, 0, 1, 1),  # anisotropic mismatch on one axis only
     ]:
         assert not is_supported_transposed(
             x.cuda() if torch.cuda.is_available() else x,
             w.cuda() if torch.cuda.is_available() else w,
-            None, stride, padding, output_padding, dilation, groups
+            None,
+            stride,
+            padding,
+            output_padding,
+            dilation,
+            groups,
         ), (stride, padding, output_padding, dilation, groups)
 
 
@@ -370,10 +411,14 @@ def test_the_gates_are_total():
         assert is_supported_transposed(x, w, None, 2, 0, bad, 1, 1) is False
         assert is_supported_transposed(x, w, None, 2, 0, 0, bad, 1) is False
         assert is_supported_transposed_all(x, w, None, bad, 0, 0, 1, 1) is False
-        assert is_supported_transposed_bwd_data(
-            x, w, (1, 8, 4, 4, 4), bad, 0, 0, 1, 1) is False
-        assert is_supported_transposed_bwd_weight(
-            x, (8, 4, 2, 2, 2), x, bad, 0, 0, 1, 1) is False
+        assert (
+            is_supported_transposed_bwd_data(x, w, (1, 8, 4, 4, 4), bad, 0, 0, 1, 1)
+            is False
+        )
+        assert (
+            is_supported_transposed_bwd_weight(x, (8, 4, 2, 2, 2), x, bad, 0, 0, 1, 1)
+            is False
+        )
     # A malformed ``input_shape`` / ``weight_shape`` is the same kind of
     # question and gets the same kind of answer.
     for bad in (None, (1, 8, 4, 4), "abcde", 5):
@@ -391,14 +436,18 @@ def test_is_supported_declines_degenerate_extents():
     """
     good_x = torch.zeros(1, 8, 4, 4, 4)
     good_w = torch.zeros(8, 4, 2, 2, 2)
-    assert not is_supported_transposed(torch.zeros(1, 8, 0, 4, 4), good_w,
-                                       None, 2, 0, 0, 1, 1)
-    assert not is_supported_transposed(good_x, torch.zeros(0, 4, 2, 2, 2),
-                                       None, 2, 0, 0, 1, 1)
-    assert not is_supported_transposed(good_x, torch.zeros(8, 0, 2, 2, 2),
-                                       None, 2, 0, 0, 1, 1)
-    assert not is_supported_transposed(good_x, torch.zeros(8, 4, 0, 2, 2),
-                                       None, (0, 2, 2), 0, 0, 1, 1)
+    assert not is_supported_transposed(
+        torch.zeros(1, 8, 0, 4, 4), good_w, None, 2, 0, 0, 1, 1
+    )
+    assert not is_supported_transposed(
+        good_x, torch.zeros(0, 4, 2, 2, 2), None, 2, 0, 0, 1, 1
+    )
+    assert not is_supported_transposed(
+        good_x, torch.zeros(8, 0, 2, 2, 2), None, 2, 0, 0, 1, 1
+    )
+    assert not is_supported_transposed(
+        good_x, torch.zeros(8, 4, 0, 2, 2), None, (0, 2, 2), 0, 0, 1, 1
+    )
 
 
 @requires_gpu
@@ -412,19 +461,34 @@ def test_is_supported_reads_the_transposed_weight_convention():
     """
     x = torch.zeros(1, 8, 4, 4, 4, device="cuda", dtype=torch.bfloat16)
     assert is_supported_transposed(
-        x, torch.zeros(8, 4, 2, 2, 2, device="cuda", dtype=torch.bfloat16),
-        None, 2, 0, 0, 1, 1)
+        x,
+        torch.zeros(8, 4, 2, 2, 2, device="cuda", dtype=torch.bfloat16),
+        None,
+        2,
+        0,
+        0,
+        1,
+        1,
+    )
     # Same tensor read the other way round: Cin=4 does not match x's 8 channels.
     assert not is_supported_transposed(
-        x, torch.zeros(4, 8, 2, 2, 2, device="cuda", dtype=torch.bfloat16),
-        None, 2, 0, 0, 1, 1)
+        x,
+        torch.zeros(4, 8, 2, 2, 2, device="cuda", dtype=torch.bfloat16),
+        None,
+        2,
+        0,
+        0,
+        1,
+        1,
+    )
     # A bias is ``Cout`` = w.shape[1] long, not w.shape[0].
     w = torch.zeros(8, 4, 2, 2, 2, device="cuda", dtype=torch.bfloat16)
     assert is_supported_transposed(
-        x, w, torch.zeros(4, device="cuda", dtype=torch.bfloat16),
-        None or 2, 0, 0, 1, 1)
+        x, w, torch.zeros(4, device="cuda", dtype=torch.bfloat16), None or 2, 0, 0, 1, 1
+    )
     assert not is_supported_transposed(
-        x, w, torch.zeros(8, device="cuda", dtype=torch.bfloat16), 2, 0, 0, 1, 1)
+        x, w, torch.zeros(8, device="cuda", dtype=torch.bfloat16), 2, 0, 0, 1, 1
+    )
     # A stride-2 view of the right length applies every other value; the kernel
     # indexes the bias with an element stride of 1 and cannot see this.
     long_bias = torch.zeros(8, device="cuda", dtype=torch.bfloat16)
@@ -447,8 +511,7 @@ def test_is_supported_declines_operands_on_different_devices():
 
 
 @requires_gpu
-@pytest.mark.parametrize("problem", EDGE + CORPUS_PAIRS,
-                         ids=_ids(EDGE + CORPUS_PAIRS))
+@pytest.mark.parametrize("problem", EDGE + CORPUS_PAIRS, ids=_ids(EDGE + CORPUS_PAIRS))
 def test_all_three_gates_accept_every_problem_this_module_serves(problem):
     """``is_supported_transposed_all`` must not be narrower than the forward.
 
@@ -463,8 +526,7 @@ def test_all_three_gates_accept_every_problem_this_module_serves(problem):
     dtype = reference.torch_dtype(problem)
     x = torch.zeros(problem.input_shape, device="cuda", dtype=dtype)
     w = torch.zeros(problem.weight_shape, device="cuda", dtype=dtype)
-    b = (torch.zeros(problem.cout, device="cuda", dtype=dtype)
-         if problem.bias else None)
+    b = torch.zeros(problem.cout, device="cuda", dtype=dtype) if problem.bias else None
     args = (problem.stride, 0, 0, 1, 1)
     assert is_supported_transposed(x, w, b, *args), problem.label
     assert is_supported_transposed_all(x, w, b, *args), problem.label
@@ -547,8 +609,9 @@ def test_corpus_channel_pairs_match_bitwise(problem: ConvProblem, direction: str
     expected = _reference(problem, ops, direction)
     dtype = reference.torch_dtype(problem)
     assert reference.is_exactly_representable(expected, dtype), problem.label
-    actual = {"fwd": _fwd, "bwd-data": _bwd_data,
-              "bwd-weight": _bwd_weight}[direction](problem, ops)
+    actual = {"fwd": _fwd, "bwd-data": _bwd_data, "bwd-weight": _bwd_weight}[direction](
+        problem, ops
+    )
     assert reference.compare(actual, expected.to(dtype)).bitwise, problem.label
 
 
@@ -576,8 +639,14 @@ def test_a_transposed_tap_permutation_is_detected():
     # The same convolution with the weight's three kernel axes permuted, which
     # is exactly what unpacking the fused index in the wrong order computes.
     permuted = _reference(
-        problem, {**ops, "weight": ops["weight"].permute(0, 1, 4, 3, 2)
-                  .contiguous(memory_format=torch.channels_last_3d)}, "fwd",
+        problem,
+        {
+            **ops,
+            "weight": ops["weight"]
+            .permute(0, 1, 4, 3, 2)
+            .contiguous(memory_format=torch.channels_last_3d),
+        },
+        "fwd",
     ).to(torch.bfloat16)
     assert permuted.shape == actual.shape
     assert not reference.compare(actual, permuted).bitwise, (
@@ -634,8 +703,15 @@ def test_backward_weight_operand_swap_is_not_reversible():
     expected = _reference(problem, ops, "bwd-weight").to(torch.bfloat16)
     assert reference.compare(actual, expected).bitwise
     with pytest.raises(NotImplementedError):
-        conv3d_backward_weight(ops["input"], problem.weight_shape,
-                               ops["grad_output"], problem.stride, 0, 1, 1)
+        conv3d_backward_weight(
+            ops["input"],
+            problem.weight_shape,
+            ops["grad_output"],
+            problem.stride,
+            0,
+            1,
+            1,
+        )
 
     # ``k=1``: same shapes, so nothing but the argument order decides.
     flat = _problem("swap1", 32, 32, (3, 4, 5), (1, 1, 1))
@@ -643,8 +719,9 @@ def test_backward_weight_operand_swap_is_not_reversible():
     got = _bwd_weight(flat, ops1)
     want = _reference(flat, ops1, "bwd-weight").to(torch.bfloat16)
     assert reference.compare(got, want).bitwise
-    swapped = conv3d_backward_weight(ops1["input"], flat.weight_shape,
-                                     ops1["grad_output"], flat.stride, 0, 1, 1)
+    swapped = conv3d_backward_weight(
+        ops1["input"], flat.weight_shape, ops1["grad_output"], flat.stride, 0, 1, 1
+    )
     assert swapped.shape == got.shape
     assert not reference.compare(got, swapped).bitwise, (
         "swapping the two activations gave the same gradient; the operand "
@@ -663,8 +740,10 @@ def test_backward_data_is_the_strided_convolution_it_claims_to_be():
     problem = _problem("bd", 64, 32, (3, 4, 5))
     ops = _ops(problem, seed=23, direction="bwd-data")
     from triton_conv3d.gather_gemm import conv3d_forward
-    direct = conv3d_forward(ops["grad_output"], ops["weight"], None,
-                            problem.stride, 0, 1, 1)
+
+    direct = conv3d_forward(
+        ops["grad_output"], ops["weight"], None, problem.stride, 0, 1, 1
+    )
     assert torch.equal(direct, _bwd_data(problem, ops))
 
 
@@ -689,8 +768,9 @@ def test_every_config_gives_the_same_answer(problem: ConvProblem):
     expected = _reference(problem, ops, "fwd")
     assert reference.is_exactly_representable(expected, dtype)
     m = problem.n * math.prod(problem.spatial)
-    cands = candidate_transposed_configs(m, problem.cin, problem.cout,
-                                         problem.tap_count, dtype)
+    cands = candidate_transposed_configs(
+        m, problem.cin, problem.cout, problem.tap_count, dtype
+    )
     by_tb: dict[int, TransposedConfig] = {}
     for cfg in cands:
         by_tb.setdefault(cfg.TAP_BLOCK, cfg)
@@ -722,8 +802,7 @@ def test_every_weight_layout_gives_the_same_answer():
     plain = cl.contiguous()
     assert not plain.is_contiguous(memory_format=torch.channels_last_3d)
     for w in (cl, plain, to_tkn(cl).permute(3, 4, 0, 1, 2)):
-        got = conv_transpose3d_forward(ops["input"], w, ops["bias"],
-                                       problem.stride)
+        got = conv_transpose3d_forward(ops["input"], w, ops["bias"], problem.stride)
         assert reference.compare(got, expected).bitwise, tuple(w.stride())
 
 
@@ -739,23 +818,33 @@ def test_out_buffer_is_written_in_place_and_is_validated():
     problem = _problem("outbuf", 32, 16, (3, 4, 5), bias=True)
     ops = _ops(problem, seed=37)
     expected = _reference(problem, ops, "fwd").to(torch.bfloat16)
-    y = torch.empty(problem.output_shape, device="cuda", dtype=torch.bfloat16,
-                    memory_format=torch.channels_last_3d)
+    y = torch.empty(
+        problem.output_shape,
+        device="cuda",
+        dtype=torch.bfloat16,
+        memory_format=torch.channels_last_3d,
+    )
     got = _fwd(problem, ops, out=y)
     assert got.data_ptr() == y.data_ptr()
     assert reference.compare(y, expected).bitwise
 
-    small = torch.empty((1, 16, 2, 2, 2), device="cuda", dtype=torch.bfloat16,
-                        memory_format=torch.channels_last_3d)
+    small = torch.empty(
+        (1, 16, 2, 2, 2),
+        device="cuda",
+        dtype=torch.bfloat16,
+        memory_format=torch.channels_last_3d,
+    )
     with pytest.raises(ValueError, match="shape"):
         _fwd(problem, ops, out=small)
-    ncdhw = torch.empty(problem.output_shape, device="cuda",
-                        dtype=torch.bfloat16)
+    ncdhw = torch.empty(problem.output_shape, device="cuda", dtype=torch.bfloat16)
     with pytest.raises(ValueError, match="channels_last_3d"):
         _fwd(problem, ops, out=ncdhw)
-    wrong_dtype = torch.empty(problem.output_shape, device="cuda",
-                              dtype=torch.float32,
-                              memory_format=torch.channels_last_3d)
+    wrong_dtype = torch.empty(
+        problem.output_shape,
+        device="cuda",
+        dtype=torch.float32,
+        memory_format=torch.channels_last_3d,
+    )
     with pytest.raises(ValueError, match="dtype"):
         _fwd(problem, ops, out=wrong_dtype)
 
@@ -777,9 +866,13 @@ def test_an_illegal_tap_block_is_refused_rather_than_run():
         _fwd(problem, ops, config=bad)
     # And an outright illegal MFMA config is refused by the inherited rules.
     with pytest.raises(ValueError, match="nonkdim"):
-        _fwd(problem, ops,
-             config=TransposedConfig(BLOCK_M=64, BLOCK_N=64, BLOCK_K=32,
-                                     matrix_instr_nonkdim=64))
+        _fwd(
+            problem,
+            ops,
+            config=TransposedConfig(
+                BLOCK_M=64, BLOCK_N=64, BLOCK_K=32, matrix_instr_nonkdim=64
+            ),
+        )
 
 
 @requires_gpu
@@ -795,8 +888,7 @@ def test_ncdhw_input_is_converted_rather_than_misread():
     expected = _reference(problem, ops, "fwd").to(torch.bfloat16)
     plain = ops["input"].contiguous()
     assert not plain.is_contiguous(memory_format=torch.channels_last_3d)
-    got = conv_transpose3d_forward(plain, ops["weight"], ops["bias"],
-                                   problem.stride)
+    got = conv_transpose3d_forward(plain, ops["weight"], ops["bias"], problem.stride)
     assert got.is_contiguous(memory_format=torch.channels_last_3d)
     assert reference.compare(got, expected).bitwise
 
@@ -808,8 +900,7 @@ def test_output_matches_torchs_shape_and_layout():
         problem = _problem("shape", 32, 16, (3, 4, 5), k, bias=True)
         ops = _ops(problem, seed=47)
         got = _fwd(problem, ops)
-        want = F.conv_transpose3d(ops["input"], ops["weight"], ops["bias"],
-                                  stride=k)
+        want = F.conv_transpose3d(ops["input"], ops["weight"], ops["bias"], stride=k)
         assert got.shape == want.shape, k
         assert got.is_contiguous(memory_format=torch.channels_last_3d)
         assert tuple(got.shape[2:]) == problem.out_spatial
@@ -825,17 +916,22 @@ def test_no_worse_than_miopen():
     ``roundings`` is 2 for MIOpen's backward-weight because that direction
     reduces with atomics and disagrees with itself bitwise between two calls.
     """
-    for problem in [_problem("mi", 64, 32, (4, 5, 6), bias=True),
-                    _problem("mi3", 32, 32, (3, 4, 5), (3, 3, 3))]:
+    for problem in [
+        _problem("mi", 64, 32, (4, 5, 6), bias=True),
+        _problem("mi3", 32, 32, (3, 4, 5), (3, 3, 3)),
+    ]:
         for direction in ("fwd", "bwd-data", "bwd-weight"):
             ops = reference.make_inputs(problem, seed=53)
             expected = _reference(problem, ops, direction)
             incumbent = reference.compare(
-                reference.incumbent(problem, ops, direction), expected)
-            actual = {"fwd": _fwd, "bwd-data": _bwd_data,
-                      "bwd-weight": _bwd_weight}[direction](problem, ops)
-            reference.assert_close(actual, expected, problem, direction,
-                                   incumbent_error=incumbent)
+                reference.incumbent(problem, ops, direction), expected
+            )
+            actual = {"fwd": _fwd, "bwd-data": _bwd_data, "bwd-weight": _bwd_weight}[
+                direction
+            ](problem, ops)
+            reference.assert_close(
+                actual, expected, problem, direction, incumbent_error=incumbent
+            )
 
 
 @requires_gpu
@@ -866,22 +962,24 @@ def test_grad_weight_buffer_has_the_transposed_shape():
     dimension.
     """
     from triton_conv3d.reduce_gemm import grad_weight_empty
-    gw = grad_transposed_weight_empty(128, 64, (2, 2, 2),
-                                      dtype=torch.bfloat16, device="cuda")
+
+    gw = grad_transposed_weight_empty(
+        128, 64, (2, 2, 2), dtype=torch.bfloat16, device="cuda"
+    )
     assert tuple(gw.shape) == (128, 64, 2, 2, 2)
     assert gw.is_contiguous(memory_format=torch.channels_last_3d)
 
     problem = _problem("gw", 32, 16, (3, 4, 5))
     ops = _ops(problem, seed=61, direction="bwd-weight")
-    out = grad_transposed_weight_empty(32, 16, (2, 2, 2),
-                                       dtype=torch.bfloat16, device="cuda")
+    out = grad_transposed_weight_empty(
+        32, 16, (2, 2, 2), dtype=torch.bfloat16, device="cuda"
+    )
     got = _bwd_weight(problem, ops, out=out)
     assert got.data_ptr() == out.data_ptr()
     expected = _reference(problem, ops, "bwd-weight").to(torch.bfloat16)
     assert reference.compare(got, expected).bitwise
 
-    wrong = grad_weight_empty(32, 16, (2, 2, 2), dtype=torch.bfloat16,
-                              device="cuda")
+    wrong = grad_weight_empty(32, 16, (2, 2, 2), dtype=torch.bfloat16, device="cuda")
     assert tuple(wrong.shape) == (32, 16, 2, 2, 2)
     other = _problem("gw2", 16, 32, (3, 4, 5))
     ops2 = _ops(other, seed=61, direction="bwd-weight")
@@ -897,15 +995,16 @@ def test_unsupported_calls_raise_rather_than_return_garbage():
     with pytest.raises(NotImplementedError):
         conv_transpose3d_forward(ops["input"], ops["weight"], None, 3)
     with pytest.raises(NotImplementedError):
-        conv_transpose3d_backward_data(ops["grad_output"], ops["weight"],
-                                       problem.input_shape, 3)
+        conv_transpose3d_backward_data(
+            ops["grad_output"], ops["weight"], problem.input_shape, 3
+        )
     with pytest.raises(NotImplementedError):
-        conv_transpose3d_backward_weight(ops["input"], problem.weight_shape,
-                                         ops["grad_output"], 3)
+        conv_transpose3d_backward_weight(
+            ops["input"], problem.weight_shape, ops["grad_output"], 3
+        )
     # And a padding, which is the one a caller is most likely to pass by habit.
     with pytest.raises(NotImplementedError):
-        conv_transpose3d_forward(ops["input"], ops["weight"], None,
-                                 problem.stride, 1)
+        conv_transpose3d_forward(ops["input"], ops["weight"], None, problem.stride, 1)
 
 
 @requires_gpu
@@ -939,9 +1038,11 @@ def test_bias_is_per_channel_and_not_per_column():
     """
     problem = _problem("bias", 64, 48, (3, 4, 5), bias=True)
     ops = _ops(problem, seed=73)
-    ops = {**ops, "weight": torch.zeros_like(ops["weight"]),
-           "bias": torch.arange(1, 49, device="cuda",
-                                dtype=torch.bfloat16)}
+    ops = {
+        **ops,
+        "weight": torch.zeros_like(ops["weight"]),
+        "bias": torch.arange(1, 49, device="cuda", dtype=torch.bfloat16),
+    }
     got = _fwd(problem, ops)
     want = ops["bias"].view(1, 48, 1, 1, 1).expand(got.shape)
     assert torch.equal(got, want.to(got.dtype))

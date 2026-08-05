@@ -10,5 +10,11 @@ from .harness import (
     time_callable,
 )
 
-__all__ = ["Measurement", "Ratio", "flush_caches", "interleaved", "ratio",
-           "time_callable"]
+__all__ = [
+    "Measurement",
+    "Ratio",
+    "flush_caches",
+    "interleaved",
+    "ratio",
+    "time_callable",
+]

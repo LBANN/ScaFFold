@@ -337,8 +337,9 @@ def test_a_sharded_dctensor_forward_goes_to_miopen_without_a_process_group(monke
     monkeypatch.setattr(
         FastConv3d,
         "_triton_forward",
-        lambda self, local, plan=None: fast_calls.append(local)
-        or original(self, local, plan),
+        lambda self, local, plan=None: (
+            fast_calls.append(local) or original(self, local, plan)
+        ),
     )
 
     def _local_halo(tensor, halo_size, strategy, dim_index, is_periodic=False):
@@ -463,8 +464,9 @@ def test_a_kernel_failure_after_the_halo_falls_back_without_exchanging_twice(
     plain_x = x.detach().clone().requires_grad_(True)
     nn.Conv3d.forward(conv, plain_x).backward(gy)
     assert local.grad is not None, "the fallback severed the graph at the halo"
-    torch.testing.assert_close(local.grad.float(), plain_x.grad.float(),
-                               rtol=2e-2, atol=2e-2)
+    torch.testing.assert_close(
+        local.grad.float(), plain_x.grad.float(), rtol=2e-2, atol=2e-2
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1123,8 +1125,9 @@ def _seeded_convT(cin=16, cout=8, kernel_size=2, stride=2, **kwargs):
     what the four decoder sites have and what puts ``grad_bias`` on the live
     path.
     """
-    conv = FastConvTranspose3d(cin, cout, kernel_size=kernel_size, stride=stride,
-                               **kwargs)
+    conv = FastConvTranspose3d(
+        cin, cout, kernel_size=kernel_size, stride=stride, **kwargs
+    )
     generator = torch.Generator().manual_seed(4321)
     with torch.no_grad():
         conv.weight.normal_(0.0, 0.1, generator=generator)
@@ -1142,7 +1145,10 @@ def _stock_like(conv, dtype=torch.bfloat16):
     """A stock ``nn.ConvTranspose3d`` holding the same parameters."""
     cin, cout = int(conv.weight.shape[0]), int(conv.weight.shape[1])
     plain = nn.ConvTranspose3d(
-        cin, cout, kernel_size=conv.kernel_size, stride=conv.stride,
+        cin,
+        cout,
+        kernel_size=conv.kernel_size,
+        stride=conv.stride,
         bias=conv.bias is not None,
     )
     plain = plain.cuda().to(dtype).to(memory_format=_CHANNELS_LAST)
@@ -1197,9 +1203,10 @@ def test_the_transposed_block_list_is_empty_at_every_decoder_site():
     """
     for x_shape, w_shape in _UPSAMPLER_SITES:
         assert conv_mod._transposed_policy_declines(x_shape, w_shape) is False
-        assert conv_mod._policy_declines(
-            x_shape, w_shape, (2, 2, 2), (0, 0, 0), (1, 1, 1)
-        ) is False
+        assert (
+            conv_mod._policy_declines(x_shape, w_shape, (2, 2, 2), (0, 0, 0), (1, 1, 1))
+            is False
+        )
 
 
 @pytest.mark.gpu
@@ -1229,26 +1236,28 @@ def test_the_transposed_gate_answers_for_the_four_sites_and_refuses_the_rest():
     )
     assert (
         conv_mod._use_triton_transposed(
-            _gpu_convT(16, 8, stride=3, output_padding=1), _gpu_input((1, 16, 8, 8, 8)),
-            None, None,
+            _gpu_convT(16, 8, stride=3, output_padding=1),
+            _gpu_input((1, 16, 8, 8, 8)),
+            None,
+            None,
         )
         is False
     )
     # groups > 1 has no coverage in any direction.
     assert (
-        conv_mod._use_triton_transposed(
-            _gpu_convT(16, 8, groups=2), x, None, None
-        )
+        conv_mod._use_triton_transposed(_gpu_convT(16, 8, groups=2), x, None, None)
         is False
     )
     # NCDHW would be a full-size hidden relayout, which is the cost the rung
     # exists to avoid.
-    assert (
-        conv_mod._use_triton_transposed(conv, x.contiguous(), None, None) is False
-    )
+    assert conv_mod._use_triton_transposed(conv, x.contiguous(), None, None) is False
     # And the CPU, where there is no kernel at all.
-    assert conv_mod._use_triton_transposed(_seeded_convT(), torch.randn(1, 16, 4, 4, 4),
-                                           None, None) is False
+    assert (
+        conv_mod._use_triton_transposed(
+            _seeded_convT(), torch.randn(1, 16, 4, 4, 4), None, None
+        )
+        is False
+    )
 
 
 @pytest.mark.gpu
@@ -1270,8 +1279,9 @@ def test_the_transposed_gate_asked_is_the_one_that_covers_the_backward(monkeypat
     # ``is_supported_transposed_all`` makes internally, so this distinguishes
     # "asked the combined gate" from "asked the forward's and got the same
     # answer" -- which is the only way to tell them apart while they agree.
-    monkeypatch.setattr(module, "is_supported_transposed_all", lambda *a, **kw: False,
-                        raising=False)
+    monkeypatch.setattr(
+        module, "is_supported_transposed_all", lambda *a, **kw: False, raising=False
+    )
     assert conv_mod._use_triton_transposed(conv, x, None, None) is False
 
 
@@ -1287,12 +1297,16 @@ def test_a_non_transposed_module_would_be_declined_by_the_transposed_gate():
     """
     conv = _gpu_convT(16, 16)
     conv.transposed = False
-    assert conv_mod._use_triton_transposed(conv, _gpu_input((1, 16, 8, 8, 8)), None,
-                                           None) is False
+    assert (
+        conv_mod._use_triton_transposed(conv, _gpu_input((1, 16, 8, 8, 8)), None, None)
+        is False
+    )
 
 
 @pytest.mark.gpu
-@pytest.mark.parametrize("cin, cout, spatial", [(16, 8, (8, 8, 8)), (32, 16, (4, 6, 6))])
+@pytest.mark.parametrize(
+    "cin, cout, spatial", [(16, 8, (8, 8, 8)), (32, 16, (4, 6, 6))]
+)
 def test_transposed_forward_and_gradients_match_nn_convtranspose3d(cin, cout, spatial):
     """All three directions against an fp64 reference, at MIOpen's own standard.
 
@@ -1345,7 +1359,9 @@ def test_transposed_forward_and_gradients_match_nn_convtranspose3d(cin, cout, sp
     incumbent_gb = (plain.bias.grad.to(torch.float64) - expected_gb).abs().max().item()
     actual_gb = (conv.bias.grad.to(torch.float64) - expected_gb).abs().max().item()
     assert conv.bias.grad.dtype is conv.bias.dtype
-    assert actual_gb <= max(4.0 * incumbent_gb, 2.0**-8 * expected_gb.abs().max().item())
+    assert actual_gb <= max(
+        4.0 * incumbent_gb, 2.0**-8 * expected_gb.abs().max().item()
+    )
 
 
 @pytest.mark.gpu
@@ -1440,19 +1456,21 @@ def test_transposed_backward_names_a_rung_flip_instead_of_dying_inside_distconv(
         pass
 
     class _Ctx:
-        saved_tensors = (_Wrapper(torch.randn(1, 8, 4, 4, 4)), torch.randn(8, 8, 2, 2, 2))
+        saved_tensors = (
+            _Wrapper(torch.randn(1, 8, 4, 4, 4)),
+            torch.randn(8, 8, 2, 2, 2),
+        )
         conv_args = ((2, 2, 2), (0, 0, 0), (0, 0, 0), (1, 1, 1), True)
         needs_input_grad = (True, True, True, False, False, False, False)
 
     with pytest.raises(RuntimeError, match="served by different"):
-        conv_mod._TritonConvTranspose3dFn.backward(
-            _Ctx(), torch.randn(1, 8, 8, 8, 8)
-        )
+        conv_mod._TritonConvTranspose3dFn.backward(_Ctx(), torch.randn(1, 8, 8, 8, 8))
 
 
 @pytest.mark.gpu
-@pytest.mark.parametrize("direction", ["conv_transpose3d_backward_data",
-                                       "conv_transpose3d_backward_weight"])
+@pytest.mark.parametrize(
+    "direction", ["conv_transpose3d_backward_data", "conv_transpose3d_backward_weight"]
+)
 def test_transposed_backward_falls_back_to_miopen_when_a_direction_fails(
     monkeypatch, direction
 ):
@@ -1479,7 +1497,9 @@ def test_transposed_backward_falls_back_to_miopen_when_a_direction_fails(
     module = conv_mod._get_triton_module()
     monkeypatch.setattr(conv_mod, "_triton_kernel_failures", lambda: (_Boom,))
     monkeypatch.setattr(
-        module, direction, lambda *a, **kw: (_ for _ in ()).throw(_Boom()),
+        module,
+        direction,
+        lambda *a, **kw: (_ for _ in ()).throw(_Boom()),
         raising=False,
     )
     monkeypatch.setattr(conv_mod, "_triton_failed", False)
@@ -1503,14 +1523,20 @@ def test_transposed_backward_falls_back_to_miopen_when_a_direction_fails(
         ("bwd-weight", conv.weight.grad, plain.weight.grad),
     ):
         expected = ref.reference(problem, operands, name)
-        ref.assert_close(actual, expected, problem, name,
-                         incumbent_error=ref.compare(incumbent, expected))
+        ref.assert_close(
+            actual,
+            expected,
+            problem,
+            name,
+            incumbent_error=ref.compare(incumbent, expected),
+        )
     # The bias gradient comes from the aten call on this path, not from the sum
     # above it, so it is the one this test would otherwise never look at.
     torch.testing.assert_close(
         conv.bias.grad.to(torch.float64),
         gy.to(torch.float64).sum(dim=(0, 2, 3, 4)),
-        rtol=2e-2, atol=2e-2,
+        rtol=2e-2,
+        atol=2e-2,
     )
 
 
@@ -1548,13 +1574,20 @@ def test_the_transposed_halo_plan_exchanges_nothing_and_refuses_what_it_cannot_r
     assert plan((2, 1, 1), shard_dim=(2, 2, 2)) is None
     assert plan((2, 1), shard_dim=(2, 3, 4)) is None
     assert plan((2, 1, 1), padding=(1, 1)) is None
-    assert conv_mod._transposed_halo_plan(None, _StubStrategy((2, 1, 1)), x, weight,
-                                          (0, 0, 0)) is None
+    assert (
+        conv_mod._transposed_halo_plan(
+            None, _StubStrategy((2, 1, 1)), x, weight, (0, 0, 0)
+        )
+        is None
+    )
     periodic = _dc(x, (2, 1, 1))
     periodic._is_periodic = (True, False, False)
-    assert conv_mod._transposed_halo_plan(
-        periodic, _StubStrategy((2, 1, 1)), x, weight, (0, 0, 0)
-    ) is None
+    assert (
+        conv_mod._transposed_halo_plan(
+            periodic, _StubStrategy((2, 1, 1)), x, weight, (0, 0, 0)
+        )
+        is None
+    )
 
 
 @pytest.mark.gpu
@@ -1612,7 +1645,13 @@ def test_the_transposed_rung_serves_a_dctensor_without_any_halo_exchange(num_sha
         ("bwd-weight", conv.weight.grad, plain.weight.grad),
     ):
         expected = ref.reference(problem, operands, name)
-        ref.assert_close(actual, expected, problem, name,
-                         incumbent_error=ref.compare(incumbent, expected))
-    torch.testing.assert_close(conv.bias.grad.float(), plain.bias.grad.float(),
-                               rtol=2e-2, atol=2e-2)
+        ref.assert_close(
+            actual,
+            expected,
+            problem,
+            name,
+            incumbent_error=ref.compare(incumbent, expected),
+        )
+    torch.testing.assert_close(
+        conv.bias.grad.float(), plain.bias.grad.float(), rtol=2e-2, atol=2e-2
+    )

@@ -33,9 +33,7 @@ from triton_conv3d.shapes import (
     scaffold_corpus,
 )
 
-requires_gpu = pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="needs a GPU"
-)
+requires_gpu = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
 
 #: ``include_large=True`` because the shape and cost model tests below are meta
 #: tensors and integer arithmetic -- a 4 GiB activation costs nothing here, and
@@ -101,8 +99,9 @@ def test_transposed_flops_have_no_phantom_tap_factor():
     the input volume by the tap count *and* keeping the tap factor would inflate
     the count eightfold, which is exactly the bug this pins.
     """
-    p = ConvProblem("t", 64, 32, (8, 8, 8), (2, 2, 2), (2, 2, 2), (0, 0, 0),
-                    transposed=True)
+    p = ConvProblem(
+        "t", 64, 32, (8, 8, 8), (2, 2, 2), (2, 2, 2), (0, 0, 0), transposed=True
+    )
     assert p.out_spatial == (16, 16, 16)
     macs = math.prod(p.out_spatial) * p.cin * p.cout
     assert p.flops("fwd") == 2 * macs
@@ -123,8 +122,11 @@ def test_the_int32_edge_cases_bracket_the_element_boundary():
     assert not below.index_exceeds_int32
     assert above.index_exceeds_int32
     # Same channel pair and kernel: the only thing that differs is the volume.
-    assert (below.cin, below.cout, below.kernel) == (above.cin, above.cout,
-                                                     above.kernel)
+    assert (below.cin, below.cout, below.kernel) == (
+        above.cin,
+        above.cout,
+        above.kernel,
+    )
     # And the boundary is where the largest index -- not the count -- crosses.
     assert below.max_elements - 1 <= INT32_MAX < above.max_elements - 1
 
@@ -145,23 +147,32 @@ def test_the_2gib_cliff_is_a_byte_problem_and_not_an_index_problem():
     used to be read as though it did.  What it exceeds is the *byte* limit on
     the whole storage, which is what decides buffer-op eligibility.
     """
-    cliff = next(p.halo_variant for p in scaffold_corpus()
-                 if p.halo_variant.label == "conv 128->64 k3x3x3 @ 130x258x258")
+    cliff = next(
+        p.halo_variant
+        for p in scaffold_corpus()
+        if p.halo_variant.label == "conv 128->64 k3x3x3 @ 130x258x258"
+    )
     assert not cliff.index_exceeds_int32
-    assert cliff.max_elements / 2**31 < 0.55        # half int32's range
+    assert cliff.max_elements / 2**31 < 0.55  # half int32's range
     assert not cliff.buffer_ops_eligible
     assert cliff.max_activation_bytes / BUFFER_OP_MAX_BYTES == pytest.approx(
-        1.032, abs=0.002                            # 3.2% past 2 GiB
+        1.032,
+        abs=0.002,  # 3.2% past 2 GiB
     )
 
     # It is the only corpus shape on either side of that line, in either shape
     # mode -- and *no* corpus shape needs a 64-bit element index.  A test or a
     # dispatch rule parametrized on the index predicate selects nothing.
-    over = [p.halo_variant.label for p in scaffold_corpus()
-            if not p.halo_variant.buffer_ops_eligible]
+    over = [
+        p.halo_variant.label
+        for p in scaffold_corpus()
+        if not p.halo_variant.buffer_ops_eligible
+    ]
     assert over == ["conv 128->64 k3x3x3 @ 130x258x258"]
-    assert not any(p.index_exceeds_int32 or p.halo_variant.index_exceeds_int32
-                   for p in scaffold_corpus())
+    assert not any(
+        p.index_exceeds_int32 or p.halo_variant.index_exceeds_int32
+        for p in scaffold_corpus()
+    )
 
 
 def test_corpus_covers_the_three_scaffold_configurations():
@@ -252,24 +263,33 @@ def test_the_production_variant_is_what_a_real_step_issues():
     from triton_conv3d.shapes import census_corpus, production_corpus
 
     def key(p):
-        return (p.transposed, p.cin, p.cout, tuple(p.kernel),
-                tuple(p.spatial), tuple(p.padding), tuple(p.stride), p.n)
+        return (
+            p.transposed,
+            p.cin,
+            p.cout,
+            tuple(p.kernel),
+            tuple(p.spatial),
+            tuple(p.padding),
+            tuple(p.stride),
+            p.n,
+        )
 
     census = {key(p) for p in census_corpus()}
     assert len(census) > 60, "the census is missing; nothing is being checked"
-    missing = [p for p in production_corpus()
-               if key(p) not in census and p.kernel != (1, 1, 1)]
+    missing = [
+        p for p in production_corpus() if key(p) not in census and p.kernel != (1, 1, 1)
+    ]
     assert not missing, (
         "the corpus's production form does not match what a real step issued: "
         + ", ".join(p.qualified_label for p in missing)
     )
     # And the census is in the form it claims: every k>1 convolution padded.
-    unpadded = [p for p in census_corpus()
-                if p.kernel == (3, 3, 3) and not any(p.padding)]
+    unpadded = [
+        p for p in census_corpus() if p.kernel == (3, 3, 3) and not any(p.padding)
+    ]
     assert not unpadded, (
         "a k=3 production convolution arrived unpadded, which would mean the "
-        "adapter's halo plan changed: "
-        + ", ".join(p.qualified_label for p in unpadded)
+        "adapter's halo plan changed: " + ", ".join(p.qualified_label for p in unpadded)
     )
 
 
@@ -284,8 +304,11 @@ def test_the_three_forms_are_told_apart_by_the_qualified_label():
     sharded = [p for p in scaffold_corpus() if any(p.shard_halo)]
     assert sharded, "corpus has no sharded problems; shard_halo_dhw was lost"
     for p in sharded:
-        forms = {p.qualified_label, p.production_variant.qualified_label,
-                 p.halo_variant.qualified_label}
+        forms = {
+            p.qualified_label,
+            p.production_variant.qualified_label,
+            p.halo_variant.qualified_label,
+        }
         assert len(forms) == 3, f"{p.label}: forms collide -> {forms}"
         # The adapter halos D and leaves H and W padded; DistConv does neither.
         assert p.production_variant.padding == (0, *p.padding[1:])
@@ -342,8 +365,12 @@ def test_stored_efficiency_agrees_with_the_cost_model():
                 f"stored {m['pct_roofline']}%, cost model {got:.3f}%"
             )
     # And no forward cell exceeds the roof, which is what the artifact implied.
-    fwd = [m["pct_roofline"] for p in scaffold_corpus() for m in p.measured
-           if m["direction"] == "fwd"]
+    fwd = [
+        m["pct_roofline"]
+        for p in scaffold_corpus()
+        for m in p.measured
+        if m["direction"] == "fwd"
+    ]
     assert fwd and max(fwd) < 100
 
 
@@ -389,8 +416,13 @@ def test_reference_agrees_with_miopen_within_tolerance(problem: ConvProblem):
         # test passed.  Only this direction and only the incumbent get it: our
         # own backward-weight reduces its split-K partials in fp32 and stores
         # once, so it is held to ``roundings=1`` like everything else.
-        reference.assert_close(actual, expected, problem, direction,
-                               roundings=2 if direction == "bwd-weight" else 1)
+        reference.assert_close(
+            actual,
+            expected,
+            problem,
+            direction,
+            roundings=2 if direction == "bwd-weight" else 1,
+        )
 
 
 @requires_gpu
@@ -417,7 +449,9 @@ def test_error_bound_grows_with_reduction_length_and_shrinks_with_precision():
     expected = torch.randn(4096, dtype=torch.float64)
     short = ConvProblem("short", 8, 8, (8, 8, 8))
     long_ = ConvProblem("long", 1024, 1024, (8, 8, 8))
-    assert reference.error_bound(long_, expected) > reference.error_bound(short, expected)
+    assert reference.error_bound(long_, expected) > reference.error_bound(
+        short, expected
+    )
     fp32 = ConvProblem("fp32", 64, 64, (8, 8, 8), dtype="fp32")
     bf16 = ConvProblem("bf16", 64, 64, (8, 8, 8), dtype="bf16")
     assert reference.error_bound(fp32, expected) < reference.error_bound(bf16, expected)
@@ -434,7 +468,9 @@ def test_error_bound_tracks_peak_not_just_rms():
     flat = torch.ones(4096, dtype=torch.float64)
     spiky = flat.clone()
     spiky[0] = 100.0
-    assert reference.error_bound(problem, spiky) > 10 * reference.error_bound(problem, flat)
+    assert reference.error_bound(problem, spiky) > 10 * reference.error_bound(
+        problem, flat
+    )
 
 
 def test_the_store_term_is_charged_as_one_rounding_not_four():
@@ -452,13 +488,14 @@ def test_the_store_term_is_charged_as_one_rounding_not_four():
     formula rather than on a GPU: at ``K`` short enough that the accumulation
     term is negligible, the bound must be one ulp of the peak per rounding.
     """
-    problem = ConvProblem("p", 8, 8, (4, 4, 4))          # K = 216
+    problem = ConvProblem("p", 8, 8, (4, 4, 4))  # K = 216
     peak = torch.zeros(4096, dtype=torch.float64)
     peak[0] = 64.0
     ulp = 2.0 * reference.unit_roundoff(torch.bfloat16) * 64.0
     assert reference.error_bound(problem, peak) == pytest.approx(ulp, rel=1e-3)
     assert reference.error_bound(problem, peak, roundings=2) == pytest.approx(
-        2 * ulp, rel=1e-3)
+        2 * ulp, rel=1e-3
+    )
 
 
 @requires_gpu
@@ -543,8 +580,9 @@ def test_the_incumbent_clause_binds_more_often_than_the_static_bound():
         ops = reference.make_inputs(problem, seed=7)
         expected = reference.reference(problem, ops, "fwd")
         err = reference.compare(reference.incumbent(problem, ops, "fwd"), expected)
-        binds.append(4.0 * err.max_abs
-                     > reference.error_bound(problem, expected, "fwd"))
+        binds.append(
+            4.0 * err.max_abs > reference.error_bound(problem, expected, "fwd")
+        )
     assert sum(binds) > len(binds) // 2, (
         f"the incumbent clause bound only {sum(binds)}/{len(binds)} cells; the "
         "static bound has drifted back to swallowing it"
@@ -592,6 +630,7 @@ def test_interleaved_rotates_variants_and_reports_spread():
         def fn():
             order.append(name)
             return a @ a
+
         return fn
 
     result = interleaved({k: make(k) for k in seen}, warmup=1, iters=1, rounds=3)
@@ -606,8 +645,9 @@ def test_interleaved_rotates_variants_and_reports_spread():
     # exactly the calls it says: 1 warmup and 3 rounds of 1 iteration each, per
     # variant, with no calibration probe smuggled in.
     assert len(order) == 3 * (1 + 3 * 1)
-    assert all(m.iters == 1 and m.group == 1 and m.stop == "fixed"
-               for m in result.values())
+    assert all(
+        m.iters == 1 and m.group == 1 and m.stop == "fixed" for m in result.values()
+    )
 
 
 def test_the_round_order_is_position_and_adjacency_balanced():
@@ -652,7 +692,7 @@ def test_the_round_order_is_position_and_adjacency_balanced():
                 f"n={n}: adjacency is not balanced: {adjacency}"
             )
             assert len(adjacency) == n * (n - 1), (
-                f"n={n}: only {len(adjacency)} of {n*(n-1)} ordered pairs occur"
+                f"n={n}: only {len(adjacency)} of {n * (n - 1)} ordered pairs occur"
             )
 
 
@@ -675,6 +715,7 @@ def test_spread_is_a_range_statistic_and_the_interval_is_not():
     from triton_conv3d.bench.harness import Measurement
 
     rng = random.Random(20260803)
+
     def draw(n):
         return tuple(1.0 + 0.01 * rng.gauss(0, 1) for _ in range(n))
 
@@ -760,8 +801,9 @@ def test_a_slow_kernel_stops_on_the_budget_and_says_so():
     from triton_conv3d.bench.harness import time_callable
 
     t0 = time.perf_counter()
-    m = time_callable(lambda: torch.cuda._sleep(1_000_000_000),
-                      budget_s=1.0, target_rel=1e-9)
+    m = time_callable(
+        lambda: torch.cuda._sleep(1_000_000_000), budget_s=1.0, target_rel=1e-9
+    )
     elapsed = time.perf_counter() - t0
     assert m.stop == "budget", f"stopped for the wrong reason: {m.stop}"
     assert not m.converged
@@ -786,7 +828,6 @@ def test_the_instrument_tax_is_measured_and_grouped_away():
     second is the control: if grouping ever stops working, the two agree and
     this fails, rather than both drifting together unnoticed.
     """
-    import statistics
     import time
 
     from triton_conv3d.bench.harness import time_callable
@@ -855,15 +896,14 @@ def test_flush_caches_reuses_one_buffer_and_reaches_only_the_first_sample():
     for _ in range(5):
         H.flush_caches()
     assert H._flush_buffer.data_ptr() == first, (
-        "flush_caches reallocated its buffer; the device comparison is wrong "
-        "again"
+        "flush_caches reallocated its buffer; the device comparison is wrong again"
     )
     assert H._flush_buffer.numel() == H._FLUSH_BYTES
 
     a = torch.randn(1024, 1024, device="cuda", dtype=torch.bfloat16)
     cold = H.time_callable(lambda: a @ a, flush=True, rounds=4)
     assert cold.iters == 1, (
-        f"flush=True measured {cold.iters} calls per block, so {cold.iters-1} "
+        f"flush=True measured {cold.iters} calls per block, so {cold.iters - 1} "
         "of them are hot and the median reports a hot number"
     )
     assert cold.cold == cold.median  # with one sample per block they coincide
@@ -1021,8 +1061,10 @@ def test_sporadic_host_stall_is_rejected_from_the_median_and_flagged():
     # cannot decide -- failing here would re-enact the original misdiagnosis in
     # test form, blaming the measurement for observing real contention.
     clean = min(
-        (interleaved({"g": lambda: a @ a}, warmup=3, iters=20, rounds=3)["g"]
-         for _ in range(5)),
+        (
+            interleaved({"g": lambda: a @ a}, warmup=3, iters=20, rounds=3)["g"]
+            for _ in range(5)
+        ),
         key=lambda m: m.stall_ratio,
     )
     if clean.stall_ratio >= 2.0:
@@ -1052,7 +1094,9 @@ def test_sporadic_host_stall_is_rejected_from_the_median_and_flagged():
     # The converse -- that a quiet run is *not* flagged -- is established by the
     # skip above rather than here, because on a loaded node it is not true and
     # should not be asserted.
-    assert clean.stall_ratio < 2.0, f"clean run falsely flagged: {clean.stall_ratio:.2f}"
+    assert clean.stall_ratio < 2.0, (
+        f"clean run falsely flagged: {clean.stall_ratio:.2f}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1431,9 +1475,18 @@ def test_the_transposed_problems_are_never_haloed_and_the_others_follow_the_form
     # problem happens to record a zero halo, so a form that called
     # ``halo_variant`` would be indistinguishable from the right one until the
     # day one of them did not.  Pin the rule instead.
-    haloed = ConvProblem("would_halo", 32, 16, (4, 4, 4), (2, 2, 2), (2, 2, 2),
-                         (0, 0, 0), transposed=True, halo=(1, 1, 1),
-                         shard_halo=(1, 1, 1))
+    haloed = ConvProblem(
+        "would_halo",
+        32,
+        16,
+        (4, 4, 4),
+        (2, 2, 2),
+        (2, 2, 2),
+        (0, 0, 0),
+        transposed=True,
+        halo=(1, 1, 1),
+        shard_halo=(1, 1, 1),
+    )
     for name in _FORMS:
         assert convt.form(haloed, name) is haloed, (
             f"--form {name} gave a transposed problem a halo; at k=2 there is "
@@ -1475,27 +1528,33 @@ def test_the_shipped_config_is_the_one_the_entry_point_resolves():
     than by re-deriving the answer here -- which would be the same arithmetic
     twice and would agree with itself while both were wrong.
     """
-    from triton_conv3d.bench.conv_bench import _OPERATORS, _build
     from triton_conv3d import bwd_data, gather_gemm, reduce_gemm, transposed
+    from triton_conv3d.bench.conv_bench import _OPERATORS, _build
 
     problems = {
         "conv": ConvProblem("t", 32, 16, (8, 8, 8)),
-        "convT": ConvProblem("tt", 32, 16, (4, 4, 4), (2, 2, 2), (2, 2, 2),
-                             (0, 0, 0), transposed=True),
+        "convT": ConvProblem(
+            "tt", 32, 16, (4, 4, 4), (2, 2, 2), (2, 2, 2), (0, 0, 0), transposed=True
+        ),
     }
     spied = []
 
     def spy(mod, name):
         real = getattr(mod, name)
+
         def wrapper(*a, **kw):
             cfg = real(*a, **kw)
             spied.append(cfg)
             return cfg
+
         return real, wrapper
 
-    patched = [(gather_gemm, "select_config"), (bwd_data, "select_config"),
-               (reduce_gemm, "bwd_weight_config"),
-               (transposed, "transposed_config")]
+    patched = [
+        (gather_gemm, "select_config"),
+        (bwd_data, "select_config"),
+        (reduce_gemm, "bwd_weight_config"),
+        (transposed, "transposed_config"),
+    ]
     originals = {}
     for mod, name in patched:
         real, wrapper = spy(mod, name)
@@ -1537,8 +1596,9 @@ def test_the_published_time_is_per_call_and_never_exceeds_the_eager_call():
     """
     from triton_conv3d.bench.conv_bench import measure_problem
 
-    p = ConvProblem("tt", 64, 32, (4, 4, 4), (2, 2, 2), (2, 2, 2), (0, 0, 0),
-                    transposed=True)
+    p = ConvProblem(
+        "tt", 64, 32, (4, 4, 4), (2, 2, 2), (2, 2, 2), (0, 0, 0), transposed=True
+    )
     row = measure_problem(p, direction="fwd", shipped=True, budget_s=5.0)
     assert "error" not in row, row.get("error")
     assert row["timed_region"] == "kernel", row["timed_region_note"]
@@ -1573,8 +1633,9 @@ def test_a_control_free_row_omits_the_control_rather_than_zeroing_it():
     """
     from triton_conv3d.bench.conv_bench import _build, measure_problem
 
-    p = ConvProblem("tt", 64, 32, (4, 4, 4), (2, 2, 2), (2, 2, 2), (0, 0, 0),
-                    transposed=True)
+    p = ConvProblem(
+        "tt", 64, 32, (4, 4, 4), (2, 2, 2), (2, 2, 2), (0, 0, 0), transposed=True
+    )
 
     for direction in DIRECTIONS:
         case = _build(p, direction, control=False)
@@ -1583,8 +1644,9 @@ def test_a_control_free_row_omits_the_control_rather_than_zeroing_it():
         del case
         torch.cuda.empty_cache()
 
-    row = measure_problem(p, direction="bwd-weight", shipped=True,
-                          budget_s=5.0, control="none")
+    row = measure_problem(
+        p, direction="bwd-weight", shipped=True, budget_s=5.0, control="none"
+    )
     assert "error" not in row, row.get("error")
     assert row["control"] == "none"
     # The Triton half is unchanged: same region, same interval, same stop rule.
@@ -1597,8 +1659,15 @@ def test_a_control_free_row_omits_the_control_rather_than_zeroing_it():
     assert math.isfinite(row["triton_rel_ci"]) and row["triton_rel_ci"] >= 0.0
     assert row["measure_stop"] in ("converged", "budget", "max_rounds")
     # The MIOpen half is gone, not zeroed.
-    for key in ("miopen_ms", "miopen_rel_ci", "miopen_eager_ms", "speedup",
-                "speedup_lo", "speedup_hi", "speedup_significant"):
+    for key in (
+        "miopen_ms",
+        "miopen_rel_ci",
+        "miopen_eager_ms",
+        "speedup",
+        "speedup_lo",
+        "speedup_hi",
+        "speedup_significant",
+    ):
         assert key not in row, (
             f"{key} is present in a --control none row; an absent measurement "
             "must stay absent, because a zero here reads as a result"

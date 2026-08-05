@@ -114,30 +114,63 @@ __all__ = [
 
 @triton.jit
 def _conv3d_fwd_kernel(
-    X, W, Y, BIAS,
+    X,
+    W,
+    Y,
+    BIAS,
     # Sizes.  ``M_TOTAL`` is ``BATCH * OUT_D * OUT_H * OUT_W``.
-    BATCH, IN_D, IN_H, IN_W,
-    OUT_D, OUT_H, OUT_W,
-    CIN, COUT, M_TOTAL,
+    BATCH,
+    IN_D,
+    IN_H,
+    IN_W,
+    OUT_D,
+    OUT_H,
+    OUT_W,
+    CIN,
+    COUT,
+    M_TOTAL,
     # Element strides.  The channel stride of X and Y is 1 by construction --
     # that is what NDHWC means -- so it is not passed and not multiplied by.
-    stride_xn, stride_xd, stride_xh, stride_xw,
+    stride_xn,
+    stride_xd,
+    stride_xh,
+    stride_xw,
     # The weight, described by three strides over the *effective* GEMM's axes:
     # the fused tap index, the reduction axis K (Cin), and the output axis N
     # (Cout).  Which of the two channel strides is 1 is a constexpr (``W_ORDER``)
     # rather than a runtime fact, because it decides how the tile is loaded.
-    stride_wt, stride_wk, stride_wn,
-    stride_yn, stride_yd, stride_yh, stride_yw,
-    KD: tl.constexpr, KH: tl.constexpr, KW: tl.constexpr,
-    SD: tl.constexpr, SH: tl.constexpr, SW: tl.constexpr,
-    PD: tl.constexpr, PH: tl.constexpr, PW: tl.constexpr,
-    DD: tl.constexpr, DH: tl.constexpr, DW: tl.constexpr,
-    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
-    BLOCK_K_COUNT: tl.constexpr, GROUP_M: tl.constexpr,
-    HAS_BIAS: tl.constexpr, EVEN_K: tl.constexpr, EVEN_N: tl.constexpr,
-    PADDED: tl.constexpr, INDEX_DTYPE: tl.constexpr,
+    stride_wt,
+    stride_wk,
+    stride_wn,
+    stride_yn,
+    stride_yd,
+    stride_yh,
+    stride_yw,
+    KD: tl.constexpr,
+    KH: tl.constexpr,
+    KW: tl.constexpr,
+    SD: tl.constexpr,
+    SH: tl.constexpr,
+    SW: tl.constexpr,
+    PD: tl.constexpr,
+    PH: tl.constexpr,
+    PW: tl.constexpr,
+    DD: tl.constexpr,
+    DH: tl.constexpr,
+    DW: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    BLOCK_K_COUNT: tl.constexpr,
+    GROUP_M: tl.constexpr,
+    HAS_BIAS: tl.constexpr,
+    EVEN_K: tl.constexpr,
+    EVEN_N: tl.constexpr,
+    PADDED: tl.constexpr,
+    INDEX_DTYPE: tl.constexpr,
     INPUT_PRECISION: tl.constexpr,
-    W_ORDER: tl.constexpr, W_FLIP: tl.constexpr,
+    W_ORDER: tl.constexpr,
+    W_FLIP: tl.constexpr,
 ):
     # -- which output tile this program owns ------------------------------
     #
@@ -208,9 +241,12 @@ def _conv3d_fwd_kernel(
             in_w = src_w + j * DW
             row_ok = (
                 m_valid
-                & (in_d >= 0) & (in_d < IN_D)
-                & (in_h >= 0) & (in_h < IN_H)
-                & (in_w >= 0) & (in_w < IN_W)
+                & (in_d >= 0)
+                & (in_d < IN_D)
+                & (in_h >= 0)
+                & (in_h < IN_H)
+                & (in_w >= 0)
+                & (in_w < IN_W)
             )
         else:
             # Unpadded: every tap of an in-range output voxel is in range, so
@@ -272,9 +308,7 @@ def _conv3d_fwd_kernel(
         # over the buffer-op limit and has lost it anyway (see
         # :data:`~triton_conv3d.shapes.BUFFER_OP_MAX_BYTES`).
         dij_w = (KD * KH * KW - 1 - dij) if W_FLIP else dij
-        w_row = (
-            dij_w.to(INDEX_DTYPE) * stride_wt + offs_k.to(INDEX_DTYPE) * stride_wk
-        )
+        w_row = dij_w.to(INDEX_DTYPE) * stride_wt + offs_k.to(INDEX_DTYPE) * stride_wk
         if W_ORDER == 0:
             w_ptrs = W + w_row[:, None] + offs_n[None, :]
         else:
@@ -449,8 +483,9 @@ def _fit_to_lds(cfg: ConvConfig, dtype: torch.dtype) -> ConvConfig:
     while cfg.lds_bytes(dtype) > _LDS_BYTES:
         half_k, half_m, half_n = cfg.BLOCK_K // 2, cfg.BLOCK_M // 2, cfg.BLOCK_N // 2
         if half_k >= kdim and half_k % kdim == 0:
-            cfg = dataclasses.replace(cfg, BLOCK_K=half_k,
-                                      kpack=1 if half_k <= 16 else cfg.kpack)
+            cfg = dataclasses.replace(
+                cfg, BLOCK_K=half_k, kpack=1 if half_k <= 16 else cfg.kpack
+            )
         elif half_m >= nk and half_m % nk == 0:
             cfg = dataclasses.replace(cfg, BLOCK_M=half_m)
         elif half_n >= nk and half_n % nk == 0:
@@ -500,12 +535,17 @@ def default_config(
     return _fit_to_lds(
         _fit_to_grid(
             ConvConfig(
-                BLOCK_M=block_m, BLOCK_N=block_n, BLOCK_K=block_k, GROUP_M=6,
+                BLOCK_M=block_m,
+                BLOCK_N=block_n,
+                BLOCK_K=block_k,
+                GROUP_M=6,
                 num_warps=8 if block_k >= 128 or block_n >= 256 else 4,
-                num_stages=2, matrix_instr_nonkdim=nonkdim,
+                num_stages=2,
+                matrix_instr_nonkdim=nonkdim,
                 kpack=1 if block_k <= 16 else 2,
             ),
-            m, cout,
+            m,
+            cout,
         ),
         dtype,
     )
@@ -598,8 +638,13 @@ _NARROW_N_TILES: tuple[tuple[int, int, int, int], ...] = (
 
 
 def candidate_configs(
-    m: int, cin: int, cout: int, dtype: torch.dtype = torch.bfloat16,
-    *, group_ms: Sequence[int] = (6,), nonkdims: Sequence[int] = (16, 32),
+    m: int,
+    cin: int,
+    cout: int,
+    dtype: torch.dtype = torch.bfloat16,
+    *,
+    group_ms: Sequence[int] = (6,),
+    nonkdims: Sequence[int] = (16, 32),
 ) -> list[ConvConfig]:
     """Configs worth timing for one shape, already pruned to legal ones.
 
@@ -630,8 +675,12 @@ def candidate_configs(
             for nonkdim in nonkdims:
                 for group_m in group_ms:
                     cfg = ConvConfig(
-                        BLOCK_M=bm, BLOCK_N=bn, BLOCK_K=bk, GROUP_M=group_m,
-                        num_warps=warps, num_stages=2,
+                        BLOCK_M=bm,
+                        BLOCK_N=bn,
+                        BLOCK_K=bk,
+                        GROUP_M=group_m,
+                        num_warps=warps,
+                        num_stages=2,
                         matrix_instr_nonkdim=nonkdim,
                         kpack=1 if bk <= 16 else 2,
                     )
@@ -639,9 +688,11 @@ def candidate_configs(
                     # fold two seed tiles onto one entry and silently
                     # double-count it in the sweep.  Only configs that could not
                     # have run at all are removed, so no measured winner is lost.
-                    if (cfg.validate(dtype) is not None
-                            or cfg.lds_bytes(dtype) > _LDS_BYTES
-                            or cfg in seen):
+                    if (
+                        cfg.validate(dtype) is not None
+                        or cfg.lds_bytes(dtype) > _LDS_BYTES
+                        or cfg in seen
+                    ):
                         continue
                     seen.add(cfg)
                     out.append(cfg)
@@ -650,13 +701,13 @@ def candidate_configs(
     return out
 
 
-def tune_key(dtype: torch.dtype, cin: int, cout: int,
-             kernel: tuple[int, ...]) -> tuple:
+def tune_key(dtype: torch.dtype, cin: int, cout: int, kernel: tuple[int, ...]) -> tuple:
     return (str(dtype), cin, cout, tuple(kernel))
 
 
-def _tuned(bm: int, bn: int, bk: int, warps: int, group_m: int = 6,
-           nk: int = 16) -> ConvConfig:
+def _tuned(
+    bm: int, bn: int, bk: int, warps: int, group_m: int = 6, nk: int = 16
+) -> ConvConfig:
     """One measured row.
 
     ``nk`` defaults to 16 because that is what the forward measured -- 16 won
@@ -669,9 +720,16 @@ def _tuned(bm: int, bn: int, bk: int, warps: int, group_m: int = 6,
     :func:`~triton_conv3d.reduce_gemm._tuned` spells it, and for the same
     reason: a per-row knob whose default carries the rule.
     """
-    return ConvConfig(BLOCK_M=bm, BLOCK_N=bn, BLOCK_K=bk, GROUP_M=group_m,
-                      num_warps=warps, num_stages=2, matrix_instr_nonkdim=nk,
-                      kpack=1 if bk <= 16 else 2)
+    return ConvConfig(
+        BLOCK_M=bm,
+        BLOCK_N=bn,
+        BLOCK_K=bk,
+        GROUP_M=group_m,
+        num_warps=warps,
+        num_stages=2,
+        matrix_instr_nonkdim=nk,
+        kpack=1 if bk <= 16 else 2,
+    )
 
 
 #: Measured winners, keyed by ``(dtype, Cin, Cout, kernel)``; a miss falls back to
@@ -828,8 +886,14 @@ def register_tuned(dtype, cin, cout, kernel, config: ConvConfig) -> None:
 
 
 def select_config(
-    m: int, cin: int, cout: int, kernel: Sequence[int], dtype: torch.dtype,
-    *, table: dict | None = None, key: tuple | None = None,
+    m: int,
+    cin: int,
+    cout: int,
+    kernel: Sequence[int],
+    dtype: torch.dtype,
+    *,
+    table: dict | None = None,
+    key: tuple | None = None,
 ) -> ConvConfig:
     """The config the kernel will run: tuned entry if there is one, else heuristic.
 
@@ -927,9 +991,11 @@ def _weight_plan(w: torch.Tensor) -> tuple[int, int, int, int] | None:
         st = s[2]
     else:
         st = 0  # one tap: ``dij`` is always 0, so any stride is the right one
-    if ((kw > 1 and s[4] != st)
-            or (kh > 1 and s[3] != st * kw)
-            or (kd > 1 and s[2] != st * kw * kh)):
+    if (
+        (kw > 1 and s[4] != st)
+        or (kh > 1 and s[3] != st * kw)
+        or (kd > 1 and s[2] != st * kw * kh)
+    ):
         return None
     if cout == 1 or s[0] == 1:
         return (_W_N_CONTIG, st, s[1], 1)
@@ -996,9 +1062,14 @@ def is_supported(
         # memory there becomes the bias, ``nan`` if you are lucky -- and a
         # stride-2 view of the right length silently applies every other value.
         # ``torch.conv3d`` rejects both; so does this.
-        if (bias.dim() != 1 or int(bias.shape[0]) != int(w.shape[0])
-                or bias.dtype != x.dtype or not bias.is_cuda
-                or bias.device != x.device or bias.stride(0) != 1):
+        if (
+            bias.dim() != 1
+            or int(bias.shape[0]) != int(w.shape[0])
+            or bias.dtype != x.dtype
+            or not bias.is_cuda
+            or bias.device != x.device
+            or bias.stride(0) != 1
+        ):
             return False
     if x.shape[1] != w.shape[1]:
         return False
@@ -1110,9 +1181,7 @@ def is_supported_all(
     )
 
 
-def _check_out(
-    y: torch.Tensor, shape: tuple[int, ...], like: torch.Tensor
-) -> None:
+def _check_out(y: torch.Tensor, shape: tuple[int, ...], like: torch.Tensor) -> None:
     """Reject an ``out=`` the kernel would write outside of, or write wrongly.
 
     Nothing downstream catches either failure.  The grid is sized from the
@@ -1256,7 +1325,9 @@ def conv3d_forward(
         # and then copies the whole thing: 2.82 ms against 0.012 ms on a 256 MiB
         # output, 235x, on a path a training step takes about 19 times.
         y = torch.empty(
-            y_shape, device=x.device, dtype=x.dtype,
+            y_shape,
+            device=x.device,
+            dtype=x.dtype,
             memory_format=torch.channels_last_3d,
         )
     else:
@@ -1286,30 +1357,58 @@ def conv3d_forward(
     index_dtype = _index_dtype(x, y, wr)
 
     block_k_count = triton.cdiv(cin, config.BLOCK_K)
-    grid = (
-        triton.cdiv(m_total, config.BLOCK_M) * triton.cdiv(cout, config.BLOCK_N),
-    )
+    grid = (triton.cdiv(m_total, config.BLOCK_M) * triton.cdiv(cout, config.BLOCK_N),)
     _conv3d_fwd_kernel[grid](
-        x, wr, y, bias,
-        n, in_d, in_h, in_w,
-        out_d, out_h, out_w,
-        cin, cout, m_total,
-        x.stride(0), x.stride(2), x.stride(3), x.stride(4),
-        plan[1], plan[2], plan[3],
-        y.stride(0), y.stride(2), y.stride(3), y.stride(4),
-        KD=kd, KH=kh, KW=kw,
-        SD=sd, SH=sh, SW=sw,
-        PD=pd, PH=ph, PW=pw,
-        DD=dd, DH=dh, DW=dw,
-        BLOCK_M=config.BLOCK_M, BLOCK_N=config.BLOCK_N, BLOCK_K=config.BLOCK_K,
-        BLOCK_K_COUNT=block_k_count, GROUP_M=config.GROUP_M,
+        x,
+        wr,
+        y,
+        bias,
+        n,
+        in_d,
+        in_h,
+        in_w,
+        out_d,
+        out_h,
+        out_w,
+        cin,
+        cout,
+        m_total,
+        x.stride(0),
+        x.stride(2),
+        x.stride(3),
+        x.stride(4),
+        plan[1],
+        plan[2],
+        plan[3],
+        y.stride(0),
+        y.stride(2),
+        y.stride(3),
+        y.stride(4),
+        KD=kd,
+        KH=kh,
+        KW=kw,
+        SD=sd,
+        SH=sh,
+        SW=sw,
+        PD=pd,
+        PH=ph,
+        PW=pw,
+        DD=dd,
+        DH=dh,
+        DW=dw,
+        BLOCK_M=config.BLOCK_M,
+        BLOCK_N=config.BLOCK_N,
+        BLOCK_K=config.BLOCK_K,
+        BLOCK_K_COUNT=block_k_count,
+        GROUP_M=config.GROUP_M,
         HAS_BIAS=bias is not None,
         EVEN_K=(cin % config.BLOCK_K == 0),
         EVEN_N=(cout % config.BLOCK_N == 0),
         PADDED=(pd > 0 or ph > 0 or pw > 0),
         INDEX_DTYPE=index_dtype,
         INPUT_PRECISION="ieee",
-        W_ORDER=plan[0], W_FLIP=bool(weight_flip),
+        W_ORDER=plan[0],
+        W_FLIP=bool(weight_flip),
         **config.launch_kwargs(),
     )
     return y
@@ -1379,7 +1478,11 @@ def verify_isa(
             gy.shape, cin, k, torch.bfloat16, padding=padding
         )
         y = conv3d_backward_data(
-            gy, w, (n, cin, d, h, wd), padding=padding, config=cfg,
+            gy,
+            w,
+            (n, cin, d, h, wd),
+            padding=padding,
+            config=cfg,
             weight_rsck=rsck,
         )
         big = gy

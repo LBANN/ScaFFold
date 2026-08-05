@@ -282,10 +282,8 @@ class ConvProblem:
         return dataclasses.replace(
             self,
             name=f"{self.name}+shard" if self.name else "shard",
-            spatial=tuple(s + 2 * h
-                          for s, h in zip(self.spatial, self.shard_halo)),
-            padding=tuple(0 if h else p
-                          for h, p in zip(self.shard_halo, self.padding)),
+            spatial=tuple(s + 2 * h for s, h in zip(self.spatial, self.shard_halo)),
+            padding=tuple(0 if h else p for h, p in zip(self.shard_halo, self.padding)),
             halo=(0, 0, 0),
             shard_halo=(0, 0, 0),
             form="adapter",
@@ -636,8 +634,16 @@ def edge_cases(include_large: bool = False) -> tuple[ConvProblem, ...]:
         ConvProblem("cin_tiny", 3, 64, (16, 16, 16), sites=("synthetic",)),
         ConvProblem("cin_odd", 5, 32, (8, 8, 8), sites=("synthetic",)),
         ConvProblem("cin_prime", 17, 24, (8, 8, 8), sites=("synthetic",)),
-        ConvProblem("cout_tiny", 64, 6, (8, 8, 8), (1, 1, 1), padding=(0, 0, 0),
-                    bias=True, sites=("synthetic",)),
+        ConvProblem(
+            "cout_tiny",
+            64,
+            6,
+            (8, 8, 8),
+            (1, 1, 1),
+            padding=(0, 0, 0),
+            bias=True,
+            sites=("synthetic",),
+        ),
         ConvProblem("cout_odd", 32, 7, (8, 8, 8), sites=("synthetic",)),
         # Spatial extents that do not divide any plausible tile.
         ConvProblem("spatial_prime", 32, 32, (13, 13, 13), sites=("synthetic",)),
@@ -647,12 +653,28 @@ def edge_cases(include_large: bool = False) -> tuple[ConvProblem, ...]:
         # Smaller than the kernel in one axis: every tap is masked somewhere.
         ConvProblem("smaller_than_kernel", 16, 16, (2, 2, 2), sites=("synthetic",)),
         # Padding variants: unpadded shrinks the output, k=1 removes the gather.
-        ConvProblem("unpadded", 32, 32, (16, 16, 16), padding=(0, 0, 0),
-                    sites=("synthetic",)),
-        ConvProblem("pointwise", 64, 6, (16, 16, 16), (1, 1, 1), padding=(0, 0, 0),
-                    bias=True, sites=("synthetic",)),
-        ConvProblem("kernel_aniso", 32, 32, (8, 8, 8), (1, 3, 3), padding=(0, 1, 1),
-                    sites=("synthetic",)),
+        ConvProblem(
+            "unpadded", 32, 32, (16, 16, 16), padding=(0, 0, 0), sites=("synthetic",)
+        ),
+        ConvProblem(
+            "pointwise",
+            64,
+            6,
+            (16, 16, 16),
+            (1, 1, 1),
+            padding=(0, 0, 0),
+            bias=True,
+            sites=("synthetic",),
+        ),
+        ConvProblem(
+            "kernel_aniso",
+            32,
+            32,
+            (8, 8, 8),
+            (1, 3, 3),
+            padding=(0, 1, 1),
+            sites=("synthetic",),
+        ),
         # The padding a *sharded* ScaFFold convolution actually reaches the
         # kernel with: a symmetric ``k = 3`` with the split axis halo'd (so
         # ``p = 0`` there) and H and W still padded.  Anisotropic padding under
@@ -660,13 +682,24 @@ def edge_cases(include_large: bool = False) -> tuple[ConvProblem, ...]:
         # ``kernel_aniso`` gets its zero from ``kd = 1``, where the boundary
         # predicate on D is dead for a different reason -- and it is the form
         # every k=3 site runs at ``dc_num_shards = (2,1,1)`` or ``(4,1,1)``.
-        ConvProblem("shard_padded", 32, 32, (8, 8, 8), padding=(0, 1, 1),
-                    sites=("synthetic",)),
+        ConvProblem(
+            "shard_padded", 32, 32, (8, 8, 8), padding=(0, 1, 1), sites=("synthetic",)
+        ),
         # Batch > 1: ScaFFold never does this, but the M decomposition must.
         ConvProblem("batched", 32, 32, (8, 8, 8), n=3, sites=("synthetic",)),
         # The transposed upsample, at a size that is quick to check.
-        ConvProblem("transposed", 64, 32, (8, 8, 8), (2, 2, 2), (2, 2, 2), (0, 0, 0),
-                    transposed=True, bias=True, sites=("synthetic",)),
+        ConvProblem(
+            "transposed",
+            64,
+            32,
+            (8, 8, 8),
+            (2, 2, 2),
+            (2, 2, 2),
+            (0, 0, 0),
+            transposed=True,
+            bias=True,
+            sites=("synthetic",),
+        ),
         # fp32, for more_determinism and for exact-arithmetic tests.
         ConvProblem("fp32", 32, 32, (8, 8, 8), dtype="fp32", sites=("synthetic",)),
         ConvProblem("fp16", 32, 32, (8, 8, 8), dtype="fp16", sites=("synthetic",)),
@@ -686,10 +719,22 @@ def edge_cases(include_large: bool = False) -> tuple[ConvProblem, ...]:
         # the buffer-op byte limit -- see :attr:`ConvProblem.buffer_ops_eligible`
         # for why that is a different question from this one.
         cases += [
-            ConvProblem("int32_below", 128, 64, (255, 255, 255), large=True,
-                        sites=("synthetic",)),
-            ConvProblem("int32_above", 128, 64, (258, 258, 258), large=True,
-                        sites=("synthetic",)),
+            ConvProblem(
+                "int32_below",
+                128,
+                64,
+                (255, 255, 255),
+                large=True,
+                sites=("synthetic",),
+            ),
+            ConvProblem(
+                "int32_above",
+                128,
+                64,
+                (258, 258, 258),
+                large=True,
+                sites=("synthetic",),
+            ),
         ]
     return tuple(cases)
 
@@ -714,8 +759,10 @@ def problems_in_form(form: Form) -> tuple[ConvProblem, ...]:
 
 
 if __name__ == "__main__":  # pragma: no cover - a human-readable dump
-    hdr = (f"{'ms/step':>9} {'logical':38s} {'adapter (production)':46s} "
-           f"{'AI':>7} {'i64':>4}")
+    hdr = (
+        f"{'ms/step':>9} {'logical':38s} {'adapter (production)':46s} "
+        f"{'AI':>7} {'i64':>4}"
+    )
     print(hdr)
     print("-" * len(hdr))
     for p in scaffold_corpus():
@@ -725,9 +772,13 @@ if __name__ == "__main__":  # pragma: no cover - a human-readable dump
             f"{p.arithmetic_intensity():7.0f} {'yes' if p.needs_int64 else '':>4}"
         )
     padded = sum(1 for p in production_corpus() if any(p.padding))
-    print(f"\n{len(scaffold_corpus())} ScaFFold problems, "
-          f"{len(edge_cases(include_large=True))} synthetic edge cases, "
-          f"{len(census_corpus())} measured by census")
-    print(f"{padded}/{len(production_corpus())} of the production forms are "
-          f"padded; {sum(1 for p in halo_corpus() if any(p.padding))} of the "
-          f"DistConv forms are")
+    print(
+        f"\n{len(scaffold_corpus())} ScaFFold problems, "
+        f"{len(edge_cases(include_large=True))} synthetic edge cases, "
+        f"{len(census_corpus())} measured by census"
+    )
+    print(
+        f"{padded}/{len(production_corpus())} of the production forms are "
+        f"padded; {sum(1 for p in halo_corpus() if any(p.padding))} of the "
+        f"DistConv forms are"
+    )

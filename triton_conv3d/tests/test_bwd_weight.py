@@ -98,10 +98,17 @@ def _corpus_channel_pairs() -> list[ConvProblem]:
         if shard != p.padding and shard != (0, 0, 0):
             forms.insert(1, (shard, "-shard"))
         for pad, tag in forms:
-            out.append(ConvProblem(
-                f"{p.cin}to{p.cout}{tag}", p.cin, p.cout, (6, 7, 8), p.kernel,
-                padding=pad, sites=("corpus-pair",),
-            ))
+            out.append(
+                ConvProblem(
+                    f"{p.cin}to{p.cout}{tag}",
+                    p.cin,
+                    p.cout,
+                    (6, 7, 8),
+                    p.kernel,
+                    padding=pad,
+                    sites=("corpus-pair",),
+                )
+            )
     return out
 
 
@@ -111,7 +118,8 @@ CORPUS_PAIRS = _corpus_channel_pairs()
 #: Real ScaFFold shapes, at their real volumes, small enough to reference in
 #: fp64.  Used only for the fp32 test below.
 CORPUS_SMALL = [
-    p for p in scaffold_corpus()
+    p
+    for p in scaffold_corpus()
     if not p.transposed
     and math.prod(p.halo_variant.spatial) * max(p.cin, p.cout) <= 1 << 22
 ]
@@ -124,8 +132,12 @@ def _ids(problems):
 
 def _run(problem: ConvProblem, ops: dict, **kwargs) -> torch.Tensor:
     return conv3d_backward_weight(
-        ops["input"], problem.weight_shape, ops["grad_output"],
-        problem.stride, problem.padding, **kwargs,
+        ops["input"],
+        problem.weight_shape,
+        ops["grad_output"],
+        problem.stride,
+        problem.padding,
+        **kwargs,
     )
 
 
@@ -177,18 +189,25 @@ def test_the_grid_lands_on_whole_waves():
     than left to the constant that happens to produce it.
     """
     for cout, cin, taps, k_total, out_w in (
-        (64, 64, 27, 8_388_608, 256), (64, 128, 27, 2_097_152, 128),
-        (128, 128, 27, 1_048_576, 128), (256, 256, 27, 131_072, 64),
-        (512, 512, 27, 16_384, 32), (6, 64, 1, 2_097_152, 256),
+        (64, 64, 27, 8_388_608, 256),
+        (64, 128, 27, 2_097_152, 128),
+        (128, 128, 27, 1_048_576, 128),
+        (256, 256, 27, 131_072, 64),
+        (512, 512, 27, 16_384, 32),
+        (6, 64, 1, 2_097_152, 256),
     ):
-        cfg = bwd_weight_config(cout, cin, (3, 3, 3) if taps > 1 else (1, 1, 1),
-                                k_total, torch.bfloat16)
+        cfg = bwd_weight_config(
+            cout, cin, (3, 3, 3) if taps > 1 else (1, 1, 1), k_total, torch.bfloat16
+        )
         splits, _ = split_count(cfg, cout, cin, taps, k_total, out_w)
-        tiles = (-(-cout // cfg.BLOCK_M) * -(-cin // cfg.BLOCK_NC)
-                 * -(-taps // cfg.TAP_BLOCK))
+        tiles = (
+            -(-cout // cfg.BLOCK_M)
+            * -(-cin // cfg.BLOCK_NC)
+            * -(-taps // cfg.TAP_BLOCK)
+        )
         progs = tiles * splits
         if progs <= _CU_COUNT:
-            continue                       # one wave or less: nothing to snap
+            continue  # one wave or less: nothing to snap
         waste = (-(-progs // _CU_COUNT) * _CU_COUNT - progs) / progs
         assert waste < 0.10, (cout, cin, k_total, splits, tiles, progs, waste)
     assert _SPLIT_TARGET_WAVES >= 1
@@ -230,7 +249,7 @@ def _every_form(problems):
     seen: set[str] = set()
     for p in problems:
         if p.transposed:
-            continue        # a later milestone; ``weight_shape`` is swapped too
+            continue  # a later milestone; ``weight_shape`` is swapped too
         for q in (p, p.production_variant, p.halo_variant):
             if q.qualified_label in seen:
                 continue
@@ -275,15 +294,27 @@ def test_the_partial_workspace_is_bounded_across_the_whole_corpus():
         # set than it was, and it is still the number to size an allocation
         # from.
         for cfg in (
-            bwd_weight_config(hp.cout, hp.cin, hp.kernel, k_total,
-                              torch.bfloat16, padded=any(hp.padding)),
-            default_bwd_weight_config(hp.cout, hp.cin, hp.kernel, k_total,
-                                      torch.bfloat16, padded=any(hp.padding)),
+            bwd_weight_config(
+                hp.cout,
+                hp.cin,
+                hp.kernel,
+                k_total,
+                torch.bfloat16,
+                padded=any(hp.padding),
+            ),
+            default_bwd_weight_config(
+                hp.cout,
+                hp.cin,
+                hp.kernel,
+                k_total,
+                torch.bfloat16,
+                padded=any(hp.padding),
+            ),
         ):
-            splits, _ = split_count(cfg, hp.cout, hp.cin, hp.tap_count, k_total,
-                                    hp.out_spatial[2])
-            mib = workspace_elements(splits, hp.cout, hp.cin,
-                                     hp.kernel) * 4 / 2**20
+            splits, _ = split_count(
+                cfg, hp.cout, hp.cin, hp.tap_count, k_total, hp.out_spatial[2]
+            )
+            mib = workspace_elements(splits, hp.cout, hp.cin, hp.kernel) * 4 / 2**20
             assert mib <= _WORKSPACE_BYTES / 2**20, f"{hp.label}: {mib:.0f} MiB"
             if mib > worst:
                 worst, worst_label = mib, f"{hp.label} {cfg}"
@@ -324,25 +355,43 @@ def test_the_wave_snap_outranks_the_epilogue_bound_and_only_below_one_wave():
     Both halves have failed at some point in this function's history, in
     opposite directions.
     """
+
     def bounds(cfg, cout, cin, taps, k_total):
-        tiles = (-(-cout // cfg.BLOCK_M) * -(-cin // cfg.BLOCK_NC)
-                 * -(-taps // cfg.TAP_BLOCK))
+        tiles = (
+            -(-cout // cfg.BLOCK_M)
+            * -(-cin // cfg.BLOCK_NC)
+            * -(-taps // cfg.TAP_BLOCK)
+        )
         loop_elems = tiles * k_total * (cfg.BLOCK_M + cfg.BLOCK_N)
-        epi = max(1, loop_elems
-                  // (_MAX_EPILOGUE_FRACTION * max(1, cout * taps * cin * 4)))
+        epi = max(
+            1, loop_elems // (_MAX_EPILOGUE_FRACTION * max(1, cout * taps * cin * 4))
+        )
         return tiles, epi
 
     checked = overridden = 0
     for hp in _every_form(list(scaffold_corpus()) + EDGE):
         k_total = hp.n * math.prod(hp.out_spatial)
         for cfg in (
-            bwd_weight_config(hp.cout, hp.cin, hp.kernel, k_total,
-                              torch.bfloat16, padded=any(hp.padding)),
-            default_bwd_weight_config(hp.cout, hp.cin, hp.kernel, k_total,
-                                      torch.bfloat16, padded=any(hp.padding)),
+            bwd_weight_config(
+                hp.cout,
+                hp.cin,
+                hp.kernel,
+                k_total,
+                torch.bfloat16,
+                padded=any(hp.padding),
+            ),
+            default_bwd_weight_config(
+                hp.cout,
+                hp.cin,
+                hp.kernel,
+                k_total,
+                torch.bfloat16,
+                padded=any(hp.padding),
+            ),
         ):
-            splits, _ = split_count(cfg, hp.cout, hp.cin, hp.tap_count, k_total,
-                                    hp.out_spatial[2])
+            splits, _ = split_count(
+                cfg, hp.cout, hp.cin, hp.tap_count, k_total, hp.out_spatial[2]
+            )
             tiles, epi = bounds(cfg, hp.cout, hp.cin, hp.tap_count, k_total)
             checked += 1
             if splits <= epi:
@@ -352,16 +401,14 @@ def test_the_wave_snap_outranks_the_epilogue_bound_and_only_below_one_wave():
             # snap does: to the *nearest* whole wave, so at most half a wave of
             # extra programs -- or one whole wave where the bounded grid does
             # not fill even one.
-            assert tiles * splits <= max(_CU_COUNT,
-                                         tiles * epi + _CU_COUNT // 2), (
+            assert tiles * splits <= max(_CU_COUNT, tiles * epi + _CU_COUNT // 2), (
                 f"{hp.label} {cfg}: {splits} splits against an epilogue bound "
                 f"of {epi} is {tiles * splits} programs, more than a wave past "
                 f"the bounded grid's {tiles * epi}"
             )
             # And the workspace ceiling still holds, which is the one bound the
             # snap is *not* allowed to escape.
-            mib = workspace_elements(splits, hp.cout, hp.cin,
-                                     hp.kernel) * 4 / 2**20
+            mib = workspace_elements(splits, hp.cout, hp.cin, hp.kernel) * 4 / 2**20
             assert mib <= _WORKSPACE_BYTES / 2**20, f"{hp.label}: {mib:.0f} MiB"
     assert checked > 40
 
@@ -371,8 +418,7 @@ def test_the_wave_snap_outranks_the_epilogue_bound_and_only_below_one_wave():
     )
 
 
-@pytest.mark.parametrize("problem", EDGE + CORPUS_PAIRS,
-                         ids=_ids(EDGE + CORPUS_PAIRS))
+@pytest.mark.parametrize("problem", EDGE + CORPUS_PAIRS, ids=_ids(EDGE + CORPUS_PAIRS))
 def test_selected_config_is_legal_for_every_shape(problem: ConvProblem):
     """The config picked for backward-weight must reach the matrix core.
 
@@ -385,14 +431,18 @@ def test_selected_config_is_legal_for_every_shape(problem: ConvProblem):
     dtype = reference.torch_dtype(problem)
     hp = problem.halo_variant
     k_total = hp.n * math.prod(hp.out_spatial)
-    cfg = bwd_weight_config(hp.cout, hp.cin, hp.kernel, k_total, dtype,
-                            padded=any(hp.padding))
+    cfg = bwd_weight_config(
+        hp.cout, hp.cin, hp.kernel, k_total, dtype, padded=any(hp.padding)
+    )
     assert cfg.validate(dtype) is None, f"{hp.label}: {cfg} -> {cfg.validate(dtype)}"
     assert cfg.lds_bytes(dtype) <= 64 * 1024, f"{hp.label}: {cfg}"
 
 
-@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16, torch.float32],
-                         ids=["bf16", "fp16", "fp32"])
+@pytest.mark.parametrize(
+    "dtype",
+    [torch.bfloat16, torch.float16, torch.float32],
+    ids=["bf16", "fp16", "fp32"],
+)
 def test_default_config_fits_in_lds_in_every_dtype(dtype):
     """fp32 operands are twice the bytes, and ``more_determinism`` runs in fp32.
 
@@ -420,8 +470,9 @@ def test_every_backward_weight_candidate_config_is_legal(problem: ConvProblem):
     """
     dtype = reference.torch_dtype(problem)
     k_total = problem.n * math.prod(problem.out_spatial)
-    cfgs = candidate_bwd_weight_configs(problem.cout, problem.cin,
-                                        problem.kernel, k_total, dtype)
+    cfgs = candidate_bwd_weight_configs(
+        problem.cout, problem.cin, problem.kernel, k_total, dtype
+    )
     assert cfgs
     for cfg in cfgs:
         assert cfg.validate(dtype) is None, f"{cfg}: {cfg.validate(dtype)}"
@@ -493,7 +544,9 @@ def test_is_supported_declines_what_the_kernel_cannot_express():
     # reduction would run over a volume the input does not have.
     assert not is_supported_bwd_weight(x, ws, gy, padding=0)
     assert not is_supported_bwd_weight(
-        x, ws, torch.empty((1, 8, 4, 6, 6), device="cuda", dtype=torch.bfloat16),
+        x,
+        ws,
+        torch.empty((1, 8, 4, 6, 6), device="cuda", dtype=torch.bfloat16),
         padding=1,
     )
 
@@ -509,7 +562,10 @@ def test_unsupported_calls_raise_rather_than_return_garbage():
     # An out= in the wrong layout is refused rather than filled transposed.
     with pytest.raises(ValueError):
         conv3d_backward_weight(
-            x, (8, 8, 3, 3, 3), gy, padding=1,
+            x,
+            (8, 8, 3, 3, 3),
+            gy,
+            padding=1,
             out=torch.empty((8, 8, 3, 3, 3), device="cuda", dtype=torch.bfloat16),
         )
 
@@ -646,8 +702,9 @@ def test_the_padded_row_aligned_corner_is_compiled_and_correct(problem):
     hp = problem
     k_total = hp.n * math.prod(hp.out_spatial)
     dtype = reference.torch_dtype(problem)
-    cfg = bwd_weight_config(hp.cout, hp.cin, hp.kernel, k_total, dtype,
-                            padded=any(hp.padding))
+    cfg = bwd_weight_config(
+        hp.cout, hp.cin, hp.kernel, k_total, dtype, padded=any(hp.padding)
+    )
     # The two constexprs, asserted rather than hoped for: this test's whole
     # value is that it compiles a branch, so it has to fail loudly if a config
     # change ever stops it reaching that branch.
@@ -670,7 +727,9 @@ def test_the_padded_row_aligned_corner_is_compiled_and_correct(problem):
 #: than listed, so a retune moves this set instead of stranding it.
 def _tap_widened_pairs() -> list[tuple[ConvProblem, BwdWeightConfig]]:
     from triton_conv3d.reduce_gemm import (
-        _TUNED_BWD_W, _fit_bwd_weight_to_lds, tune_key,
+        _TUNED_BWD_W,
+        _fit_bwd_weight_to_lds,
+        tune_key,
     )
 
     out, seen = [], set()
@@ -678,8 +737,7 @@ def _tap_widened_pairs() -> list[tuple[ConvProblem, BwdWeightConfig]]:
         if p.transposed or (p.cin, p.cout, p.kernel) in seen:
             continue
         seen.add((p.cin, p.cout, p.kernel))
-        row = _TUNED_BWD_W.get(
-            tune_key(torch.bfloat16, p.cin, p.cout, tuple(p.kernel)))
+        row = _TUNED_BWD_W.get(tune_key(torch.bfloat16, p.cin, p.cout, tuple(p.kernel)))
         if row is not None and row.TAP_BLOCK > 1:
             out.append((p, _fit_bwd_weight_to_lds(row, torch.bfloat16)))
     return out
@@ -719,10 +777,12 @@ def test_a_tuned_tap_block_row_survives_the_padding():
     )
     for p, row in _TAP_WIDENED:
         k_total = p.n * math.prod(p.out_spatial)
-        padded = bwd_weight_config(p.cout, p.cin, p.kernel, k_total,
-                                   torch.bfloat16, padded=True)
-        unpadded = bwd_weight_config(p.cout, p.cin, p.kernel, k_total,
-                                     torch.bfloat16, padded=False)
+        padded = bwd_weight_config(
+            p.cout, p.cin, p.kernel, k_total, torch.bfloat16, padded=True
+        )
+        unpadded = bwd_weight_config(
+            p.cout, p.cin, p.kernel, k_total, torch.bfloat16, padded=False
+        )
         assert unpadded == row, (
             f"{p.cin}->{p.cout}: the tuned row is not selected even unpadded"
         )
@@ -747,10 +807,12 @@ def test_the_heuristic_widens_tap_block_under_padding_too():
     """
     for p, _row in _TAP_WIDENED:
         k_total = p.n * math.prod(p.out_spatial)
-        wide = default_bwd_weight_config(p.cout, p.cin, p.kernel, k_total,
-                                         torch.bfloat16, padded=False)
-        padded = default_bwd_weight_config(p.cout, p.cin, p.kernel, k_total,
-                                           torch.bfloat16, padded=True)
+        wide = default_bwd_weight_config(
+            p.cout, p.cin, p.kernel, k_total, torch.bfloat16, padded=False
+        )
+        padded = default_bwd_weight_config(
+            p.cout, p.cin, p.kernel, k_total, torch.bfloat16, padded=True
+        )
         assert padded == wide, (
             f"{p.cin}->{p.cout}: the heuristic still answers differently under "
             f"padding ({padded} vs {wide})"
@@ -764,9 +826,21 @@ def test_the_heuristic_widens_tap_block_under_padding_too():
 @requires_gpu
 @pytest.mark.parametrize(
     "problem,cfg",
-    [(ConvProblem(f"{p.cin}to{p.cout}-padded", p.cin, p.cout, (6, 7, 8),
-                  p.kernel, padding=p.padding, sites=("tap-widened",)), c)
-     for p, c in _TAP_WIDENED],
+    [
+        (
+            ConvProblem(
+                f"{p.cin}to{p.cout}-padded",
+                p.cin,
+                p.cout,
+                (6, 7, 8),
+                p.kernel,
+                padding=p.padding,
+                sites=("tap-widened",),
+            ),
+            c,
+        )
+        for p, c in _TAP_WIDENED
+    ],
     ids=[f"{p.cin}to{p.cout}" for p, _ in _TAP_WIDENED],
 )
 def test_a_padded_tap_block_row_is_still_bitwise_correct(problem, cfg):
@@ -814,20 +888,24 @@ _PADDED_ROW_ALIGNED_TAPS = [
     # The sharded production padding, which is anisotropic: the ``d`` half of
     # the boundary predicate is dead and the ``h``/``w`` halves are live, inside
     # the branch where ``src_d`` is a rank-0 scalar.
-    (ConvProblem("triple-shardpad", 32, 32, (4, 4, 32), padding=(0, 1, 1)),
-     4, 32, 32),
+    (ConvProblem("triple-shardpad", 32, 32, (4, 4, 32), padding=(0, 1, 1)), 4, 32, 32),
     # The stem, in both of its production paddings.  ``BLOCK_M`` is 32 here
     # rather than the shipped 64 only because this test fixes it; every other
     # constexpr is the one the resolver returns.
     (ConvProblem("quintuple-stem", 3, 64, (2, 2, 64)), 16, 64, 4),
-    (ConvProblem("quintuple-stem-shardpad", 3, 64, (4, 4, 64),
-                 padding=(0, 1, 1)), 16, 64, 4),
+    (
+        ConvProblem("quintuple-stem-shardpad", 3, 64, (4, 4, 64), padding=(0, 1, 1)),
+        16,
+        64,
+        4,
+    ),
 ]
 
 
 @requires_gpu
 @pytest.mark.parametrize(
-    "problem,tap_block,block_k,block_nc", _PADDED_ROW_ALIGNED_TAPS,
+    "problem,tap_block,block_k,block_nc",
+    _PADDED_ROW_ALIGNED_TAPS,
     ids=[p.name for p, _, _, _ in _PADDED_ROW_ALIGNED_TAPS],
 )
 def test_the_padded_row_aligned_tap_widened_corner_is_correct(
@@ -849,9 +927,15 @@ def test_the_padded_row_aligned_tap_widened_corner_is_correct(
     reaches; the assertions below say which case is which so a failure names the
     axis rather than the tile.
     """
-    cfg = BwdWeightConfig(BLOCK_M=32, BLOCK_N=block_nc * tap_block,
-                          BLOCK_K=block_k, TAP_BLOCK=tap_block, num_warps=4,
-                          matrix_instr_nonkdim=16, kpack=1)
+    cfg = BwdWeightConfig(
+        BLOCK_M=32,
+        BLOCK_N=block_nc * tap_block,
+        BLOCK_K=block_k,
+        TAP_BLOCK=tap_block,
+        num_warps=4,
+        matrix_instr_nonkdim=16,
+        kpack=1,
+    )
     assert cfg.BLOCK_NC == block_nc
     assert any(problem.padding), "PADDED would be False"
     assert _row_aligned(cfg.BLOCK_K, problem.out_spatial[2]), (
@@ -869,8 +953,7 @@ def test_the_padded_row_aligned_tap_widened_corner_is_correct(
     ops = reference.make_inputs(problem, seed=31, exact=True, dtype=dtype)
     expected = reference.reference(problem, ops, "bwd-weight")
     assert reference.is_exactly_representable(expected, dtype)
-    assert reference.compare(_run(problem, ops, config=cfg),
-                             expected.to(dtype)).bitwise
+    assert reference.compare(_run(problem, ops, config=cfg), expected.to(dtype)).bitwise
 
 
 @requires_gpu
@@ -883,9 +966,9 @@ def test_bitwise_standard_rejects_a_shifted_input():
     assert reference.compare(actual, correct).bitwise
 
     shifted = torch.roll(ops["input"], shifts=1, dims=-1)
-    wrong = reference.reference(
-        problem, {**ops, "input": shifted}, "bwd-weight"
-    ).to(torch.bfloat16)
+    wrong = reference.reference(problem, {**ops, "input": shifted}, "bwd-weight").to(
+        torch.bfloat16
+    )
     assert not reference.compare(actual, wrong).bitwise, (
         "a one-voxel shift of the input produced a bitwise-identical gradient; "
         "the comparison is not discriminating"
@@ -937,7 +1020,11 @@ def test_every_config_gives_the_same_answer(problem: ConvProblem):
     expected = expected.to(dtype)
     k_total = problem.n * math.prod(problem.out_spatial)
     cfgs = candidate_bwd_weight_configs(
-        problem.cout, problem.cin, problem.kernel, k_total, dtype,
+        problem.cout,
+        problem.cin,
+        problem.kernel,
+        k_total,
+        dtype,
         splits=(0, 1, 3, 64),
     )
     ran = 0
@@ -994,8 +1081,9 @@ def test_the_forward_kernel_can_express_backward_weight():
     # (Cin, N, ID, IH, IW) convolved with (Cout, N, OD, OH, OW) -> (Cin, Cout, k)
     as_conv = conv3d_forward(
         ops["input"].transpose(0, 1).contiguous(memory_format=torch.channels_last_3d),
-        ops["grad_output"].transpose(0, 1).contiguous(
-            memory_format=torch.channels_last_3d),
+        ops["grad_output"]
+        .transpose(0, 1)
+        .contiguous(memory_format=torch.channels_last_3d),
         padding=0,
     )
     assert tuple(as_conv.shape) == (problem.cin, problem.cout, *problem.kernel)
@@ -1021,8 +1109,7 @@ def test_the_forward_kernel_can_express_backward_weight():
 
 
 @requires_gpu
-@pytest.mark.parametrize("problem", EDGE + CORPUS_PAIRS,
-                         ids=_ids(EDGE + CORPUS_PAIRS))
+@pytest.mark.parametrize("problem", EDGE + CORPUS_PAIRS, ids=_ids(EDGE + CORPUS_PAIRS))
 def test_no_worse_than_miopen(problem: ConvProblem):
     """The honest bar at realistic magnitudes, against MIOpen on the same data."""
     ops = reference.make_inputs(problem, seed=17)
@@ -1031,8 +1118,9 @@ def test_no_worse_than_miopen(problem: ConvProblem):
         reference.incumbent(problem, ops, "bwd-weight"), expected
     )
     actual = _run(problem, ops)
-    reference.assert_close(actual, expected, problem, "bwd-weight",
-                           incumbent_error=incumbent_err)
+    reference.assert_close(
+        actual, expected, problem, "bwd-weight", incumbent_error=incumbent_err
+    )
 
 
 @requires_gpu
@@ -1084,13 +1172,13 @@ def test_a_strided_convolution_is_served_correctly(stride, padding):
     multiply that is *also* not refused by ``is_supported`` is the combination
     that returns a wrong gradient silently.
     """
-    problem = ConvProblem("strided", 16, 24, (9, 11, 13),
-                          stride=(stride,) * 3, padding=(padding,) * 3)
+    problem = ConvProblem(
+        "strided", 16, 24, (9, 11, 13), stride=(stride,) * 3, padding=(padding,) * 3
+    )
     ops = reference.make_inputs(problem, seed=37, exact=True)
     expected = reference.reference(problem, ops, "bwd-weight")
     assert reference.is_exactly_representable(expected, torch.bfloat16)
-    assert reference.compare(_run(problem, ops),
-                             expected.to(torch.bfloat16)).bitwise
+    assert reference.compare(_run(problem, ops), expected.to(torch.bfloat16)).bitwise
 
 
 # ---------------------------------------------------------------------------
@@ -1108,11 +1196,24 @@ _DET = ConvProblem("determinism", 64, 64, (18, 34, 34), padding=(0, 0, 0))
 def test_repeated_calls_are_bitwise_reproducible_in_process():
     problem = _DET
     ops = reference.make_inputs(problem, seed=71)
-    cfg = bwd_weight_config(problem.cout, problem.cin, problem.kernel,
-                            math.prod(problem.out_spatial), torch.bfloat16)
-    assert split_count(cfg, problem.cout, problem.cin, problem.tap_count,
-                       math.prod(problem.out_spatial),
-                       problem.out_spatial[2])[0] > 1, "not exercising split-K"
+    cfg = bwd_weight_config(
+        problem.cout,
+        problem.cin,
+        problem.kernel,
+        math.prod(problem.out_spatial),
+        torch.bfloat16,
+    )
+    assert (
+        split_count(
+            cfg,
+            problem.cout,
+            problem.cin,
+            problem.tap_count,
+            math.prod(problem.out_spatial),
+            problem.out_spatial[2],
+        )[0]
+        > 1
+    ), "not exercising split-K"
     first = _run(problem, ops)
     for _ in range(4):
         assert torch.equal(first, _run(problem, ops))
@@ -1120,8 +1221,9 @@ def test_repeated_calls_are_bitwise_reproducible_in_process():
 
 #: The ``k=1`` segmentation head, at a volume that splits ~800 ways, in **fp32**.
 #: The dtype is the entire point -- see the negative-control test below.
-_DET_K1 = ConvProblem("determinism-k1", 64, 6, (64, 64, 64), (1, 1, 1),
-                      padding=(0, 0, 0), dtype="fp32")
+_DET_K1 = ConvProblem(
+    "determinism-k1", 64, 6, (64, 64, 64), (1, 1, 1), padding=(0, 0, 0), dtype="fp32"
+)
 
 
 @requires_gpu
@@ -1159,10 +1261,15 @@ def test_the_atomic_path_is_not_bitwise_reproducible(problem: ConvProblem):
     """
     dtype = reference.torch_dtype(problem)
     k_total = problem.n * math.prod(problem.out_spatial)
-    cfg = bwd_weight_config(problem.cout, problem.cin, problem.kernel, k_total,
-                            dtype)
-    splits = split_count(cfg, problem.cout, problem.cin, problem.tap_count,
-                         k_total, problem.out_spatial[2])[0]
+    cfg = bwd_weight_config(problem.cout, problem.cin, problem.kernel, k_total, dtype)
+    splits = split_count(
+        cfg,
+        problem.cout,
+        problem.cin,
+        problem.tap_count,
+        k_total,
+        problem.out_spatial[2],
+    )[0]
     assert splits > 8, f"{splits} splits: too few writers to contend"
 
     ops = reference.make_inputs(problem, seed=71, dtype=dtype)
@@ -1208,8 +1315,12 @@ def test_three_separate_processes_agree_bitwise():
     repo = str(pathlib.Path(__file__).resolve().parents[2])
     digests = []
     for _ in range(3):
-        proc = subprocess.run([sys.executable, "-c", _CHILD.format(repo=repo)],
-                              capture_output=True, text=True, timeout=900)
+        proc = subprocess.run(
+            [sys.executable, "-c", _CHILD.format(repo=repo)],
+            capture_output=True,
+            text=True,
+            timeout=900,
+        )
         assert proc.returncode == 0, proc.stderr[-2000:]
         digests.append(proc.stdout.strip().splitlines()[-1])
     assert len(set(digests)) == 1, digests
@@ -1233,8 +1344,11 @@ def test_the_output_is_a_channels_last_weight_of_the_right_shape():
     ops = reference.make_inputs(problem, seed=61)
     gw = _run(problem, ops)
     ref = torch.nn.grad.conv3d_weight(
-        ops["input"], problem.weight_shape, ops["grad_output"],
-        stride=problem.stride, padding=problem.padding,
+        ops["input"],
+        problem.weight_shape,
+        ops["grad_output"],
+        stride=problem.stride,
+        padding=problem.padding,
     )
     assert gw.shape == ref.shape
     assert gw.is_contiguous(memory_format=torch.channels_last_3d)
@@ -1261,10 +1375,12 @@ def test_an_out_the_kernel_would_overrun_is_refused():
     silently changes the dtype of the gradient the caller gets back.
     """
     k = (3, 3, 3)
-    x = torch.randn((1, 32, 6, 6, 6), device="cuda", dtype=torch.bfloat16
-                    ).contiguous(memory_format=torch.channels_last_3d)
-    gy = torch.randn((1, 64, 6, 6, 6), device="cuda", dtype=torch.bfloat16
-                     ).contiguous(memory_format=torch.channels_last_3d)
+    x = torch.randn((1, 32, 6, 6, 6), device="cuda", dtype=torch.bfloat16).contiguous(
+        memory_format=torch.channels_last_3d
+    )
+    gy = torch.randn((1, 64, 6, 6, 6), device="cuda", dtype=torch.bfloat16).contiguous(
+        memory_format=torch.channels_last_3d
+    )
     ws = (64, 32, *k)
 
     right = grad_weight_empty(64, 32, k, dtype=torch.bfloat16, device="cuda")
@@ -1276,18 +1392,18 @@ def test_an_out_the_kernel_would_overrun_is_refused():
 
     for bad, what in (
         (small, "shape"),
-        (grad_weight_empty(64, 32, k, dtype=torch.float32, device="cuda"),
-         "dtype"),
-        (grad_weight_empty(64, 32, k, dtype=torch.bfloat16, device="cpu"),
-         "device"),
+        (grad_weight_empty(64, 32, k, dtype=torch.float32, device="cuda"), "dtype"),
+        (grad_weight_empty(64, 32, k, dtype=torch.bfloat16, device="cpu"), "device"),
         (torch.empty(ws, device="cuda", dtype=torch.bfloat16), "strides"),
     ):
         with pytest.raises(ValueError, match="out="):
             conv3d_backward_weight(x, ws, gy, padding=1, out=bad)
     # ...and the buffer that *is* right is still accepted, so the guard is not
     # simply refusing everything.
-    assert conv3d_backward_weight(x, ws, gy, padding=1,
-                                  out=right).data_ptr() == right.data_ptr()
+    assert (
+        conv3d_backward_weight(x, ws, gy, padding=1, out=right).data_ptr()
+        == right.data_ptr()
+    )
 
 
 @requires_gpu
@@ -1311,8 +1427,7 @@ def test_the_gradient_buffer_is_allocated_in_the_layout_it_is_used_in():
             return func(*args, **(kwargs or {}))
 
     with _Record():
-        gw = grad_weight_empty(64, 32, (3, 3, 3), dtype=torch.bfloat16,
-                               device="cuda")
+        gw = grad_weight_empty(64, 32, (3, 3, 3), dtype=torch.bfloat16, device="cuda")
     assert gw.shape == (64, 32, 3, 3, 3)
     assert gw.is_contiguous(memory_format=torch.channels_last_3d)
     assert not [op for op in seen if "copy" in op or "clone" in op], seen
@@ -1327,16 +1442,25 @@ def test_hoisted_workspace_and_out_are_equivalent():
     inline = _run(problem, ops)
 
     k_total = math.prod(problem.out_spatial)
-    cfg = bwd_weight_config(problem.cout, problem.cin, problem.kernel, k_total,
-                            torch.bfloat16)
-    splits, _ = split_count(cfg, problem.cout, problem.cin, problem.tap_count,
-                            k_total, problem.out_spatial[2])
+    cfg = bwd_weight_config(
+        problem.cout, problem.cin, problem.kernel, k_total, torch.bfloat16
+    )
+    splits, _ = split_count(
+        cfg,
+        problem.cout,
+        problem.cin,
+        problem.tap_count,
+        k_total,
+        problem.out_spatial[2],
+    )
     ws = torch.empty(
         workspace_elements(splits, problem.cout, problem.cin, problem.kernel),
-        dtype=torch.float32, device="cuda",
+        dtype=torch.float32,
+        device="cuda",
     )
-    gw = grad_weight_empty(problem.cout, problem.cin, problem.kernel,
-                           dtype=torch.bfloat16, device="cuda")
+    gw = grad_weight_empty(
+        problem.cout, problem.cin, problem.kernel, dtype=torch.bfloat16, device="cuda"
+    )
     hoisted = _run(problem, ops, workspace=ws, out=gw)
     assert hoisted.data_ptr() == gw.data_ptr()
     assert torch.equal(inline, hoisted)

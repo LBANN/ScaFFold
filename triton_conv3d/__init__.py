@@ -65,41 +65,54 @@ from typing import Any
 
 __version__ = "0.0.0.dev0"
 
-__all__ = ["ConvConfig", "conv3d_forward", "conv3d_backward_data",
-           "conv3d_backward_weight", "is_supported", "is_supported_all",
-           "is_supported_bwd_data", "is_supported_bwd_weight",
-           "conv_transpose3d_forward", "conv_transpose3d_backward_data",
-           "conv_transpose3d_backward_weight", "is_supported_transposed",
-           "is_supported_transposed_all", "is_supported_transposed_bwd_data",
-           "is_supported_transposed_bwd_weight", "__version__"]
+__all__ = [
+    "ConvConfig",
+    "conv3d_forward",
+    "conv3d_backward_data",
+    "conv3d_backward_weight",
+    "is_supported",
+    "is_supported_all",
+    "is_supported_bwd_data",
+    "is_supported_bwd_weight",
+    "conv_transpose3d_forward",
+    "conv_transpose3d_backward_data",
+    "conv_transpose3d_backward_weight",
+    "is_supported_transposed",
+    "is_supported_transposed_all",
+    "is_supported_transposed_bwd_data",
+    "is_supported_transposed_bwd_weight",
+    "__version__",
+]
 
 #: The public names live in :mod:`triton_conv3d.gather_gemm`, which imports
 #: torch and triton.  They are re-exported lazily so that
 #: ``import triton_conv3d.shapes`` stays free of both: the shape and cost model
 #: is pure Python by design, and it drives test parametrization at collection
 #: time on machines that have no GPU and may have no triton.
-_LAZY = {"ConvConfig": "gather_gemm", "conv3d_forward": "gather_gemm",
-         "is_supported": "gather_gemm", "is_supported_all": "gather_gemm",
-         "conv3d_backward_data": "bwd_data",
-         "is_supported_bwd_data": "bwd_data",
-         "conv3d_backward_weight": "reduce_gemm",
-         "is_supported_bwd_weight": "reduce_gemm",
-         "conv_transpose3d_forward": "transposed",
-         "conv_transpose3d_backward_data": "transposed",
-         "conv_transpose3d_backward_weight": "transposed",
-         "is_supported_transposed": "transposed",
-         "is_supported_transposed_all": "transposed",
-         "is_supported_transposed_bwd_data": "transposed",
-         "is_supported_transposed_bwd_weight": "transposed"}
+_LAZY = {
+    "ConvConfig": "gather_gemm",
+    "conv3d_forward": "gather_gemm",
+    "is_supported": "gather_gemm",
+    "is_supported_all": "gather_gemm",
+    "conv3d_backward_data": "bwd_data",
+    "is_supported_bwd_data": "bwd_data",
+    "conv3d_backward_weight": "reduce_gemm",
+    "is_supported_bwd_weight": "reduce_gemm",
+    "conv_transpose3d_forward": "transposed",
+    "conv_transpose3d_backward_data": "transposed",
+    "conv_transpose3d_backward_weight": "transposed",
+    "is_supported_transposed": "transposed",
+    "is_supported_transposed_all": "transposed",
+    "is_supported_transposed_bwd_data": "transposed",
+    "is_supported_transposed_bwd_weight": "transposed",
+}
 
 
 def __getattr__(name: str) -> Any:
     if name in _LAZY:
         import importlib
 
-        return getattr(
-            importlib.import_module(f".{_LAZY[name]}", __name__), name
-        )
+        return getattr(importlib.import_module(f".{_LAZY[name]}", __name__), name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 

@@ -118,9 +118,36 @@ _MAX_ITERS = 512
 #: Student-t 97.5th percentile by degrees of freedom, so an interval can be
 #: quoted without a scipy dependency.  Index 0 is unused.
 _T975 = (
-    math.nan, 12.706, 4.303, 3.182, 2.776, 2.571, 2.447, 2.365, 2.306, 2.262,
-    2.228, 2.201, 2.179, 2.160, 2.145, 2.131, 2.120, 2.110, 2.101, 2.093,
-    2.086, 2.080, 2.074, 2.069, 2.064, 2.060, 2.056, 2.052, 2.048, 2.045,
+    math.nan,
+    12.706,
+    4.303,
+    3.182,
+    2.776,
+    2.571,
+    2.447,
+    2.365,
+    2.306,
+    2.262,
+    2.228,
+    2.201,
+    2.179,
+    2.160,
+    2.145,
+    2.131,
+    2.120,
+    2.110,
+    2.101,
+    2.093,
+    2.086,
+    2.080,
+    2.074,
+    2.069,
+    2.064,
+    2.060,
+    2.056,
+    2.052,
+    2.048,
+    2.045,
 )
 
 #: Asymptotic ratio of the standard error of a sample median to that of the
@@ -247,7 +274,9 @@ class Measurement:
         100 -- all of it arithmetic.  Compare :attr:`rel_half_width` instead,
         which is an interval and does not have that defect.
         """
-        return (max(self.rounds) - min(self.rounds)) / self.median if self.rounds else 0.0
+        return (
+            (max(self.rounds) - min(self.rounds)) / self.median if self.rounds else 0.0
+        )
 
     @property
     def cov(self) -> float:
@@ -326,30 +355,40 @@ class Ratio:
 
     def __str__(self) -> str:
         star = "" if self.significant else "  (consistent with no difference)"
-        return (f"{self.numerator}/{self.denominator} = {self.point:.3f}x "
-                f"[{self.lo:.3f}, {self.hi:.3f}], n={self.n}{star}")
+        return (
+            f"{self.numerator}/{self.denominator} = {self.point:.3f}x "
+            f"[{self.lo:.3f}, {self.hi:.3f}], n={self.n}{star}"
+        )
 
 
 def ratio(numerator: Measurement, denominator: Measurement) -> Ratio:
     """Paired ratio ``numerator / denominator`` with a 95% interval."""
     n = min(len(numerator.rounds), len(denominator.rounds))
-    pairs = [numerator.rounds[i] / denominator.rounds[i] for i in range(n)
-             if denominator.rounds[i] > 0]
+    pairs = [
+        numerator.rounds[i] / denominator.rounds[i]
+        for i in range(n)
+        if denominator.rounds[i] > 0
+    ]
     if not pairs:
-        return Ratio(numerator.name, denominator.name, math.nan, math.nan,
-                     math.nan, 0)
+        return Ratio(numerator.name, denominator.name, math.nan, math.nan, math.nan, 0)
     logs = [math.log(p) for p in pairs]
     point = math.exp(statistics.median(logs))
     hw = _half_width(logs)
     if not math.isfinite(hw):
-        return Ratio(numerator.name, denominator.name, point, 0.0, math.inf,
-                     len(pairs))
-    return Ratio(numerator.name, denominator.name, point,
-                 point * math.exp(-hw), point * math.exp(hw), len(pairs))
+        return Ratio(numerator.name, denominator.name, point, 0.0, math.inf, len(pairs))
+    return Ratio(
+        numerator.name,
+        denominator.name,
+        point,
+        point * math.exp(-hw),
+        point * math.exp(hw),
+        len(pairs),
+    )
 
 
-def _time_block(fn: Callable[[], object], iters: int,
-                group: int = 1) -> tuple[float, float]:
+def _time_block(
+    fn: Callable[[], object], iters: int, group: int = 1
+) -> tuple[float, float]:
     """Return ``(median ms per call, stall ratio)`` for ``iters`` calls.
 
     Events rather than the wall clock: the launch is asynchronous, so a wall
@@ -397,8 +436,9 @@ def _blocked_events(fn: Callable[[], object], iters: int, group: int) -> list:
     return marks
 
 
-def _time_block_full(fn: Callable[[], object], iters: int,
-                     group: int) -> tuple[float, float, float]:
+def _time_block_full(
+    fn: Callable[[], object], iters: int, group: int
+) -> tuple[float, float, float]:
     """``(median, stall ratio, first sample)`` -- the first is the cold one."""
     marks = _blocked_events(fn, iters, group)
     n = len(marks) - 1
@@ -459,8 +499,9 @@ _EVENT_INTERVAL_MS = 0.00285
 _GROUP_TRIGGER = 2.0
 
 
-def _measure_tax(fn: Callable[[], object], iters: int, group: int = 1,
-                 reps: int = 5) -> float:
+def _measure_tax(
+    fn: Callable[[], object], iters: int, group: int = 1, reps: int = 5
+) -> float:
     """Per-call cost of the event instrument: events minus an event-free bracket.
 
     Measured as a *paired* difference -- ev, br, ev, br, ... -- rather than as a
@@ -477,10 +518,18 @@ def _measure_tax(fn: Callable[[], object], iters: int, group: int = 1,
     return statistics.median(diffs)
 
 
-def _probe(fn: Callable[[], object], *, pinned_warmup: int | None,
-           warmup_s: float, warmup_min: int, warmup_max: int,
-           warmup_hard_s: float, block_ms: float, max_iters: int,
-           need_duration: bool) -> tuple[float, int]:
+def _probe(
+    fn: Callable[[], object],
+    *,
+    pinned_warmup: int | None,
+    warmup_s: float,
+    warmup_min: int,
+    warmup_max: int,
+    warmup_hard_s: float,
+    block_ms: float,
+    max_iters: int,
+    need_duration: bool,
+) -> tuple[float, int]:
     """Warm one variant and return ``(per-call ms, warmup calls issued)``.
 
     The first call absorbs whatever one-off the variant has -- MIOpen's find is
@@ -530,12 +579,18 @@ def _probe(fn: Callable[[], object], *, pinned_warmup: int | None,
     return d, n + 2
 
 
-def per_call_ms(fn: Callable[[], object], *, warmup_s: float = 0.05,
-                warmup_min: int = 5, warmup_max: int = 200,
-                warmup_hard_s: float = 2.0,
-                block_ms: float = _BLOCK_TARGET_MS,
-                max_iters: int = _MAX_ITERS,
-                settle_s: float = 0.25, settle_calls: int = 5) -> float:
+def per_call_ms(
+    fn: Callable[[], object],
+    *,
+    warmup_s: float = 0.05,
+    warmup_min: int = 5,
+    warmup_max: int = 200,
+    warmup_hard_s: float = 2.0,
+    block_ms: float = _BLOCK_TARGET_MS,
+    max_iters: int = _MAX_ITERS,
+    settle_s: float = 0.25,
+    settle_calls: int = 5,
+) -> float:
     """One warmed, event-free estimate of a callable's per-call time.
 
     The same probe :func:`interleaved` runs internally, exposed because a caller
@@ -562,14 +617,22 @@ def per_call_ms(fn: Callable[[], object], *, warmup_s: float = 0.05,
         torch.cuda.synchronize()
         if time.perf_counter() - t0 > settle_s:
             break
-    return _probe(fn, pinned_warmup=None, warmup_s=warmup_s,
-                  warmup_min=warmup_min, warmup_max=warmup_max,
-                  warmup_hard_s=warmup_hard_s, block_ms=block_ms,
-                  max_iters=max_iters, need_duration=True)[0]
+    return _probe(
+        fn,
+        pinned_warmup=None,
+        warmup_s=warmup_s,
+        warmup_min=warmup_min,
+        warmup_max=warmup_max,
+        warmup_hard_s=warmup_hard_s,
+        block_ms=block_ms,
+        max_iters=max_iters,
+        need_duration=True,
+    )[0]
 
 
-def _common_group(durations: Sequence[float], *, tax_budget: float,
-                  max_iters: int) -> int:
+def _common_group(
+    durations: Sequence[float], *, tax_budget: float, max_iters: int
+) -> int:
     """One event-interval width for **every** arm of a comparison.
 
     Two things are load-bearing here and both were bought with a wrong answer.
@@ -777,8 +840,7 @@ class Captured:
         self.graph.replay()
 
 
-def capture(fn: Callable[[], object], chunk: int = 1, *,
-            warmup: int = 3) -> Captured:
+def capture(fn: Callable[[], object], chunk: int = 1, *, warmup: int = 3) -> Captured:
     """Put ``chunk`` calls of ``fn`` in a CUDA graph, or raise :class:`CaptureError`.
 
     Everything -- the warmup and the capture -- runs on :func:`capture_stream`,
@@ -825,9 +887,13 @@ def capture(fn: Callable[[], object], chunk: int = 1, *,
     return Captured(g, chunk)
 
 
-def common_chunk(durations: Sequence[float], *, cost_ms: float = _REPLAY_COST_MS,
-                 budget: float = _REPLAY_BUDGET,
-                 max_chunk: int = _MAX_CHUNK) -> int:
+def common_chunk(
+    durations: Sequence[float],
+    *,
+    cost_ms: float = _REPLAY_COST_MS,
+    budget: float = _REPLAY_BUDGET,
+    max_chunk: int = _MAX_CHUNK,
+) -> int:
     """Calls per graph, for **every** arm of a comparison.
 
     Same shape and same reasoning as :func:`_common_group`, one level up: a
@@ -846,8 +912,9 @@ def common_chunk(durations: Sequence[float], *, cost_ms: float = _REPLAY_COST_MS
     return max(1, min(max_chunk, 1 << math.ceil(math.log2(need))))
 
 
-def graph_is_worthwhile(durations: Sequence[float],
-                        max_ms: float = _GRAPH_MAX_MS) -> bool:
+def graph_is_worthwhile(
+    durations: Sequence[float], max_ms: float = _GRAPH_MAX_MS
+) -> bool:
     """Is the host launch cost big enough to be worth capturing away?
 
     Above :data:`_GRAPH_MAX_MS` the measured worst-case host launch cost
@@ -868,8 +935,9 @@ def time_callable(
     **kwargs,
 ) -> Measurement:
     """Time a single callable.  Prefer :func:`interleaved` for comparisons."""
-    return interleaved({"fn": fn}, warmup=warmup, iters=iters, rounds=rounds,
-                       flush=flush, **kwargs)["fn"]
+    return interleaved(
+        {"fn": fn}, warmup=warmup, iters=iters, rounds=rounds, flush=flush, **kwargs
+    )["fn"]
 
 
 def interleaved(
@@ -943,10 +1011,15 @@ def interleaved(
     need_duration = iters is None and not flush
     probes = {
         name: _probe(
-            variants[name], pinned_warmup=warmup, warmup_s=warmup_s,
-            warmup_min=warmup_min, warmup_max=warmup_max,
-            warmup_hard_s=warmup_hard_s, block_ms=block_ms,
-            max_iters=max_iters, need_duration=need_duration,
+            variants[name],
+            pinned_warmup=warmup,
+            warmup_s=warmup_s,
+            warmup_min=warmup_min,
+            warmup_max=warmup_max,
+            warmup_hard_s=warmup_hard_s,
+            block_ms=block_ms,
+            max_iters=max_iters,
+            need_duration=need_duration,
         )
         for name in names
     }
@@ -959,10 +1032,13 @@ def interleaved(
         group = 1
         sizes = {name: iters for name in names}
     else:
-        group = _common_group([probes[n][0] for n in names],
-                              tax_budget=tax_budget, max_iters=max_iters)
-        sizes = {name: _size_block(probes[name][0], group, block_ms, max_iters)
-                 for name in names}
+        group = _common_group(
+            [probes[n][0] for n in names], tax_budget=tax_budget, max_iters=max_iters
+        )
+        sizes = {
+            name: _size_block(probes[name][0], group, block_ms, max_iters)
+            for name in names
+        }
     plans: dict[str, Plan] = {}
     for name in names:
         d, warmed = probes[name]
@@ -987,8 +1063,9 @@ def interleaved(
         for name in order:
             if flush:
                 flush_caches()
-            ms, stall, first = _time_block_full(variants[name], plans[name].iters,
-                                                plans[name].group)
+            ms, stall, first = _time_block_full(
+                variants[name], plans[name].iters, plans[name].group
+            )
             times[name].append(ms)
             stalls[name].append(stall)
             firsts[name].append(first)
@@ -1018,10 +1095,16 @@ def interleaved(
     balanced = len(names) < 2 or (r % block) == 0
     return {
         name: Measurement(
-            name, tuple(times[name]), tuple(stalls[name]),
-            iters=plans[name].iters, group=plans[name].group,
-            firsts=tuple(firsts[name]), tax_ms=plans[name].tax_ms,
-            stop=stop, balanced=balanced, seconds=seconds,
+            name,
+            tuple(times[name]),
+            tuple(stalls[name]),
+            iters=plans[name].iters,
+            group=plans[name].group,
+            firsts=tuple(firsts[name]),
+            tax_ms=plans[name].tax_ms,
+            stop=stop,
+            balanced=balanced,
+            seconds=seconds,
         )
         for name in names
     }
@@ -1054,11 +1137,13 @@ def format_table(
         for i, h in enumerate(headers)
     ]
     aligns = aligns or "l" * len(headers)
+
     def fmt(cells: Sequence[str]) -> str:
         return "  ".join(
             c.rjust(w) if a == "r" else c.ljust(w)
             for c, w, a in zip(cells, widths, aligns)
         )
+
     lines = [fmt(headers), "  ".join("-" * w for w in widths)]
     lines += [fmt(r) for r in rows]
     return "\n".join(lines)
