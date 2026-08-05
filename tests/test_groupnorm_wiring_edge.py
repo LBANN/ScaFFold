@@ -14,10 +14,10 @@
 
 """Edge cases of the GroupNorm *wiring* (``FastGroupNorm``'s three-rung ladder).
 
-Written as an adversarial review of commit ``ca58664``; ``tests/test_groupnorm.py``
+Written as an adversarial review of the wiring: ``tests/test_groupnorm.py``
 covers the happy paths and the routing predicates, this file covers the places
 where the ladder, the latches and the absorbed ReLU interact with the rest of
-torch.  See ``work/gn-dctensor/WIRING_REVIEW.md`` for the full write-up.
+torch.
 
 The review left ten of these as ``xfail(strict=True)``, one per defect, each
 asserting the behaviour the module *should* have.  All ten are fixed and the

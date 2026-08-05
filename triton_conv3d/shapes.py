@@ -13,10 +13,9 @@ Three sources:
 ``census_corpus()``
     Every convolution an **instrumented ScaFFold training step actually
     issued**, at the four configurations the current benchmark harness runs.
-    Recorded by wrapping the entry points inside a running step
-    (``work/triton-conv/bin/conv_census.py``), so it is a measurement rather
-    than a model.  It carries no MIOpen timings; it exists to say what the
-    shapes *are*.
+    Recorded by wrapping the entry points inside a running step, so it is a
+    measurement rather than a model.  It carries no MIOpen timings; it exists
+    to say what the shapes *are*.
 
 ``edge_cases()``
     Synthetic problems chosen to break addressing, masking and tiling
@@ -101,7 +100,7 @@ INT32_MAX = 2**31 - 1
 #: ``global_load_dwordx4`` -- from ``arg.untyped_storage().size() <= 2**31 - 1``.
 #: That check reads the whole *storage* and it counts *bytes*, so it is a
 #: different question from whether an element index overflows int32, and the two
-#: answers differ by ``elem_bytes`` (``PLAN.md`` §3.5).
+#: answers differ by ``elem_bytes``.
 BUFFER_OP_MAX_BYTES = 2**31 - 1
 
 
@@ -263,11 +262,10 @@ class ConvProblem:
           ``padding = (0, 1, 1)`` at ``(D_loc + 2, H, W)``.
 
         **Every production convolution with ``k > 1`` is therefore padded, at
-        every configuration.**  Measured inside running steps at all four
-        (``work/triton-conv/review/SHAPE_AUDIT.md``), not inferred: 18 of the 19
-        distinct ordinary convolutions at scale 7 on one GPU arrive with
-        ``padding = (1, 1, 1)``, and the nineteenth is the ``k = 1`` head, which
-        has no padding to begin with.
+        every configuration.**  Measured inside running steps at all four, not
+        inferred: 18 of the 19 distinct ordinary convolutions at scale 7 on
+        one GPU arrive with ``padding = (1, 1, 1)``, and the nineteenth is the
+        ``k = 1`` head, which has no padding to begin with.
 
         Dropping the zero slabs on the unsplit axes is a deliberate and
         separately verified decision -- ``cat(zeros, x, zeros)`` at
@@ -489,7 +487,8 @@ def scaffold_corpus() -> tuple[ConvProblem, ...]:
     """Every distinct convolution in the three profiled ScaFFold configurations.
 
     Ordered by measured cost, so truncating the list keeps the problems that
-    matter.  Regenerate with ``work/triton-conv/make_corpus.py``.
+    matter.  Loaded from ``scaffold_corpus.json``, which is generated from the
+    profiled shape dumps rather than written by hand.
     """
     raw = json.loads(_CORPUS_PATH.read_text())
     problems = []
@@ -559,8 +558,8 @@ def production_corpus() -> tuple[ConvProblem, ...]:
 def census_corpus() -> tuple[ConvProblem, ...]:
     """Every convolution an instrumented ScaFFold step actually issued.
 
-    Recorded by ``work/triton-conv/bin/conv_census.py``, which wraps
-    ``FastConv3d``/``FastConvTranspose3d`` and the six kernel entry points and
+    Recorded by a census harness that wraps ``FastConv3d`` /
+    ``FastConvTranspose3d`` and the six kernel entry points and
     runs three real training steps at each of the four configurations the
     benchmark harness uses (A = scale 7 / 1 GPU, B = scale 8 / 1 GPU, C = scale
     8 / 2 GPUs, D = scale 8 / 4 GPUs).  Every problem here is in
@@ -574,9 +573,8 @@ def census_corpus() -> tuple[ConvProblem, ...]:
       GPU), and a *network depth* the profiled corpus does not -- the shape
       dumps behind :func:`scaffold_corpus` were taken at
       ``unet_bottleneck_dim = 4`` at scale 8, giving a four-layer model topping
-      out at 1024 channels, while every step-level measurement in
-      ``work/triton-conv/minibatch/`` runs the shipped default of 3, i.e. a
-      five-layer model topping out at 2048;
+      out at 1024 channels, while every step-level measurement in this project
+      runs the shipped default of 3, i.e. a five-layer model topping out at 2048;
     * it carries no ``measured`` MIOpen data and no cost ordering, so it is not
       a priority list and must not be used as one;
     * and :func:`scaffold_corpus`'s ordering, indices and contents are the key

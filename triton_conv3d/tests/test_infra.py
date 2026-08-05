@@ -143,8 +143,7 @@ def test_the_2gib_cliff_is_a_byte_problem_and_not_an_index_problem():
     That shape holds 1.11e9 elements -- about half of int32's range -- so an
     element-counting predicate says nothing about it, and ``needs_int64``
     used to be read as though it did.  What it exceeds is the *byte* limit on
-    the whole storage, which is what decides buffer-op eligibility
-    (``PLAN.md`` §3.5).
+    the whole storage, which is what decides buffer-op eligibility.
     """
     cliff = next(p.halo_variant for p in scaffold_corpus()
                  if p.halo_variant.label == "conv 128->64 k3x3x3 @ 130x258x258")
@@ -662,12 +661,12 @@ def test_spread_is_a_range_statistic_and_the_interval_is_not():
 
     ``(max - min) / median`` is a *range*, and the expected range of ``n``
     samples grows like ``d2(n)`` even on a perfectly stationary device.
-    Measured on this node with one kernel held constant for 14 minutes
-    (47,686 blocks, ``work/triton-conv/bin/drift_probe.py``) the median of
-    this statistic runs 0.23% at 2 rounds, 0.63% at 6, 0.98% at 20 and 2.70% at
-    100 -- all of it arithmetic, none of it the machine.  Since ``rounds`` is
-    now chosen per cell, two cells' spreads are not comparable to each other at
-    all, and the replacement has to be an interval.
+    Measured on this node with one kernel held constant for 14 minutes (47,686
+    blocks) the median of this statistic runs 0.23% at 2 rounds, 0.63% at 6,
+    0.98% at 20 and 2.70% at 100 -- all of it arithmetic, none of it the
+    machine.  Since ``rounds`` is now chosen per cell, two cells' spreads are
+    not comparable to each other at all, and the replacement has to be an
+    interval.
 
     Pinned on a fixed draw so it tests the formulae, not the GPU.
     """
@@ -944,9 +943,9 @@ def test_measure_one_refuses_to_report_a_heuristic_time():
 #: Corpus cells the harness is anchored to.  Chosen because their isolated and
 #: profiled shapes genuinely match: the halo'd input is 281 MiB, well under the
 #: 2 GiB threshold above which MIOpen abandons its tuned solvers for the naive
-#: non-packed ones and the isolated and profiled numbers legitimately diverge
-#: (``work/nonpacked-conv/RESULTS.md``).  The profiled time is read from the
-#: corpus rather than copied here so there is one source of truth for it.
+#: non-packed ones and the isolated and profiled numbers legitimately diverge.
+#: The profiled time is read from the corpus rather than copied here so there
+#: is one source of truth for it.
 ANCHOR_CELLS = ((6, "fwd"), (6, "bwd-data"))
 
 
@@ -1065,8 +1064,8 @@ def test_sporadic_host_stall_is_rejected_from_the_median_and_flagged():
 # That is a decision about what to measure, and it has exactly one way to go
 # wrong -- taking the launcher out of one arm and not the other, which at these
 # sizes is worth up to 1.4x in the direction that flatters us.  These tests are
-# the guard on that, and each of them is verified by breaking what it tests
-# (``work/triton-conv/bin/mutate_bench.py``).
+# the guard on that, and each of them was verified by mutation -- breaking the
+# thing it tests and confirming it fails.
 
 
 def test_the_graph_chunk_is_one_ruler_for_every_arm():
@@ -1077,8 +1076,8 @@ def test_the_graph_chunk_is_one_ruler_for_every_arm():
     of 1, 2, 4, 8, 16 and 32 calls on four real arms.  At ``chunk = 1`` that is
     45% of a 0.028 ms kernel and only 19% of a 0.068 ms one, so a per-arm chunk
     would be a per-arm instrument: exactly the failure ``_common_group`` already
-    documents, one level up (H10, where two byte-identical arms picked different
-    event groups and read 4% apart).
+    documents, one level up, where two byte-identical arms picked different
+    event groups and read 4% apart.
 
     Hence: the rule reads only ``min(durations)``, so two arms of the same call
     can never be given different rulers.
@@ -1147,8 +1146,7 @@ def test_a_captured_ratio_of_two_identical_arms_covers_one():
 
     Two arms doing byte-identical work have a true ratio of exactly 1.000, so
     anything else is the instrument.  Measured over 12 replications on
-    ``convT 1024->512 @ 8^3`` through the shipped decision path
-    (``work/triton-conv/bin/launcher_symmetry.py --only null``): under
+    ``convT 1024->512 @ 8^3`` through the shipped decision path: under
     ``exclude`` the median is 0.9996, the range 0.9982-1.0021, and **12 of 12**
     intervals cover 1.000.
 
@@ -1162,7 +1160,7 @@ def test_a_captured_ratio_of_two_identical_arms_covers_one():
     # 512, not a "nicer" 256 or 384: on this torch/ROCm build a bf16
     # ``a @ a`` is **~600 ms** at 128, 192, 256, 320, 384, 448, 640 and
     # 768, and 0.019 ms at 512 and 1024.  That is the ``torch.mm`` bf16
-    # pathology ``STATUS.md`` §7 already owes upstream, measured here from
+    # pathology this project already owes upstream, measured here from
     # a second direction; a test that picked one of the slow sizes would
     # be timing a 600 ms kernel and would correctly be told it does not
     # need a graph.
@@ -1177,9 +1175,9 @@ def test_a_captured_ratio_of_two_identical_arms_covers_one():
     # which is narrower than the between-race scatter of the same pair (sd
     # 0.13%, range 0.9982-1.0021 over 12 replications) -- so an interval that
     # misses 1 by 0.2% here is the same residual the sequential protocol has
-    # (0.32%, HARNESS_RIGOR Part 1), not a biased instrument.  What a biased
-    # instrument looks like is 4% (H10, per-arm event groups) or 45% (a one-call
-    # graph), and 1% catches both.  The coverage claim is the 12-replication
+    # (0.32%), not a biased instrument.  What a biased instrument looks like
+    # is 4% (per-arm event groups) or 45% (a one-call graph), and 1% catches
+    # both.  The coverage claim is the 12-replication
     # experiment, where 12 of 12 intervals contained 1.
     assert abs(r.point - 1.0) < 0.01, (
         f"two byte-identical arms read {r} under the kernel-time definition"
@@ -1210,7 +1208,7 @@ def test_an_inflated_launcher_does_not_move_the_reported_kernel_time():
     # 512, not a "nicer" 256 or 384: on this torch/ROCm build a bf16
     # ``a @ a`` is **~600 ms** at 128, 192, 256, 320, 384, 448, 640 and
     # 768, and 0.019 ms at 512 and 1024.  That is the ``torch.mm`` bf16
-    # pathology ``STATUS.md`` §7 already owes upstream, measured here from
+    # pathology this project already owes upstream, measured here from
     # a second direction; a test that picked one of the slow sizes would
     # be timing a 600 ms kernel and would correctly be told it does not
     # need a graph.
@@ -1264,7 +1262,7 @@ def test_the_replay_cost_is_amortized_by_the_chunk():
     # 512, not a "nicer" 256 or 384: on this torch/ROCm build a bf16
     # ``a @ a`` is **~600 ms** at 128, 192, 256, 320, 384, 448, 640 and
     # 768, and 0.019 ms at 512 and 1024.  That is the ``torch.mm`` bf16
-    # pathology ``STATUS.md`` §7 already owes upstream, measured here from
+    # pathology this project already owes upstream, measured here from
     # a second direction; a test that picked one of the slow sizes would
     # be timing a 600 ms kernel and would correctly be told it does not
     # need a graph.
@@ -1304,7 +1302,7 @@ def test_a_capture_failure_takes_the_whole_cell_back_to_eager():
     # 512, not a "nicer" 256 or 384: on this torch/ROCm build a bf16
     # ``a @ a`` is **~600 ms** at 128, 192, 256, 320, 384, 448, 640 and
     # 768, and 0.019 ms at 512 and 1024.  That is the ``torch.mm`` bf16
-    # pathology ``STATUS.md`` §7 already owes upstream, measured here from
+    # pathology this project already owes upstream, measured here from
     # a second direction; a test that picked one of the slow sizes would
     # be timing a 600 ms kernel and would correctly be told it does not
     # need a graph.
@@ -1569,9 +1567,9 @@ def test_a_control_free_row_omits_the_control_rather_than_zeroing_it():
     And a case built with ``control=False`` must not construct the control
     either.  For a backward direction the control is a real ``F.conv3d`` forward
     graph, and *running* it once is where MIOpen's find is paid -- 92-174 s per
-    cell on this corpus (``work/triton-conv/review/HARNESS_SPEED.md`` 1).
-    Dropping the arm from the timing while still building it would save the
-    timing and none of the cost, which is the whole point of the flag.
+    cell on this corpus.  Dropping the arm from the timing while still building
+    it would save the timing and none of the cost, which is the whole point of
+    the flag.
     """
     from triton_conv3d.bench.conv_bench import _build, measure_problem
 

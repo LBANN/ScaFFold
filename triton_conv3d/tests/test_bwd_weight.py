@@ -8,8 +8,8 @@ Three things are tested here that the other two directions do not have:
   correctness lives in :func:`split_count` agreeing with what the kernel and the
   reduction pass assume about each other, so the tests pin the arithmetic (every
   voxel in exactly one split) as well as the answer;
-* **determinism**, stated as the claim PLAN.md 3.4 makes and tested the way that
-  claim is worded: bitwise identical run to run *and process to process*, for the
+* **determinism**, tested the way the package's determinism claim is worded:
+  bitwise identical run to run *and process to process*, for the
   same input, dtype, shape, device and tuning config.  There are three tests --
   in-process repetition, three separate interpreters, and a negative control on
   the atomic path -- because a determinism test that cannot fail is the most
@@ -704,8 +704,7 @@ def test_a_tuned_tap_block_row_survives_the_padding():
     the assertion with a measurement.  That is what happened.  Raced on the
     padded production form of all 18 affected cells, the tuned row against the
     config the decline produced, one interleaved block per cell with 95%
-    intervals (``work/triton-conv/review/OPTIMIZATION_ROUND3.md`` §1): the
-    tuned row wins **18 of 18**, geometric mean **1.946x**, range
+    intervals: the tuned row wins **18 of 18**, geometric mean **1.946x**, range
     1.137x-5.336x, worst cell 7.9505 ms declined against 1.4910 ms with the
     row.  The heuristic's half was raced separately on the six pairs that reach
     it and widening wins **6 of 6**, 1.263x-2.084x.

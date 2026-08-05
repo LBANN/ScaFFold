@@ -456,10 +456,10 @@ def transposed_tune_key(dtype: torch.dtype, cin: int, cout: int,
 
 
 #: Measured winners for the transposed forward, keyed by ``(dtype, Cin, Cout,
-#: kernel)``.  Source: ``work/triton-conv/m5_fwd.json`` -- the four
-#: ``ConvTranspose3d`` channel pairs the model contains, swept over the tile and
-#: ``TAP_BLOCK`` grid of :func:`candidate_transposed_configs` and then raced
-#: against MIOpen.  A miss falls back to :func:`default_transposed_config`.
+#: kernel)``: the four ``ConvTranspose3d`` channel pairs the model contains,
+#: swept over the tile and ``TAP_BLOCK`` grid of
+#: :func:`candidate_transposed_configs` and then raced against MIOpen.  A miss
+#: falls back to :func:`default_transposed_config`.
 #:
 #: Keyed on the channel widths and not the volume, as the gather kernel's table
 #: is -- and with the same caveat, which this project has now paid for twice: a
@@ -468,8 +468,7 @@ def transposed_tune_key(dtype: torch.dtype, cin: int, cout: int,
 #: measured winning at every volume the pair occurs at.  Each pair below occurs
 #: at three volumes (one per profiled configuration) and the entry named won all
 #: three; the speedups they produce differ by up to 2.3x between those volumes,
-#: are recorded per volume in ``work/triton-conv/m5_shipped_*.json``, and are
-#: never averaged.
+#: and were therefore recorded per volume rather than averaged.
 #:
 #: **Two of the four pairs are deliberately absent.**  ``512 -> 256`` and
 #: ``1024 -> 512`` were swept just as thoroughly and

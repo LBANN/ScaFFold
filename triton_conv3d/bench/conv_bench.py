@@ -7,27 +7,22 @@ which of its gradients (or none).  ``--operator all --direction all`` measures
 every cell in the project under one methodology, in one process, from one
 command.
 
-The transposed benchmarks used to live in a separate driver
-(``work/triton-conv/bin/m5_convT_bench.py``, deleted at this commit), on the
-argument that ``--direction`` selects between three *directions of one operator*
-while the transposed convolution is a *different* operator, and that folding it
-in would make ``_build`` branch on ``problem.transposed`` in every arm to run the
-same code.  The argument was right about the failure and wrong about the
-factoring.  Operator and direction are **two axes of one table**, not two values
-on one switch: :data:`_OPERATORS` maps ``(operator, direction)`` to a builder,
-and each of the six builders is a separate function that names its own operands,
-its own control, its own candidate configs and its own reference.  ``_build`` is
-a lookup, so nothing branches on ``problem.transposed`` anywhere, and the four
+Operator and direction are **two axes of one table**, not two values on one
+switch: :data:`_OPERATORS` maps ``(operator, direction)`` to a builder, and each
+of the six builders is a separate function that names its own operands, its own
+control, its own candidate configs and its own reference.  ``_build`` is a
+lookup, so nothing branches on ``problem.transposed`` anywhere, and the four
 things that *are* per-operator rather than per-direction -- the shape form, the
 problem ordering, the config type, whether a direction is sweepable -- sit on
 :class:`_Op` where a reader can see all four at once.
 
-What that bought, immediately: ``m5_convT_bench``'s transposed backward
-directions dropped the ``config=`` argument on the floor, because the only config
-object it had was the transposed *forward*'s, and passing that to a direction
-served by ``conv3d_forward`` silently benchmarks a tile nothing would select.
-With a builder per cell each one names the config type its own entry point
-resolves, and both transposed backward directions became sweepable for free.
+That factoring is what makes the transposed backward directions sweepable at
+all.  When the transposed benchmarks lived in a driver of their own, the only
+config object that driver had was the transposed *forward*'s, and passing it to
+a direction served by ``conv3d_forward`` silently benchmarks a tile nothing
+would select -- so those directions dropped ``config=`` on the floor instead.
+With a builder per cell, each one names the config type its own entry point
+resolves and the mistake is not expressible.
 
 Five things this driver is careful about, each because getting it wrong has
 already produced a wrong answer once in this project:
@@ -70,12 +65,11 @@ would fabricate a speedup.
 MIOpen arm and measures the Triton kernels alone.  It is not a corner-cutting
 option, it is where essentially all of the wall clock is: ``cudnn.benchmark =
 True`` puts MIOpen on the Find path, whose disk record cannot be replayed in a
-fresh process (``review/MIOPEN_CACHE.md`` §2), so **every** cell pays a find --
-measured on this node at 92-174 s per cell against 0.3-1.2 s for the Triton
-compile, the graph capture, the calibration and the timed rounds put together
-(``review/HARNESS_SPEED.md`` §1).  A Triton-only row therefore carries no
-``miopen_*`` and no ``speedup`` key at all -- an absent measurement stays
-absent -- and ``--check``, whose reference *is* MIOpen's answer, is refused with
+fresh process, so **every** cell pays a find -- measured on this node at
+92-174 s per cell against 0.3-1.2 s for the Triton compile, the graph capture,
+the calibration and the timed rounds put together.  A Triton-only row therefore
+carries no ``miopen_*`` and no ``speedup`` key at all -- an absent measurement
+stays absent -- and ``--check``, whose reference *is* MIOpen's answer, is refused with
 it.
 
 **The control.**  The MIOpen side of a backward direction is a real forward
@@ -218,8 +212,8 @@ class _Case:
     #: always wanted: for a *backward* direction the control is a real forward
     #: graph, and running it once costs MIOpen's find -- measured at 92-174 s
     #: per cell on this node's corpus, against 0.3-1.2 s for everything else the
-    #: cell does (``work/triton-conv/review/HARNESS_SPEED.md`` §1).  A
-    #: Triton-only capture that still built the control would pay all of it.
+    #: cell does.  A Triton-only capture that still built the control would pay
+    #: all of it.
     miopen: Callable[[], object] | None
     #: ``Callable[[], object]`` -- the hoistable weight prep, or ``None`` where
     #: the direction has none.  **All six cells are now ``None``**: the
@@ -236,8 +230,8 @@ class _Case:
     #: The config **this cell's entry point would resolve on its own**, computed
     #: once so that ``--shipped`` measures the shipped kernel without also
     #: measuring the shipped table lookup.  The two are not the same number: the
-    #: lookup is 0.0164 ms, 39% of the transposed forward kernel
-    #: (``HARNESS_RIGOR.md`` H13).  ``test_the_shipped_config_is_what_the_entry
+    #: lookup is 0.0164 ms, 39% of the transposed forward kernel.
+    #: ``test_the_shipped_config_is_what_the_entry
     #: _point_resolves`` pins these six against the entry points.
     shipped_config: Callable[[], ConvConfig | None]
     #: ``Callable[[], tuple[Tensor, Tensor]]`` -- ``(ours, MIOpen's)`` on this
@@ -737,9 +731,8 @@ def _build(problem: ConvProblem, direction: Direction, device: str = "cuda",
     launcher and, for a backward direction, no autograd graph -- which is the
     expensive half.  Building the control does not merely cost the arm's timing;
     running it once costs MIOpen's *find*, which under ``cudnn.benchmark = True``
-    cannot be replayed from disk (``review/MIOPEN_CACHE.md`` §2) and which
-    measures **92-174 s per cell** on this corpus against 0.3-1.2 s for
-    everything else in the cell.  A Triton-only capture is therefore two orders
+    cannot be replayed from disk and which measures **92-174 s per cell** on
+    this corpus against 0.3-1.2 s for everything else in the cell.  A Triton-only capture is therefore two orders
     of magnitude cheaper than a comparison, and that is entirely MIOpen's find.
     """
     op = _OPERATORS[operator or operator_of(problem)]
@@ -759,12 +752,11 @@ def _build(problem: ConvProblem, direction: Direction, device: str = "cuda",
 class _Region:
     """The decision about what every arm of one cell is timed with.
 
-    One object for the whole cell, never one per arm.  ``HARNESS_RIGOR.md`` H10
-    is the reason: a per-arm instrument biases a ratio *even when both arms are
-    individually right*, and the version of that mistake available here --
-    hoisting Triton's config lookup out while leaving PyTorch's dispatch inside
-    the MIOpen arm -- flatters us by up to 1.4x on exactly the sub-0.15 ms cells
-    where it is hardest to see.
+    One object for the whole cell, never one per arm.  A per-arm instrument
+    biases a ratio *even when both arms are individually right*, and the version
+    of that mistake available here -- hoisting Triton's config lookup out while
+    leaving PyTorch's dispatch inside the MIOpen arm -- flatters us by up to
+    1.4x on exactly the sub-0.15 ms cells where it is hardest to see.
     """
 
     #: ``"kernel"`` (both arms replayed from a graph) or ``"call"`` (both arms
@@ -792,8 +784,7 @@ def _timed_region(variants: Mapping[str, Callable[[], object]],
     issues them, back to back on one stream.
 
     That boundary is the same on both sides only because the *whole comparison*
-    moves together.  Measured on ``convT 1024->512 @ 8^3``, per call
-    (``work/triton-conv/bin/launcher_symmetry.py --only census-small``):
+    moves together.  Measured on ``convT 1024->512 @ 8^3``, per call:
 
     ============================  ========  =======  ============  ===============
     arm                           eager     kernel   host launch   speedup in->out
@@ -910,9 +901,9 @@ def measure_problem(problem: ConvProblem, *, direction: Direction = "fwd",
     absent number is absent, not zero -- and says so in ``control``.  Everything
     else is unchanged: the same CUDA-graph region, the same adaptive stopping,
     the same 95% interval, the same ``stop`` reason.  What it buys is the whole
-    of MIOpen's find (§1 of ``review/HARNESS_SPEED.md``: 98.3% of a three-cell
-    problem's wall clock on this node); what it costs is the comparison, so use
-    it when the baseline is the deliverable and the ratio is not.
+    of MIOpen's find -- 98.3% of a three-cell problem's wall clock on this node;
+    what it costs is the comparison, so use it when the baseline is the
+    deliverable and the ratio is not.
 
     ``shipped`` skips the sweep and times the config **this cell's entry point
     would resolve on its own** -- the tuned table plus the heuristic fallback --
@@ -1082,9 +1073,9 @@ def measure_problem(problem: ConvProblem, *, direction: Direction = "fwd",
         # Not a measurement, and it shows: where the launcher is already
         # negligible -- above about 0.3 ms, where an event-free bracket of a
         # host-paced loop already reaches kernel throughput -- this comes out at
-        # a few microseconds of either sign.  The measured version, with
-        # intervals and both policies run as full races, is
-        # ``work/triton-conv/bin/launcher_symmetry.py --only census``.
+        # a few microseconds of either sign.  Taking it seriously means running
+        # both launcher policies as full races with intervals, which is a
+        # separate experiment and not this row.
         for arm in ("triton", "miopen"):
             if f"{arm}_ms" not in row:
                 continue
@@ -1195,8 +1186,7 @@ def main() -> None:
                          "control is what makes a capture expensive -- MIOpen's "
                          "find cannot be replayed from disk under "
                          "cudnn.benchmark=True and costs 92-174 s per cell on "
-                         "this corpus, which is 98% of a cell's wall clock "
-                         "(work/triton-conv/review/HARNESS_SPEED.md)")
+                         "this corpus, which is 98% of a cell's wall clock")
     ap.add_argument("--corpus", default="scaffold",
                     choices=["scaffold", "census"],
                     help="which problem list --top/--problems index into. "

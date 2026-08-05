@@ -97,9 +97,8 @@ to within fp32 reduction-order noise, with:
 * **statistics** -- always accumulated in fp32, never in the input dtype.
 * **memory format** -- the output has the *input's* memory format.  This is the
   one deliberate difference from stock GroupNorm, which returns a contiguous
-  tensor for every input layout (measured, see the table in
-  ``work/gn-dctensor/triton/RESULTS.md``); preserving channels-last is the
-  entire point of the kernel.
+  tensor for every input layout; preserving channels-last is the entire point
+  of the kernel.
 * **autograd** -- ``d_input``, ``d_weight``, ``d_bias``; ``weight=None`` and/or
   ``bias=None`` supported.  **First order only**: the backward is itself a
   custom op with no autograd formula of its own, so a second
@@ -163,8 +162,8 @@ Two things fix it, both of them in ``GNConfig``: the elementwise grid is capped
 at ``elem_progs`` programs which then stride over the tiles (so the redundancy
 is bounded by the *grid*, not by the tile count), and ``nsplit_target`` is
 retuned per shape against that cap.  With both, the same shape is 1-2% *faster*
-than the unfused chain.  Do not change one without re-running the other; the
-coordinate-descent tuner is ``work/gn-dctensor/kernel-opt/tune.py``.
+than the unfused chain.  The two were tuned jointly by coordinate descent, so
+do not change one without re-running the other.
 
 Why not one launch per pass
 ---------------------------
@@ -182,8 +181,7 @@ ms/step at scale 8); and under CUDA-graph capture, where launch count is free,
 the ten small-shape sites are already only 1.05 ms of a 64.1 ms/step total, so
 the gain is zero.  Hand-rolled inter-workgroup synchronisation is not a good
 trade for 3% in a benchmark whose value depends on being trustworthy and
-reproducible.  The measurements are in
-``work/gn-dctensor/triton-small/RESULTS.md``.
+reproducible.
 
 Numerics: Welford, not ``E[x^2]-E[x]^2``
 ========================================
@@ -287,9 +285,9 @@ Layouts
   so a program must own one group and stream S, rather than owning all groups
   and streaming voxels -- i.e. a second family of four kernels.  The payoff is
   small: on contiguous input Inductor's compiled GroupNorm already reaches
-  89-92% of this device's measured streaming roofline (RESULTS.md 4) -- and the
-  table above confirms it, 66.4 ms/step against this kernel's 67.1 -- so a
-  native NCDHW kernel could win ~10% there, against the 6.4x it wins on
+  89-92% of this device's measured streaming roofline -- and the table above
+  confirms it, 66.4 ms/step against this kernel's 67.1 -- so a native NCDHW
+  kernel could win ~10% there, against the 6.4x it wins on
   channels-last input.  If a mixed-layout model ever makes that 10% matter, the
   place to add it is the strategy hook below.
 
@@ -339,8 +337,7 @@ Matching ``F.relu`` here is not pedantry: a diverging run whose forward comes
 back finite because the fused activation ate the NaN passes straight through
 ScaFFold's non-finite-loss abort and checkpoints a broken model.  ``+-Inf`` and
 ``-0.0`` are bit-identical under either spelling (``-0.0`` flushes to ``+0.0``,
-as ``F.relu`` does).  Cost: nil, measured -- see ``FastGroupNorm``'s tests and
-``work/gn-dctensor/wiring-fixes``.
+as ``F.relu`` does).  Cost: nil, measured -- see ``FastGroupNorm``'s tests.
 
 Composition
 ===========

@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: (Apache-2.0)
 """Timing that survives this machine -- and says how well it survived it.
 
-**What this node does.**  Measured on GPU 2 on 2026-08-03
-(``work/triton-conv/bin/drift_probe.py``: 47,686 consecutive 10-call blocks of
-``conv 64->64 k3 @ 130^3`` over 14 minutes, with ``rocm-smi`` sampled
-concurrently from a sibling process):
+**What this node does.**  Measured on GPU 2 on 2026-08-03 -- 47,686 consecutive
+10-call blocks of ``conv 64->64 k3 @ 130^3`` over 14 minutes, with ``rocm-smi``
+sampled concurrently from a sibling process:
 
 * steady-state dispersion is **CoV 0.56%**, IQR/median 0.39%, p99/p01 = 1.022;
 * the *sequential* protocol -- measure A for a while, then B -- simulated out of
@@ -20,8 +19,7 @@ concurrently from a sibling process):
 So the clock is not what threatens a comparison here, and neither is elapsed
 time between two measurements in one process.  What does threaten one is a
 **neighbour**: a foreign tenant on the device inflated three cells **2.6x**,
-with per-cell spreads 20-100x their quiet-device values
-(``work/triton-conv/BASELINE_NOTES.md``, "cause 3").  That is common-mode
+with per-cell spreads 20-100x their quiet-device values.  That is common-mode
 within a round -- every arm pays it at once -- so :func:`interleaved` survives it
 where a between-run comparison does not.  It costs nothing, so it stays.  It is
 not, however, a substitute for an error bar.
@@ -52,8 +50,7 @@ node, against kernels of 28-68 us, so an event-timed loop of ``fn()`` measures
 the launcher and the kernel together and cannot separate them.  :func:`capture`
 puts ``chunk`` back-to-back calls behind one CUDA graph, which contains the
 device work and none of the host work, so replaying it measures the kernel
-alone.  Measured, per call, on ``convT 1024->512 @ 8^3``
-(``work/triton-conv/bin/launcher_symmetry.py --only census-small``):
+alone.  Measured, per call, on ``convT 1024->512 @ 8^3``:
 
 =============================  =======  ========  =============
 arm                            eager    kernel    host launch
@@ -659,8 +656,7 @@ def _order(names: list[str], r: int) -> list[str]:
 
 #: Cost of one ``cudaGraphLaunch``, in ms per replay, measured on this device by
 #: fitting ``per_call(chunk) = kernel + cost / chunk`` to graphs of 1, 2, 4, 8,
-#: 16 and 32 calls at ``convT 1024->512 @ 8^3``
-#: (``work/triton-conv/bin/graph_probe2.py``):
+#: 16 and 32 calls at ``convT 1024->512 @ 8^3``:
 #:
 #: ===========================  ============
 #: arm                          fitted cost
@@ -674,8 +670,8 @@ def _order(names: list[str], r: int) -> list[str]:
 #: The constant below is the **worst** of those, not their mean, because the
 #: quantity that has to be bounded is the residual on whichever arm pays most --
 #: and because a per-arm estimate is exactly the mistake :func:`_common_group`
-#: exists to document (H10: two byte-identical arms picked different instruments
-#: and read 4% apart).  It is a property of the launcher, not of the workload.
+#: exists to document: two byte-identical arms picked different instruments and
+#: read 4% apart.  It is a property of the launcher, not of the workload.
 _REPLAY_COST_MS = 0.0128
 
 #: Fraction of the *shortest* arm's per-call time the residual replay cost is

@@ -31,8 +31,8 @@ session and half these tests would silently be re-asking it.  And the guard must
 be evaluated *once*, which is asserted as a call count on the seam rather than as
 a duration, because a timing assertion on a driver query measures the driver.
 
-Verified by mutation: ``work/triton-conv/bin/mutate_platform_guard.py`` breaks
-each property in turn and checks that the test named there notices.
+Every property here was verified by mutation: breaking it in the guard and
+checking that the test named alongside it notices.
 """
 
 from __future__ import annotations
@@ -390,9 +390,9 @@ def test_this_node_is_the_tuned_platform(caplog):
     """The accept path, against the real driver rather than a stub.
 
     Also the check that the constants have not drifted away from the machine
-    every measurement in ``work/triton-conv/`` was taken on -- and that the
-    suffix strip is load-bearing here rather than defensive, since the raw
-    string this device reports really does carry ``:sramecc+:xnack-``.
+    every measurement in this project was taken on -- and that the suffix strip
+    is load-bearing here rather than defensive, since the raw string this device
+    reports really does carry ``:sramecc+:xnack-``.
     """
     props = torch.cuda.get_device_properties(0)
     assert ":" in props.gcnArchName, props.gcnArchName

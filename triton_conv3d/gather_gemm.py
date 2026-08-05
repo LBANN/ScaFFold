@@ -66,9 +66,9 @@ each other over the eight hottest config-A sites, so the choice between them is
 not a performance question; the third is 4.8-9.0x slower if addressed in place,
 because neither tile axis is dense, and is therefore copied.
 
-Two designs that look better and measure worse, both raced per site
-(``work/triton-conv/review/wt/``): loading the tile coalesced and transposing
-it in registers (1.05-1.55x, the transpose is the cost); and holding the
+Two designs that look better and measure worse, both raced per site: loading the
+tile coalesced and transposing it in registers (1.05-1.55x, the transpose is the
+cost); and holding the
 parameter in RSCK order, which is 0.159 ms/step better in the kernels and
 **2.6 ms/step worse in the optimizer**, since the gradient this package produces
 is channels-last and the elementwise update would then be strided.
@@ -250,9 +250,9 @@ def _conv3d_fwd_kernel(
         # compiling it.
         #
         # Two alternatives were implemented and measured worse, both on the eight
-        # hot config-A sites (``work/triton-conv/review/wt/``): loading the tile
-        # coalesced along K and transposing it in registers into the
-        # ``(BLOCK_K, BLOCK_N)`` the dot wants costs 1.05-1.55x, and holding the
+        # hot config-A sites: loading the tile coalesced along K and
+        # transposing it in registers into the ``(BLOCK_K, BLOCK_N)`` the dot
+        # wants costs 1.05-1.55x, and holding the
         # parameter in RSCK order costs the *backward* direction the same, since
         # the axis RSCK makes contiguous is backward-data's reduction axis.
         #
@@ -268,8 +268,9 @@ def _conv3d_fwd_kernel(
         # GPU.  Cast per term rather than after the sum -- ``dij * stride_wt`` is
         # the term that overflows on its own.  On the int32 path the casts are
         # frontend no-ops, so the operand keeps the buffer-load eligibility it
-        # has today; it only loses it at sizes where PLAN.md 3.5 says the storage
-        # has already lost it.
+        # has today; it only loses it at sizes where the *storage* is already
+        # over the buffer-op limit and has lost it anyway (see
+        # :data:`~triton_conv3d.shapes.BUFFER_OP_MAX_BYTES`).
         dij_w = (KD * KH * KW - 1 - dij) if W_FLIP else dij
         w_row = (
             dij_w.to(INDEX_DTYPE) * stride_wt + offs_k.to(INDEX_DTYPE) * stride_wk
@@ -578,7 +579,7 @@ _SKINNY_N_TILES: tuple[tuple[int, int, int, int], ...] = (
 #: second wave; four warps each take a quarter of ``BLOCK_M`` and replicate the
 #: whole per-K-tile address computation for a fragment that is 10/16 padding.
 #: Measured at all three head volumes, one warp is 1.02-1.22x over the shipped
-#: four (``work/triton-conv/tune/k1_fwd*.json``).
+#: four.
 #:
 #: Gated to ``Cout <= 16`` in :func:`candidate_configs` rather than added to the
 #: grids above, because a 16-column tile at ``Cout = 512`` is 32x padding and
@@ -685,7 +686,7 @@ def _tuned(bm: int, bn: int, bk: int, warps: int, group_m: int = 6,
 #:
 #: Deliberately a table and not ``@triton.autotune``: ScaFFold's figure of merit
 #: is total wall time, so a recompile inside a training step is a direct loss.
-#: Source: ``work/triton-conv/m1_fwd.json``, 15 problems, ~1050 timed configs.
+#: Drawn from a forward sweep of 15 problems and ~1050 timed configs.
 #: Only channel pairs that were actually timed appear here.  The unmeasured
 #: pairs -- ``64 -> 128``, ``128 -> 256``, ``256 -> 512``, ``512 -> 1024``, all
 #: encoder-side -- fall to the heuristic on purpose: an extrapolated entry in a
@@ -697,11 +698,11 @@ def _tuned(bm: int, bn: int, bk: int, warps: int, group_m: int = 6,
 #: 6x18x18`` 0.90x) and belong on the adapter's block-list instead.  (An earlier
 #: version of this comment priced the four pairs at "12.7 ms/step"; that figure
 #: is config B's *all-directions* total at those pairs, not the forward time an
-#: absent row here governs.  See ``STATUS.md`` §4.3.)
+#: absent row here governs.)
 _TUNED: dict[tuple, ConvConfig] = {
-    # The segmentation head, and the one entry here that is *not* from
-    # ``m1_fwd.json``: source ``work/triton-conv/tune/k1_fwd_confirm.json``.
-    # ``Cout = 6`` prunes every seed tile, so M1's sweep never timed anything
+    # The segmentation head, and the one entry here that is *not* from the main
+    # forward sweep but from a follow-up race at this site alone.
+    # ``Cout = 6`` prunes every seed tile, so that sweep never timed anything
     # but ``default_config`` at this site and the tile below is that same
     # ``128x16x64`` with **one warp instead of four** -- see
     # :data:`_NARROW_N_TILES` for why one, and why only here.  Raced against the
@@ -715,7 +716,7 @@ _TUNED: dict[tuple, ConvConfig] = {
     **{
         tune_key(torch.bfloat16, cin, cout, (3, 3, 3)): cfg
         for (cin, cout), cfg in {
-            # The UNet stem, and the row that refutes ``OPTIMIZATION.md`` D4's
+            # The UNet stem, and the row that refutes the standing verdict that
             # "``conv 3->64`` is genuinely hopeless, leave it on MIOpen".  It was
             # never hopeless and it was never a matrix-core feeding problem: the
             # reduction axis of this kernel's ``tl.dot`` is ``Cin`` **alone**
@@ -750,8 +751,7 @@ _TUNED: dict[tuple, ConvConfig] = {
             # ``kpack = 1`` is not a rounding detail here: ``kp2`` on the same
             # tile is 0.6085 ms, 1.17x worse.  Taller than 512 turns over
             # (``1024x64x8/w16`` 0.6042); ``GROUP_M`` is inert at this site
-            # (g1/g6/g12 within 1%).  ``work/triton-conv/review/LOSS_OPTIMIZATION.md``
-            # §1.2 has the full race and the counters.
+            # (g1/g6/g12 within 1%).
             (3, 64): _tuned(512, 64, 8, 8, nk=32),
             (64, 64): _tuned(128, 64, 64, 4),
             (128, 64): _tuned(128, 64, 64, 4),
@@ -766,11 +766,11 @@ _TUNED: dict[tuple, ConvConfig] = {
             (1024, 512): _tuned(128, 128, 128, 8),
             (1024, 1024): _tuned(64, 64, 128, 8),
             # The two 2048-channel bottleneck pairs.  They are scale-8 sites
-            # that appeared in no corpus until ``SHAPE_AUDIT.md`` 2.3 found
-            # them -- the corpus's scale-8 model was a *four*-layer network and
-            # the harness runs a five-layer one -- so until now they fell to
-            # the heuristic, and against fresh MIOpen the forward **lost**
-            # (``TRITON_BASELINES.md`` 5: 0.952x and 0.977x).
+            # that appeared in no corpus until a shape census of running steps
+            # found them -- the corpus's scale-8 model was a *four*-layer
+            # network and the harness runs a five-layer one -- so until now
+            # they fell to the heuristic, and against fresh MIOpen the forward
+            # **lost**, 0.952x and 0.977x.
             #
             # ``128x64x128`` wins at **every volume both pairs occur at**,
             # which is the property this table has twice been burned by not
@@ -780,8 +780,7 @@ _TUNED: dict[tuple, ConvConfig] = {
             # replaces, quiet node, **four independently allocated operand sets
             # per cell**, both arms sharing each build's operands so the pair is
             # immune to the placement effect below; kernel-only, median over
-            # builds with the worst build in brackets
-            # (``review/opt3/row_2048_quiet.json``):
+            # builds with the worst build in brackets:
             #   (1024,2048)  8^3     0.3196 vs 0.3224 ms -- 1.010x [1.008]
             #   (1024,2048)  6x8^2   0.2208 vs 0.2769    -- 1.253x [1.251]
             #   (1024,2048)  4x8^2   0.1760 vs 0.2304    -- 1.308x [1.306]
@@ -793,11 +792,11 @@ _TUNED: dict[tuple, ConvConfig] = {
             # this row.  ``(2048, 2048)`` is the one site in this project whose
             # time depends on **where its weight lands**: at 216 MiB against a
             # 256 MiB MALL the heuristic is bimodal, two tight states up to
-            # 14.7% apart and fixed for the life of the allocation
-            # (``OPTIMIZATION_ROUND3.md`` 4).  Measured solo -- one config, one
-            # operand set, six rebuilds, which is what a caller actually sees --
-            # this row is **stable**: 0.5% / 0.7% / 1.4% spread at the three
-            # volumes against the heuristic's 15% / 5% / 20%.  But at ``8^3``
+            # 14.7% apart and fixed for the life of the allocation.  Measured
+            # solo -- one config, one operand set, six rebuilds, which is what
+            # a caller actually sees -- this row is **stable**: 0.5% / 0.7% /
+            # 1.4% spread at the three volumes against the heuristic's 15% / 5%
+            # / 20%.  But at ``8^3``
             # its 0.6681 ms sits *between* the heuristic's two states (0.6472
             # and 0.7453), so it beats the unlucky allocation by 1.12x and
             # **loses to the lucky one by 0.97x**.  It is shipped because the
@@ -807,10 +806,10 @@ _TUNED: dict[tuple, ConvConfig] = {
             # ``(2048, 1024)`` is deliberately **absent**, and that is a result
             # rather than an omission: ``128x256x64`` is **1.433x** at ``16^3``
             # and **0.804x** and **0.504x** at the two sharded volumes of the
-            # same pair (``review/opt3/row_2048to1024.json``, two builds each,
-            # every interval tight).  The discriminator is ``BLOCK_K`` against
-            # ``M`` -- 64 wins at ``M = 4096`` and 128 wins at 2048 and 1024 --
-            # this table is keyed per channel pair and cannot say that, and an
+            # same pair (two builds each, every interval tight).  The
+            # discriminator is ``BLOCK_K`` against ``M`` -- 64 wins at ``M =
+            # 4096`` and 128 wins at 2048 and 1024 -- this table is keyed per
+            # channel pair and cannot say that, and an
             # entry would trade config B's 0.68 ms saving for config C and D's
             # 0.23 and 0.16 ms losses.  ``_fit_to_grid`` already walks
             # ``BLOCK_M`` with ``M``; making it walk ``BLOCK_K`` too is the
@@ -1178,9 +1177,8 @@ def _index_dtype(*operands: torch.Tensor):
 
     They are not free -- the AMD backend's buffer-load path requires an i32
     offset tensor -- but triton 3.7.1 narrows i64 offsets it can prove safe, so
-    the cost is paid only where the storage really is over 2 GiB.  See PLAN.md
-    3.5: storage size, not offset dtype, is the lever, and it is not one the
-    kernel controls.
+    the cost is paid only where the storage really is over 2 GiB.  Storage size,
+    not offset dtype, is the lever, and it is not one the kernel controls.
 
     *Every* operand the kernel indexes has to be passed here, the weight
     included -- it is the one this decision used to omit, on an assumption

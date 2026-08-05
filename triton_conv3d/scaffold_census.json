@@ -1,5 +1,5 @@
 {
- "source": "work/triton-conv/bin/conv_census.py, three training steps per configuration, wrapped entry points",
+ "source": "instrumented training run, three steps per configuration, wrapped entry points",
  "form": "adapter",
  "note": "The shape and padding the kernel was handed, read off a real call. Every k>1 convolution here is padded: the ScaFFold adapter exchanges a halo only on genuinely split axes.",
  "configs": [
