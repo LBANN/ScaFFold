@@ -28,18 +28,35 @@ _up_annotate = annotate(fmt="Up.{}")
 _outconv_annotate = annotate(fmt="OutConv.{}")
 
 
-def _group_norm(num_groups, num_channels):
+def _group_norm(num_groups, num_channels, activation=None):
     if num_channels % num_groups != 0:
         raise ValueError(
             f"group_norm_groups={num_groups} must evenly divide num_channels={num_channels}"
         )
-    # FastGroupNorm is nn.GroupNorm plus a compiled GPU kernel; it holds the
-    # same parameters under the same names, so checkpoints are unaffected.
-    return FastGroupNorm(num_groups, num_channels)
+    # FastGroupNorm is nn.GroupNorm plus a Triton/compiled GPU kernel; it holds
+    # the same parameters under the same names, and `activation` is a plain
+    # attribute rather than a submodule, so checkpoints are unaffected.
+    return FastGroupNorm(num_groups, num_channels, activation=activation)
 
 
 class DoubleConv(nn.Module):
-    """(convolution => GroupNorm => ReLU) * 2"""
+    """(convolution => GroupNorm => ReLU) * 2
+
+    The ReLU lives *inside* the GroupNorm (``activation="relu"``), because the
+    Triton GroupNorm kernel folds it into its forward store for free and thereby
+    removes an entire streaming pass -- 38% of the forward at the shapes that
+    dominate the step.  ``FastGroupNorm`` applies the ReLU on every path,
+    including eager, so the network's function is unchanged; only the number of
+    memory passes differs.
+
+    The ``nn.ReLU`` slots are held open by ``nn.Identity`` rather than removed:
+    ``nn.Sequential`` names its children by position, so deleting them would
+    renumber the two convolutions and the second GroupNorm and invalidate every
+    existing checkpoint.  Neither ``nn.ReLU`` nor ``nn.Identity`` has parameters
+    or buffers, so with the placeholders in place the state dict is byte
+    identical to the pre-fusion model's (pinned by
+    ``tests/test_groupnorm.py::test_state_dict_matches_plain_groupnorm_model``).
+    """
 
     def __init__(self, in_channels, out_channels, group_norm_groups, mid_channels=None):
         super().__init__()
@@ -47,11 +64,11 @@ class DoubleConv(nn.Module):
             mid_channels = out_channels
         self.double_conv = nn.Sequential(
             nn.Conv3d(in_channels, mid_channels, kernel_size=3, padding=1, bias=False),
-            _group_norm(group_norm_groups, mid_channels),
-            nn.ReLU(inplace=True),
+            _group_norm(group_norm_groups, mid_channels, activation="relu"),
+            nn.Identity(),
             nn.Conv3d(mid_channels, out_channels, kernel_size=3, padding=1, bias=False),
-            _group_norm(group_norm_groups, out_channels),
-            nn.ReLU(inplace=True),
+            _group_norm(group_norm_groups, out_channels, activation="relu"),
+            nn.Identity(),
         )
 
     @_doubleconv_annotate
