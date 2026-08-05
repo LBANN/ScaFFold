@@ -1,0 +1,4871 @@
+{
+ "source": "model-analysis/unet_shapes.py via work/report/data",
+ "configs": [
+  {
+   "tag": "A",
+   "desc": "scale 7, 1 GPU, shards (1,1,1)"
+  },
+  {
+   "tag": "B",
+   "desc": "scale 8, 2 GPUs, shards (2,1,1)"
+  },
+  {
+   "tag": "C",
+   "desc": "scale 8, 4 GPUs, shards (4,1,1)"
+  }
+ ],
+ "n_problems": 57,
+ "problems": [
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    64,
+    128,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    128,
+    128,
+    256,
+    256
+   ],
+   "out_shape": [
+    1,
+    64,
+    128,
+    256,
+    256
+   ],
+   "halo_in_shape": [
+    1,
+    128,
+    130,
+    258,
+    258
+   ],
+   "halo_dhw": [
+    1,
+    1,
+    1
+   ],
+   "shard_halo_dhw": [
+    1,
+    0,
+    0
+   ],
+   "k": 3,
+   "stride": 1,
+   "padding": 1,
+   "bias": false,
+   "sites": [
+    "B:dec3 (up4)#61"
+   ],
+   "configs": [
+    "scale 8, 2 GPUs, shards (2,1,1)"
+   ],
+   "measured": [
+    {
+     "config": "B",
+     "direction": "bwd-weight",
+     "ms_per_step": 45401.1315,
+     "ms_per_call": 45401.1315,
+     "calls": 1,
+     "pct_roofline": 0.0,
+     "solvers": [
+      "unknown"
+     ]
+    },
+    {
+     "config": "B",
+     "direction": "bwd-data",
+     "ms_per_step": 8199.9801,
+     "ms_per_call": 8199.9801,
+     "calls": 1,
+     "pct_roofline": 0.1,
+     "solvers": [
+      "unknown"
+     ]
+    },
+    {
+     "config": "B",
+     "direction": "fwd",
+     "ms_per_step": 18.861,
+     "ms_per_call": 18.861,
+     "calls": 1,
+     "pct_roofline": 32.8,
+     "solvers": [
+      "kernel_grouped_conv_fwd_multiple_d_grouped_gemm_xdl_cshuffle"
+     ]
+    }
+   ]
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    64,
+    64,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    64,
+    128,
+    256,
+    256
+   ],
+   "out_shape": [
+    1,
+    64,
+    128,
+    256,
+    256
+   ],
+   "halo_in_shape": [
+    1,
+    64,
+    130,
+    258,
+    258
+   ],
+   "halo_dhw": [
+    1,
+    1,
+    1
+   ],
+   "shard_halo_dhw": [
+    1,
+    0,
+    0
+   ],
+   "k": 3,
+   "stride": 1,
+   "padding": 1,
+   "bias": false,
+   "sites": [
+    "B:enc0 (inc)#4",
+    "B:dec3 (up4)#64"
+   ],
+   "configs": [
+    "scale 8, 2 GPUs, shards (2,1,1)"
+   ],
+   "measured": [
+    {
+     "config": "B",
+     "direction": "bwd-weight",
+     "ms_per_step": 25.9167,
+     "ms_per_call": 12.9584,
+     "calls": 2,
+     "pct_roofline": 23.9,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "config": "B",
+     "direction": "bwd-data",
+     "ms_per_step": 25.4267,
+     "ms_per_call": 12.7133,
+     "calls": 2,
+     "pct_roofline": 24.3,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "config": "B",
+     "direction": "fwd",
+     "ms_per_step": 13.9525,
+     "ms_per_call": 6.9763,
+     "calls": 2,
+     "pct_roofline": 44.3,
+     "solvers": [
+      "kernel_grouped_conv_fwd_multiple_abd_xdl_cshuffle"
+     ]
+    }
+   ]
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    64,
+    64,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    64,
+    64,
+    256,
+    256
+   ],
+   "out_shape": [
+    1,
+    64,
+    64,
+    256,
+    256
+   ],
+   "halo_in_shape": [
+    1,
+    64,
+    66,
+    258,
+    258
+   ],
+   "halo_dhw": [
+    1,
+    1,
+    1
+   ],
+   "shard_halo_dhw": [
+    1,
+    0,
+    0
+   ],
+   "k": 3,
+   "stride": 1,
+   "padding": 1,
+   "bias": false,
+   "sites": [
+    "C:enc0 (inc)#4",
+    "C:dec3 (up4)#64"
+   ],
+   "configs": [
+    "scale 8, 4 GPUs, shards (4,1,1)"
+   ],
+   "measured": [
+    {
+     "config": "C",
+     "direction": "bwd-data",
+     "ms_per_step": 13.072,
+     "ms_per_call": 6.536,
+     "calls": 2,
+     "pct_roofline": 23.7,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "config": "C",
+     "direction": "bwd-weight",
+     "ms_per_step": 12.0946,
+     "ms_per_call": 6.0473,
+     "calls": 2,
+     "pct_roofline": 25.6,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "config": "C",
+     "direction": "fwd",
+     "ms_per_step": 7.5631,
+     "ms_per_call": 3.7815,
+     "calls": 2,
+     "pct_roofline": 40.9,
+     "solvers": [
+      "kernel_grouped_conv_fwd_multiple_abd_xdl_cshuffle"
+     ]
+    }
+   ]
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    64,
+    128,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    128,
+    64,
+    256,
+    256
+   ],
+   "out_shape": [
+    1,
+    64,
+    64,
+    256,
+    256
+   ],
+   "halo_in_shape": [
+    1,
+    128,
+    66,
+    258,
+    258
+   ],
+   "halo_dhw": [
+    1,
+    1,
+    1
+   ],
+   "shard_halo_dhw": [
+    1,
+    0,
+    0
+   ],
+   "k": 3,
+   "stride": 1,
+   "padding": 1,
+   "bias": false,
+   "sites": [
+    "C:dec3 (up4)#61"
+   ],
+   "configs": [
+    "scale 8, 4 GPUs, shards (4,1,1)"
+   ],
+   "measured": [
+    {
+     "config": "C",
+     "direction": "bwd-weight",
+     "ms_per_step": 12.2945,
+     "ms_per_call": 12.2945,
+     "calls": 1,
+     "pct_roofline": 25.2,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "config": "C",
+     "direction": "fwd",
+     "ms_per_step": 8.2749,
+     "ms_per_call": 8.2749,
+     "calls": 1,
+     "pct_roofline": 37.4,
+     "solvers": [
+      "kernel_grouped_conv_fwd_multiple_abd_xdl_cshuffle"
+     ]
+    },
+    {
+     "config": "C",
+     "direction": "bwd-data",
+     "ms_per_step": 8.1346,
+     "ms_per_call": 8.1346,
+     "calls": 1,
+     "pct_roofline": 38.0,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    }
+   ]
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    128,
+    128,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    128,
+    64,
+    128,
+    128
+   ],
+   "out_shape": [
+    1,
+    128,
+    64,
+    128,
+    128
+   ],
+   "halo_in_shape": [
+    1,
+    128,
+    66,
+    130,
+    130
+   ],
+   "halo_dhw": [
+    1,
+    1,
+    1
+   ],
+   "shard_halo_dhw": [
+    1,
+    0,
+    0
+   ],
+   "k": 3,
+   "stride": 1,
+   "padding": 1,
+   "bias": false,
+   "sites": [
+    "B:enc1 (down1)#11",
+    "B:dec2 (up3)#56"
+   ],
+   "configs": [
+    "scale 8, 2 GPUs, shards (2,1,1)"
+   ],
+   "measured": [
+    {
+     "config": "B",
+     "direction": "bwd-data",
+     "ms_per_step": 8.5547,
+     "ms_per_call": 4.2774,
+     "calls": 2,
+     "pct_roofline": 36.1,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "config": "B",
+     "direction": "bwd-weight",
+     "ms_per_step": 7.0896,
+     "ms_per_call": 3.5448,
+     "calls": 2,
+     "pct_roofline": 43.6,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "config": "B",
+     "direction": "fwd",
+     "ms_per_step": 5.066,
+     "ms_per_call": 2.533,
+     "calls": 2,
+     "pct_roofline": 61.0,
+     "solvers": [
+      "kernel_grouped_conv_fwd_multiple_abd_xdl_cshuffle"
+     ]
+    }
+   ]
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    128,
+    256,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    256,
+    64,
+    128,
+    128
+   ],
+   "out_shape": [
+    1,
+    128,
+    64,
+    128,
+    128
+   ],
+   "halo_in_shape": [
+    1,
+    256,
+    66,
+    130,
+    130
+   ],
+   "halo_dhw": [
+    1,
+    1,
+    1
+   ],
+   "shard_halo_dhw": [
+    1,
+    0,
+    0
+   ],
+   "k": 3,
+   "stride": 1,
+   "padding": 1,
+   "bias": false,
+   "sites": [
+    "B:dec2 (up3)#53"
+   ],
+   "configs": [
+    "scale 8, 2 GPUs, shards (2,1,1)"
+   ],
+   "measured": [
+    {
+     "config": "B",
+     "direction": "bwd-weight",
+     "ms_per_step": 7.412,
+     "ms_per_call": 7.412,
+     "calls": 1,
+     "pct_roofline": 41.7,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "config": "B",
+     "direction": "bwd-data",
+     "ms_per_step": 6.3417,
+     "ms_per_call": 6.3417,
+     "calls": 1,
+     "pct_roofline": 48.8,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "config": "B",
+     "direction": "fwd",
+     "ms_per_step": 6.2742,
+     "ms_per_call": 6.2742,
+     "calls": 1,
+     "pct_roofline": 49.3,
+     "solvers": [
+      "kernel_grouped_conv_fwd_multiple_abd_xdl_cshuffle"
+     ]
+    }
+   ]
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    64,
+    64,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    64,
+    128,
+    128,
+    128
+   ],
+   "out_shape": [
+    1,
+    64,
+    128,
+    128,
+    128
+   ],
+   "halo_in_shape": [
+    1,
+    64,
+    130,
+    130,
+    130
+   ],
+   "halo_dhw": [
+    1,
+    1,
+    1
+   ],
+   "shard_halo_dhw": [
+    0,
+    0,
+    0
+   ],
+   "k": 3,
+   "stride": 1,
+   "padding": 1,
+   "bias": false,
+   "sites": [
+    "A:enc0 (inc)#4",
+    "A:dec3 (up4)#64"
+   ],
+   "configs": [
+    "scale 7, 1 GPU, shards (1,1,1)"
+   ],
+   "measured": [
+    {
+     "config": "A",
+     "direction": "bwd-data",
+     "ms_per_step": 6.9658,
+     "ms_per_call": 3.4829,
+     "calls": 2,
+     "pct_roofline": 22.2,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "config": "A",
+     "direction": "bwd-weight",
+     "ms_per_step": 6.7362,
+     "ms_per_call": 3.3681,
+     "calls": 2,
+     "pct_roofline": 23.0,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "config": "A",
+     "direction": "fwd",
+     "ms_per_step": 3.8699,
+     "ms_per_call": 1.9349,
+     "calls": 2,
+     "pct_roofline": 40.0,
+     "solvers": [
+      "kernel_grouped_conv_fwd_multiple_abd_xdl_cshuffle"
+     ]
+    }
+   ]
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    64,
+    128,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    128,
+    128,
+    128,
+    128
+   ],
+   "out_shape": [
+    1,
+    64,
+    128,
+    128,
+    128
+   ],
+   "halo_in_shape": [
+    1,
+    128,
+    130,
+    130,
+    130
+   ],
+   "halo_dhw": [
+    1,
+    1,
+    1
+   ],
+   "shard_halo_dhw": [
+    0,
+    0,
+    0
+   ],
+   "k": 3,
+   "stride": 1,
+   "padding": 1,
+   "bias": false,
+   "sites": [
+    "A:dec3 (up4)#61"
+   ],
+   "configs": [
+    "scale 7, 1 GPU, shards (1,1,1)"
+   ],
+   "measured": [
+    {
+     "config": "A",
+     "direction": "bwd-weight",
+     "ms_per_step": 5.8648,
+     "ms_per_call": 5.8648,
+     "calls": 1,
+     "pct_roofline": 26.4,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "config": "A",
+     "direction": "fwd",
+     "ms_per_step": 4.3772,
+     "ms_per_call": 4.3772,
+     "calls": 1,
+     "pct_roofline": 35.3,
+     "solvers": [
+      "kernel_grouped_conv_fwd_multiple_abd_xdl_cshuffle"
+     ]
+    },
+    {
+     "config": "A",
+     "direction": "bwd-data",
+     "ms_per_step": 3.9948,
+     "ms_per_call": 3.9948,
+     "calls": 1,
+     "pct_roofline": 38.7,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    }
+   ]
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    128,
+    256,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    256,
+    32,
+    128,
+    128
+   ],
+   "out_shape": [
+    1,
+    128,
+    32,
+    128,
+    128
+   ],
+   "halo_in_shape": [
+    1,
+    256,
+    34,
+    130,
+    130
+   ],
+   "halo_dhw": [
+    1,
+    1,
+    1
+   ],
+   "shard_halo_dhw": [
+    1,
+    0,
+    0
+   ],
+   "k": 3,
+   "stride": 1,
+   "padding": 1,
+   "bias": false,
+   "sites": [
+    "C:dec2 (up3)#53"
+   ],
+   "configs": [
+    "scale 8, 4 GPUs, shards (4,1,1)"
+   ],
+   "measured": [
+    {
+     "config": "C",
+     "direction": "bwd-data",
+     "ms_per_step": 3.8658,
+     "ms_per_call": 3.8658,
+     "calls": 1,
+     "pct_roofline": 40.0,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "config": "C",
+     "direction": "bwd-weight",
+     "ms_per_step": 3.7909,
+     "ms_per_call": 3.7909,
+     "calls": 1,
+     "pct_roofline": 40.8,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "config": "C",
+     "direction": "fwd",
+     "ms_per_step": 3.7217,
+     "ms_per_call": 3.7217,
+     "calls": 1,
+     "pct_roofline": 41.5,
+     "solvers": [
+      "kernel_grouped_conv_fwd_multiple_abd_xdl_cshuffle"
+     ]
+    }
+   ]
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    256,
+    512,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    512,
+    32,
+    64,
+    64
+   ],
+   "out_shape": [
+    1,
+    256,
+    32,
+    64,
+    64
+   ],
+   "halo_in_shape": [
+    1,
+    512,
+    34,
+    66,
+    66
+   ],
+   "halo_dhw": [
+    1,
+    1,
+    1
+   ],
+   "shard_halo_dhw": [
+    1,
+    0,
+    0
+   ],
+   "k": 3,
+   "stride": 1,
+   "padding": 1,
+   "bias": false,
+   "sites": [
+    "B:dec1 (up2)#45"
+   ],
+   "configs": [
+    "scale 8, 2 GPUs, shards (2,1,1)"
+   ],
+   "measured": [
+    {
+     "config": "B",
+     "direction": "bwd-data",
+     "ms_per_step": 3.9987,
+     "ms_per_call": 3.9987,
+     "calls": 1,
+     "pct_roofline": 38.7,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "config": "B",
+     "direction": "fwd",
+     "ms_per_step": 3.7667,
+     "ms_per_call": 3.7667,
+     "calls": 1,
+     "pct_roofline": 41.0,
+     "solvers": [
+      "kernel_grouped_conv_fwd_multiple_abd_xdl_cshuffle"
+     ]
+    },
+    {
+     "config": "B",
+     "direction": "bwd-weight",
+     "ms_per_step": 3.4461,
+     "ms_per_call": 3.4461,
+     "calls": 1,
+     "pct_roofline": 44.9,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    }
+   ]
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    128,
+    128,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    128,
+    32,
+    128,
+    128
+   ],
+   "out_shape": [
+    1,
+    128,
+    32,
+    128,
+    128
+   ],
+   "halo_in_shape": [
+    1,
+    128,
+    34,
+    130,
+    130
+   ],
+   "halo_dhw": [
+    1,
+    1,
+    1
+   ],
+   "shard_halo_dhw": [
+    1,
+    0,
+    0
+   ],
+   "k": 3,
+   "stride": 1,
+   "padding": 1,
+   "bias": false,
+   "sites": [
+    "C:enc1 (down1)#11",
+    "C:dec2 (up3)#56"
+   ],
+   "configs": [
+    "scale 8, 4 GPUs, shards (4,1,1)"
+   ],
+   "measured": [
+    {
+     "config": "C",
+     "direction": "bwd-data",
+     "ms_per_step": 4.3724,
+     "ms_per_call": 2.1862,
+     "calls": 2,
+     "pct_roofline": 35.4,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "config": "C",
+     "direction": "bwd-weight",
+     "ms_per_step": 3.7598,
+     "ms_per_call": 1.8799,
+     "calls": 2,
+     "pct_roofline": 41.1,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "config": "C",
+     "direction": "fwd",
+     "ms_per_step": 2.8026,
+     "ms_per_call": 1.4013,
+     "calls": 2,
+     "pct_roofline": 55.2,
+     "solvers": [
+      "kernel_grouped_conv_fwd_multiple_abd_xdl_cshuffle"
+     ]
+    }
+   ]
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    256,
+    256,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    256,
+    32,
+    64,
+    64
+   ],
+   "out_shape": [
+    1,
+    256,
+    32,
+    64,
+    64
+   ],
+   "halo_in_shape": [
+    1,
+    256,
+    34,
+    66,
+    66
+   ],
+   "halo_dhw": [
+    1,
+    1,
+    1
+   ],
+   "shard_halo_dhw": [
+    1,
+    0,
+    0
+   ],
+   "k": 3,
+   "stride": 1,
+   "padding": 1,
+   "bias": false,
+   "sites": [
+    "B:enc2 (down2)#18",
+    "B:dec1 (up2)#48"
+   ],
+   "configs": [
+    "scale 8, 2 GPUs, shards (2,1,1)"
+   ],
+   "measured": [
+    {
+     "config": "B",
+     "direction": "bwd-data",
+     "ms_per_step": 4.7582,
+     "ms_per_call": 2.3791,
+     "calls": 2,
+     "pct_roofline": 32.5,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "config": "B",
+     "direction": "bwd-weight",
+     "ms_per_step": 3.4186,
+     "ms_per_call": 1.7093,
+     "calls": 2,
+     "pct_roofline": 45.2,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "config": "B",
+     "direction": "fwd",
+     "ms_per_step": 2.6846,
+     "ms_per_call": 1.3423,
+     "calls": 2,
+     "pct_roofline": 57.6,
+     "solvers": [
+      "kernel_grouped_conv_fwd_xdl_cshuffle_v3"
+     ]
+    }
+   ]
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    128,
+    64,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    64,
+    64,
+    128,
+    128
+   ],
+   "out_shape": [
+    1,
+    128,
+    64,
+    128,
+    128
+   ],
+   "halo_in_shape": [
+    1,
+    64,
+    66,
+    130,
+    130
+   ],
+   "halo_dhw": [
+    1,
+    1,
+    1
+   ],
+   "shard_halo_dhw": [
+    1,
+    0,
+    0
+   ],
+   "k": 3,
+   "stride": 1,
+   "padding": 1,
+   "bias": false,
+   "sites": [
+    "B:enc1 (down1)#8"
+   ],
+   "configs": [
+    "scale 8, 2 GPUs, shards (2,1,1)"
+   ],
+   "measured": [
+    {
+     "config": "B",
+     "direction": "bwd-data",
+     "ms_per_step": 3.1462,
+     "ms_per_call": 3.1462,
+     "calls": 1,
+     "pct_roofline": 24.6,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "config": "B",
+     "direction": "bwd-weight",
+     "ms_per_step": 1.8767,
+     "ms_per_call": 1.8767,
+     "calls": 1,
+     "pct_roofline": 41.2,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "config": "B",
+     "direction": "fwd",
+     "ms_per_step": 1.2644,
+     "ms_per_call": 1.2644,
+     "calls": 1,
+     "pct_roofline": 61.1,
+     "solvers": [
+      "kernel_grouped_conv_fwd_multiple_abd_xdl_cshuffle"
+     ]
+    }
+   ]
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    512,
+    1024,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    1024,
+    16,
+    32,
+    32
+   ],
+   "out_shape": [
+    1,
+    512,
+    16,
+    32,
+    32
+   ],
+   "halo_in_shape": [
+    1,
+    1024,
+    18,
+    34,
+    34
+   ],
+   "halo_dhw": [
+    1,
+    1,
+    1
+   ],
+   "shard_halo_dhw": [
+    1,
+    0,
+    0
+   ],
+   "k": 3,
+   "stride": 1,
+   "padding": 1,
+   "bias": false,
+   "sites": [
+    "B:dec0 (up1)#37"
+   ],
+   "configs": [
+    "scale 8, 2 GPUs, shards (2,1,1)"
+   ],
+   "measured": [
+    {
+     "config": "B",
+     "direction": "bwd-data",
+     "ms_per_step": 2.3372,
+     "ms_per_call": 2.3372,
+     "calls": 1,
+     "pct_roofline": 33.1,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "config": "B",
+     "direction": "fwd",
+     "ms_per_step": 2.2222,
+     "ms_per_call": 2.2222,
+     "calls": 1,
+     "pct_roofline": 34.8,
+     "solvers": [
+      "kernel_grouped_conv_fwd_xdl_cshuffle_v3"
+     ]
+    },
+    {
+     "config": "B",
+     "direction": "bwd-weight",
+     "ms_per_step": 1.7249,
+     "ms_per_call": 1.7249,
+     "calls": 1,
+     "pct_roofline": 44.8,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    }
+   ]
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    512,
+    512,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    512,
+    16,
+    32,
+    32
+   ],
+   "out_shape": [
+    1,
+    512,
+    16,
+    32,
+    32
+   ],
+   "halo_in_shape": [
+    1,
+    512,
+    18,
+    34,
+    34
+   ],
+   "halo_dhw": [
+    1,
+    1,
+    1
+   ],
+   "shard_halo_dhw": [
+    1,
+    0,
+    0
+   ],
+   "k": 3,
+   "stride": 1,
+   "padding": 1,
+   "bias": false,
+   "sites": [
+    "B:enc3 (down3)#25",
+    "B:dec0 (up1)#40"
+   ],
+   "configs": [
+    "scale 8, 2 GPUs, shards (2,1,1)"
+   ],
+   "measured": [
+    {
+     "config": "B",
+     "direction": "bwd-data",
+     "ms_per_step": 2.7845,
+     "ms_per_call": 1.3922,
+     "calls": 2,
+     "pct_roofline": 27.8,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "config": "B",
+     "direction": "bwd-weight",
+     "ms_per_step": 1.8518,
+     "ms_per_call": 0.9259,
+     "calls": 2,
+     "pct_roofline": 41.7,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "config": "B",
+     "direction": "fwd",
+     "ms_per_step": 1.6448,
+     "ms_per_call": 0.8224,
+     "calls": 2,
+     "pct_roofline": 47.0,
+     "solvers": [
+      "kernel_grouped_conv_fwd_xdl_cshuffle_v3"
+     ]
+    }
+   ]
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    256,
+    512,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    512,
+    16,
+    64,
+    64
+   ],
+   "out_shape": [
+    1,
+    256,
+    16,
+    64,
+    64
+   ],
+   "halo_in_shape": [
+    1,
+    512,
+    18,
+    66,
+    66
+   ],
+   "halo_dhw": [
+    1,
+    1,
+    1
+   ],
+   "shard_halo_dhw": [
+    1,
+    0,
+    0
+   ],
+   "k": 3,
+   "stride": 1,
+   "padding": 1,
+   "bias": false,
+   "sites": [
+    "C:dec1 (up2)#45"
+   ],
+   "configs": [
+    "scale 8, 4 GPUs, shards (4,1,1)"
+   ],
+   "measured": [
+    {
+     "config": "C",
+     "direction": "bwd-data",
+     "ms_per_step": 2.4556,
+     "ms_per_call": 2.4556,
+     "calls": 1,
+     "pct_roofline": 31.5,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "config": "C",
+     "direction": "fwd",
+     "ms_per_step": 2.0744,
+     "ms_per_call": 2.0744,
+     "calls": 1,
+     "pct_roofline": 37.3,
+     "solvers": [
+      "kernel_grouped_conv_fwd_xdl_cshuffle_v3"
+     ]
+    },
+    {
+     "config": "C",
+     "direction": "bwd-weight",
+     "ms_per_step": 1.7406,
+     "ms_per_call": 1.7406,
+     "calls": 1,
+     "pct_roofline": 44.4,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    }
+   ]
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    256,
+    256,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    256,
+    16,
+    64,
+    64
+   ],
+   "out_shape": [
+    1,
+    256,
+    16,
+    64,
+    64
+   ],
+   "halo_in_shape": [
+    1,
+    256,
+    18,
+    66,
+    66
+   ],
+   "halo_dhw": [
+    1,
+    1,
+    1
+   ],
+   "shard_halo_dhw": [
+    1,
+    0,
+    0
+   ],
+   "k": 3,
+   "stride": 1,
+   "padding": 1,
+   "bias": false,
+   "sites": [
+    "C:enc2 (down2)#18",
+    "C:dec1 (up2)#48"
+   ],
+   "configs": [
+    "scale 8, 4 GPUs, shards (4,1,1)"
+   ],
+   "measured": [
+    {
+     "config": "C",
+     "direction": "bwd-data",
+     "ms_per_step": 2.5593,
+     "ms_per_call": 1.2796,
+     "calls": 2,
+     "pct_roofline": 30.2,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "config": "C",
+     "direction": "bwd-weight",
+     "ms_per_step": 1.9686,
+     "ms_per_call": 0.9843,
+     "calls": 2,
+     "pct_roofline": 39.3,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "config": "C",
+     "direction": "fwd",
+     "ms_per_step": 1.5206,
+     "ms_per_call": 0.7603,
+     "calls": 2,
+     "pct_roofline": 50.8,
+     "solvers": [
+      "kernel_grouped_conv_fwd_xdl_cshuffle_v3"
+     ]
+    }
+   ]
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    64,
+    3,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    3,
+    128,
+    256,
+    256
+   ],
+   "out_shape": [
+    1,
+    64,
+    128,
+    256,
+    256
+   ],
+   "halo_in_shape": [
+    1,
+    3,
+    130,
+    258,
+    258
+   ],
+   "halo_dhw": [
+    1,
+    1,
+    1
+   ],
+   "shard_halo_dhw": [
+    1,
+    0,
+    0
+   ],
+   "k": 3,
+   "stride": 1,
+   "padding": 1,
+   "bias": false,
+   "sites": [
+    "B:enc0 (inc)#1"
+   ],
+   "configs": [
+    "scale 8, 2 GPUs, shards (2,1,1)"
+   ],
+   "measured": [
+    {
+     "config": "B",
+     "direction": "bwd-weight",
+     "ms_per_step": 3.172,
+     "ms_per_call": 3.172,
+     "calls": 1,
+     "pct_roofline": 10.8,
+     "solvers": [
+      "kernel_grouped_conv_bwd_weight_xdl_cshuffle_v3"
+     ]
+    },
+    {
+     "config": "B",
+     "direction": "fwd",
+     "ms_per_step": 2.4064,
+     "ms_per_call": 2.4064,
+     "calls": 1,
+     "pct_roofline": 14.2,
+     "solvers": [
+      "kernel_grouped_conv_fwd_multiple_abd_xdl_cshuffle"
+     ]
+    }
+   ]
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    128,
+    256,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    256,
+    64,
+    64,
+    64
+   ],
+   "out_shape": [
+    1,
+    128,
+    64,
+    64,
+    64
+   ],
+   "halo_in_shape": [
+    1,
+    256,
+    66,
+    66,
+    66
+   ],
+   "halo_dhw": [
+    1,
+    1,
+    1
+   ],
+   "shard_halo_dhw": [
+    0,
+    0,
+    0
+   ],
+   "k": 3,
+   "stride": 1,
+   "padding": 1,
+   "bias": false,
+   "sites": [
+    "A:dec2 (up3)#53"
+   ],
+   "configs": [
+    "scale 7, 1 GPU, shards (1,1,1)"
+   ],
+   "measured": [
+    {
+     "config": "A",
+     "direction": "bwd-weight",
+     "ms_per_step": 1.9356,
+     "ms_per_call": 1.9356,
+     "calls": 1,
+     "pct_roofline": 39.9,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "config": "A",
+     "direction": "fwd",
+     "ms_per_step": 1.9287,
+     "ms_per_call": 1.9287,
+     "calls": 1,
+     "pct_roofline": 40.1,
+     "solvers": [
+      "kernel_grouped_conv_fwd_multiple_abd_xdl_cshuffle"
+     ]
+    },
+    {
+     "config": "A",
+     "direction": "bwd-data",
+     "ms_per_step": 1.655,
+     "ms_per_call": 1.655,
+     "calls": 1,
+     "pct_roofline": 46.7,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    }
+   ]
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    128,
+    128,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    128,
+    64,
+    64,
+    64
+   ],
+   "out_shape": [
+    1,
+    128,
+    64,
+    64,
+    64
+   ],
+   "halo_in_shape": [
+    1,
+    128,
+    66,
+    66,
+    66
+   ],
+   "halo_dhw": [
+    1,
+    1,
+    1
+   ],
+   "shard_halo_dhw": [
+    0,
+    0,
+    0
+   ],
+   "k": 3,
+   "stride": 1,
+   "padding": 1,
+   "bias": false,
+   "sites": [
+    "A:enc1 (down1)#11",
+    "A:dec2 (up3)#56"
+   ],
+   "configs": [
+    "scale 7, 1 GPU, shards (1,1,1)"
+   ],
+   "measured": [
+    {
+     "config": "A",
+     "direction": "bwd-data",
+     "ms_per_step": 2.3401,
+     "ms_per_call": 1.1701,
+     "calls": 2,
+     "pct_roofline": 33.0,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "config": "A",
+     "direction": "bwd-weight",
+     "ms_per_step": 1.8785,
+     "ms_per_call": 0.9392,
+     "calls": 2,
+     "pct_roofline": 41.2,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "config": "A",
+     "direction": "fwd",
+     "ms_per_step": 1.132,
+     "ms_per_call": 0.566,
+     "calls": 2,
+     "pct_roofline": 68.3,
+     "solvers": [
+      "kernel_grouped_conv_fwd_xdl_cshuffle_v3"
+     ]
+    }
+   ]
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    512,
+    512,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    512,
+    8,
+    32,
+    32
+   ],
+   "out_shape": [
+    1,
+    512,
+    8,
+    32,
+    32
+   ],
+   "halo_in_shape": [
+    1,
+    512,
+    10,
+    34,
+    34
+   ],
+   "halo_dhw": [
+    1,
+    1,
+    1
+   ],
+   "shard_halo_dhw": [
+    1,
+    0,
+    0
+   ],
+   "k": 3,
+   "stride": 1,
+   "padding": 1,
+   "bias": false,
+   "sites": [
+    "C:enc3 (down3)#25",
+    "C:dec0 (up1)#40"
+   ],
+   "configs": [
+    "scale 8, 4 GPUs, shards (4,1,1)"
+   ],
+   "measured": [
+    {
+     "config": "C",
+     "direction": "bwd-data",
+     "ms_per_step": 1.6378,
+     "ms_per_call": 0.8189,
+     "calls": 2,
+     "pct_roofline": 23.6,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "config": "C",
+     "direction": "fwd",
+     "ms_per_step": 1.17,
+     "ms_per_call": 0.585,
+     "calls": 2,
+     "pct_roofline": 33.0,
+     "solvers": [
+      "kernel_grouped_conv_fwd_xdl_cshuffle_v3"
+     ]
+    },
+    {
+     "config": "C",
+     "direction": "bwd-weight",
+     "ms_per_step": 1.0142,
+     "ms_per_call": 0.5071,
+     "calls": 2,
+     "pct_roofline": 38.1,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    }
+   ]
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    512,
+    1024,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    1024,
+    8,
+    32,
+    32
+   ],
+   "out_shape": [
+    1,
+    512,
+    8,
+    32,
+    32
+   ],
+   "halo_in_shape": [
+    1,
+    1024,
+    10,
+    34,
+    34
+   ],
+   "halo_dhw": [
+    1,
+    1,
+    1
+   ],
+   "shard_halo_dhw": [
+    1,
+    0,
+    0
+   ],
+   "k": 3,
+   "stride": 1,
+   "padding": 1,
+   "bias": false,
+   "sites": [
+    "C:dec0 (up1)#37"
+   ],
+   "configs": [
+    "scale 8, 4 GPUs, shards (4,1,1)"
+   ],
+   "measured": [
+    {
+     "config": "C",
+     "direction": "bwd-data",
+     "ms_per_step": 1.4805,
+     "ms_per_call": 1.4805,
+     "calls": 1,
+     "pct_roofline": 26.1,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "config": "C",
+     "direction": "fwd",
+     "ms_per_step": 1.2633,
+     "ms_per_call": 1.2633,
+     "calls": 1,
+     "pct_roofline": 30.6,
+     "solvers": [
+      "kernel_grouped_conv_fwd_xdl_cshuffle_v3"
+     ]
+    },
+    {
+     "config": "C",
+     "direction": "bwd-weight",
+     "ms_per_step": 0.9532,
+     "ms_per_call": 0.9532,
+     "calls": 1,
+     "pct_roofline": 40.6,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    }
+   ]
+  },
+  {
+   "op": "ConvTranspose3d",
+   "weight_shape": [
+    128,
+    64,
+    2,
+    2,
+    2
+   ],
+   "in_shape": [
+    1,
+    128,
+    64,
+    128,
+    128
+   ],
+   "out_shape": [
+    1,
+    64,
+    128,
+    256,
+    256
+   ],
+   "halo_in_shape": [
+    1,
+    128,
+    64,
+    128,
+    128
+   ],
+   "halo_dhw": [
+    0,
+    0,
+    0
+   ],
+   "shard_halo_dhw": [
+    0,
+    0,
+    0
+   ],
+   "k": 2,
+   "stride": 2,
+   "padding": 0,
+   "bias": true,
+   "sites": [
+    "B:dec3 (up4)#59"
+   ],
+   "configs": [
+    "scale 8, 2 GPUs, shards (2,1,1)"
+   ],
+   "measured": [
+    {
+     "config": "B",
+     "direction": "bwd-data",
+     "ms_per_step": 1.6491,
+     "ms_per_call": 1.6491,
+     "calls": 1,
+     "pct_roofline": 24.7,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "config": "B",
+     "direction": "bwd-weight",
+     "ms_per_step": 1.2135,
+     "ms_per_call": 1.2135,
+     "calls": 1,
+     "pct_roofline": 33.5,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "config": "B",
+     "direction": "bwd-data",
+     "ms_per_step": 0.7098,
+     "ms_per_call": 0.7098,
+     "calls": 1,
+     "pct_roofline": 57.3,
+     "solvers": [
+      "kernel_grouped_conv_fwd_multiple_d_grouped_gemm_xdl_cshuffle"
+     ]
+    }
+   ]
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    128,
+    64,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    64,
+    32,
+    128,
+    128
+   ],
+   "out_shape": [
+    1,
+    128,
+    32,
+    128,
+    128
+   ],
+   "halo_in_shape": [
+    1,
+    64,
+    34,
+    130,
+    130
+   ],
+   "halo_dhw": [
+    1,
+    1,
+    1
+   ],
+   "shard_halo_dhw": [
+    1,
+    0,
+    0
+   ],
+   "k": 3,
+   "stride": 1,
+   "padding": 1,
+   "bias": false,
+   "sites": [
+    "C:enc1 (down1)#8"
+   ],
+   "configs": [
+    "scale 8, 4 GPUs, shards (4,1,1)"
+   ],
+   "measured": [
+    {
+     "config": "C",
+     "direction": "bwd-data",
+     "ms_per_step": 1.6875,
+     "ms_per_call": 1.6875,
+     "calls": 1,
+     "pct_roofline": 22.9,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "config": "C",
+     "direction": "bwd-weight",
+     "ms_per_step": 0.9152,
+     "ms_per_call": 0.9152,
+     "calls": 1,
+     "pct_roofline": 42.2,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "config": "C",
+     "direction": "fwd",
+     "ms_per_step": 0.5931,
+     "ms_per_call": 0.5931,
+     "calls": 1,
+     "pct_roofline": 65.2,
+     "solvers": [
+      "kernel_grouped_conv_fwd_multiple_d_grouped_gemm_xdl_cshuffle"
+     ]
+    }
+   ]
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    256,
+    128,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    128,
+    32,
+    64,
+    64
+   ],
+   "out_shape": [
+    1,
+    256,
+    32,
+    64,
+    64
+   ],
+   "halo_in_shape": [
+    1,
+    128,
+    34,
+    66,
+    66
+   ],
+   "halo_dhw": [
+    1,
+    1,
+    1
+   ],
+   "shard_halo_dhw": [
+    1,
+    0,
+    0
+   ],
+   "k": 3,
+   "stride": 1,
+   "padding": 1,
+   "bias": false,
+   "sites": [
+    "B:enc2 (down2)#15"
+   ],
+   "configs": [
+    "scale 8, 2 GPUs, shards (2,1,1)"
+   ],
+   "measured": [
+    {
+     "config": "B",
+     "direction": "bwd-data",
+     "ms_per_step": 1.58,
+     "ms_per_call": 1.58,
+     "calls": 1,
+     "pct_roofline": 24.5,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "config": "B",
+     "direction": "bwd-weight",
+     "ms_per_step": 0.9241,
+     "ms_per_call": 0.9241,
+     "calls": 1,
+     "pct_roofline": 41.8,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "config": "B",
+     "direction": "fwd",
+     "ms_per_step": 0.6599,
+     "ms_per_call": 0.6599,
+     "calls": 1,
+     "pct_roofline": 58.6,
+     "solvers": [
+      "kernel_grouped_conv_fwd_multiple_d_grouped_gemm_xdl_cshuffle"
+     ]
+    }
+   ]
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    256,
+    256,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    256,
+    32,
+    32,
+    32
+   ],
+   "out_shape": [
+    1,
+    256,
+    32,
+    32,
+    32
+   ],
+   "halo_in_shape": [
+    1,
+    256,
+    34,
+    34,
+    34
+   ],
+   "halo_dhw": [
+    1,
+    1,
+    1
+   ],
+   "shard_halo_dhw": [
+    0,
+    0,
+    0
+   ],
+   "k": 3,
+   "stride": 1,
+   "padding": 1,
+   "bias": false,
+   "sites": [
+    "A:enc2 (down2)#18",
+    "A:dec1 (up2)#48"
+   ],
+   "configs": [
+    "scale 7, 1 GPU, shards (1,1,1)"
+   ],
+   "measured": [
+    {
+     "config": "A",
+     "direction": "bwd-data",
+     "ms_per_step": 1.2779,
+     "ms_per_call": 0.6389,
+     "calls": 2,
+     "pct_roofline": 30.2,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "config": "A",
+     "direction": "bwd-weight",
+     "ms_per_step": 1.016,
+     "ms_per_call": 0.508,
+     "calls": 2,
+     "pct_roofline": 38.0,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "config": "A",
+     "direction": "fwd",
+     "ms_per_step": 0.7613,
+     "ms_per_call": 0.3806,
+     "calls": 2,
+     "pct_roofline": 50.8,
+     "solvers": [
+      "kernel_grouped_conv_fwd_xdl_cshuffle_v3_2lds"
+     ]
+    }
+   ]
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    256,
+    512,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    512,
+    32,
+    32,
+    32
+   ],
+   "out_shape": [
+    1,
+    256,
+    32,
+    32,
+    32
+   ],
+   "halo_in_shape": [
+    1,
+    512,
+    34,
+    34,
+    34
+   ],
+   "halo_dhw": [
+    1,
+    1,
+    1
+   ],
+   "shard_halo_dhw": [
+    0,
+    0,
+    0
+   ],
+   "k": 3,
+   "stride": 1,
+   "padding": 1,
+   "bias": false,
+   "sites": [
+    "A:dec1 (up2)#45"
+   ],
+   "configs": [
+    "scale 7, 1 GPU, shards (1,1,1)"
+   ],
+   "measured": [
+    {
+     "config": "A",
+     "direction": "bwd-data",
+     "ms_per_step": 1.2046,
+     "ms_per_call": 1.2046,
+     "calls": 1,
+     "pct_roofline": 32.1,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "config": "A",
+     "direction": "bwd-weight",
+     "ms_per_step": 0.9492,
+     "ms_per_call": 0.9492,
+     "calls": 1,
+     "pct_roofline": 40.7,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "config": "A",
+     "direction": "fwd",
+     "ms_per_step": 0.8416,
+     "ms_per_call": 0.8416,
+     "calls": 1,
+     "pct_roofline": 45.9,
+     "solvers": [
+      "kernel_grouped_conv_fwd_xdl_cshuffle_v3_2lds"
+     ]
+    }
+   ]
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    64,
+    3,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    3,
+    64,
+    256,
+    256
+   ],
+   "out_shape": [
+    1,
+    64,
+    64,
+    256,
+    256
+   ],
+   "halo_in_shape": [
+    1,
+    3,
+    66,
+    258,
+    258
+   ],
+   "halo_dhw": [
+    1,
+    1,
+    1
+   ],
+   "shard_halo_dhw": [
+    1,
+    0,
+    0
+   ],
+   "k": 3,
+   "stride": 1,
+   "padding": 1,
+   "bias": false,
+   "sites": [
+    "C:enc0 (inc)#1"
+   ],
+   "configs": [
+    "scale 8, 4 GPUs, shards (4,1,1)"
+   ],
+   "measured": [
+    {
+     "config": "C",
+     "direction": "bwd-weight",
+     "ms_per_step": 1.4547,
+     "ms_per_call": 1.4547,
+     "calls": 1,
+     "pct_roofline": 11.7,
+     "solvers": [
+      "kernel_grouped_conv_bwd_weight_xdl_cshuffle_v3"
+     ]
+    },
+    {
+     "config": "C",
+     "direction": "fwd",
+     "ms_per_step": 1.2133,
+     "ms_per_call": 1.2133,
+     "calls": 1,
+     "pct_roofline": 14.1,
+     "solvers": [
+      "kernel_grouped_conv_fwd_multiple_abd_xdl_cshuffle"
+     ]
+    }
+   ]
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    1024,
+    1024,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    1024,
+    8,
+    16,
+    16
+   ],
+   "out_shape": [
+    1,
+    1024,
+    8,
+    16,
+    16
+   ],
+   "halo_in_shape": [
+    1,
+    1024,
+    10,
+    18,
+    18
+   ],
+   "halo_dhw": [
+    1,
+    1,
+    1
+   ],
+   "shard_halo_dhw": [
+    1,
+    0,
+    0
+   ],
+   "k": 3,
+   "stride": 1,
+   "padding": 1,
+   "bias": false,
+   "sites": [
+    "B:bottleneck (down4)#32"
+   ],
+   "configs": [
+    "scale 8, 2 GPUs, shards (2,1,1)"
+   ],
+   "measured": [
+    {
+     "config": "B",
+     "direction": "bwd-data",
+     "ms_per_step": 1.5751,
+     "ms_per_call": 1.5751,
+     "calls": 1,
+     "pct_roofline": 12.3,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "config": "B",
+     "direction": "bwd-weight",
+     "ms_per_step": 0.5376,
+     "ms_per_call": 0.5376,
+     "calls": 1,
+     "pct_roofline": 35.9,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "config": "B",
+     "direction": "fwd",
+     "ms_per_step": 0.442,
+     "ms_per_call": 0.442,
+     "calls": 1,
+     "pct_roofline": 43.7,
+     "solvers": [
+      "kernel_grouped_conv_fwd_xdl_cshuffle_v3"
+     ]
+    }
+   ]
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    512,
+    512,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    512,
+    16,
+    16,
+    16
+   ],
+   "out_shape": [
+    1,
+    512,
+    16,
+    16,
+    16
+   ],
+   "halo_in_shape": [
+    1,
+    512,
+    18,
+    18,
+    18
+   ],
+   "halo_dhw": [
+    1,
+    1,
+    1
+   ],
+   "shard_halo_dhw": [
+    0,
+    0,
+    0
+   ],
+   "k": 3,
+   "stride": 1,
+   "padding": 1,
+   "bias": false,
+   "sites": [
+    "A:enc3 (down3)#25",
+    "A:dec0 (up1)#40"
+   ],
+   "configs": [
+    "scale 7, 1 GPU, shards (1,1,1)"
+   ],
+   "measured": [
+    {
+     "config": "A",
+     "direction": "bwd-data",
+     "ms_per_step": 1.2806,
+     "ms_per_call": 0.6403,
+     "calls": 2,
+     "pct_roofline": 15.1,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "config": "A",
+     "direction": "bwd-weight",
+     "ms_per_step": 0.5551,
+     "ms_per_call": 0.2776,
+     "calls": 2,
+     "pct_roofline": 34.8,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "config": "A",
+     "direction": "fwd",
+     "ms_per_step": 0.4488,
+     "ms_per_call": 0.2244,
+     "calls": 2,
+     "pct_roofline": 43.1,
+     "solvers": [
+      "kernel_grouped_conv_fwd_xdl_cshuffle_v3"
+     ]
+    }
+   ]
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    6,
+    64,
+    1,
+    1,
+    1
+   ],
+   "in_shape": [
+    1,
+    64,
+    128,
+    256,
+    256
+   ],
+   "out_shape": [
+    1,
+    6,
+    128,
+    256,
+    256
+   ],
+   "halo_in_shape": [
+    1,
+    64,
+    128,
+    256,
+    256
+   ],
+   "halo_dhw": [
+    0,
+    0,
+    0
+   ],
+   "shard_halo_dhw": [
+    0,
+    0,
+    0
+   ],
+   "k": 1,
+   "stride": 1,
+   "padding": 0,
+   "bias": true,
+   "sites": [
+    "B:outc#67"
+   ],
+   "configs": [
+    "scale 8, 2 GPUs, shards (2,1,1)"
+   ],
+   "measured": [
+    {
+     "config": "B",
+     "direction": "bwd-data",
+     "ms_per_step": 1.7305,
+     "ms_per_call": 1.7305,
+     "calls": 1,
+     "pct_roofline": 20.6,
+     "solvers": [
+      "kernel_batched_gemm_xdl_cshuffle_v3_multi_d",
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "config": "B",
+     "direction": "fwd",
+     "ms_per_step": 0.5188,
+     "ms_per_call": 0.5188,
+     "calls": 1,
+     "pct_roofline": 68.6,
+     "solvers": [
+      "kernel_grouped_conv_fwd_xdl_cshuffle_v3"
+     ]
+    }
+   ]
+  },
+  {
+   "op": "ConvTranspose3d",
+   "weight_shape": [
+    128,
+    64,
+    2,
+    2,
+    2
+   ],
+   "in_shape": [
+    1,
+    128,
+    32,
+    128,
+    128
+   ],
+   "out_shape": [
+    1,
+    64,
+    64,
+    256,
+    256
+   ],
+   "halo_in_shape": [
+    1,
+    128,
+    32,
+    128,
+    128
+   ],
+   "halo_dhw": [
+    0,
+    0,
+    0
+   ],
+   "shard_halo_dhw": [
+    0,
+    0,
+    0
+   ],
+   "k": 2,
+   "stride": 2,
+   "padding": 0,
+   "bias": true,
+   "sites": [
+    "C:dec3 (up4)#59"
+   ],
+   "configs": [
+    "scale 8, 4 GPUs, shards (4,1,1)"
+   ],
+   "measured": [
+    {
+     "config": "C",
+     "direction": "bwd-data",
+     "ms_per_step": 0.8154,
+     "ms_per_call": 0.8154,
+     "calls": 1,
+     "pct_roofline": 24.9,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "config": "C",
+     "direction": "bwd-weight",
+     "ms_per_step": 0.5538,
+     "ms_per_call": 0.5538,
+     "calls": 1,
+     "pct_roofline": 36.7,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "config": "C",
+     "direction": "bwd-data",
+     "ms_per_step": 0.5073,
+     "ms_per_call": 0.5073,
+     "calls": 1,
+     "pct_roofline": 40.1,
+     "solvers": [
+      "kernel_grouped_conv_fwd_xdl_cshuffle_v3"
+     ]
+    }
+   ]
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    512,
+    1024,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    1024,
+    16,
+    16,
+    16
+   ],
+   "out_shape": [
+    1,
+    512,
+    16,
+    16,
+    16
+   ],
+   "halo_in_shape": [
+    1,
+    1024,
+    18,
+    18,
+    18
+   ],
+   "halo_dhw": [
+    1,
+    1,
+    1
+   ],
+   "shard_halo_dhw": [
+    0,
+    0,
+    0
+   ],
+   "k": 3,
+   "stride": 1,
+   "padding": 1,
+   "bias": false,
+   "sites": [
+    "A:dec0 (up1)#37"
+   ],
+   "configs": [
+    "scale 7, 1 GPU, shards (1,1,1)"
+   ],
+   "measured": [
+    {
+     "config": "A",
+     "direction": "bwd-data",
+     "ms_per_step": 0.7961,
+     "ms_per_call": 0.7961,
+     "calls": 1,
+     "pct_roofline": 24.3,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "config": "A",
+     "direction": "fwd",
+     "ms_per_step": 0.5311,
+     "ms_per_call": 0.5311,
+     "calls": 1,
+     "pct_roofline": 36.4,
+     "solvers": [
+      "kernel_grouped_conv_fwd_xdl_cshuffle_v3"
+     ]
+    },
+    {
+     "config": "A",
+     "direction": "bwd-weight",
+     "ms_per_step": 0.4595,
+     "ms_per_call": 0.4595,
+     "calls": 1,
+     "pct_roofline": 42.1,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    }
+   ]
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    256,
+    128,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    128,
+    16,
+    64,
+    64
+   ],
+   "out_shape": [
+    1,
+    256,
+    16,
+    64,
+    64
+   ],
+   "halo_in_shape": [
+    1,
+    128,
+    18,
+    66,
+    66
+   ],
+   "halo_dhw": [
+    1,
+    1,
+    1
+   ],
+   "shard_halo_dhw": [
+    1,
+    0,
+    0
+   ],
+   "k": 3,
+   "stride": 1,
+   "padding": 1,
+   "bias": false,
+   "sites": [
+    "C:enc2 (down2)#15"
+   ],
+   "configs": [
+    "scale 8, 4 GPUs, shards (4,1,1)"
+   ],
+   "measured": [
+    {
+     "config": "C",
+     "direction": "bwd-data",
+     "ms_per_step": 0.7486,
+     "ms_per_call": 0.7486,
+     "calls": 1,
+     "pct_roofline": 25.8,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "config": "C",
+     "direction": "bwd-weight",
+     "ms_per_step": 0.5563,
+     "ms_per_call": 0.5563,
+     "calls": 1,
+     "pct_roofline": 34.7,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "config": "C",
+     "direction": "fwd",
+     "ms_per_step": 0.4106,
+     "ms_per_call": 0.4106,
+     "calls": 1,
+     "pct_roofline": 47.1,
+     "solvers": [
+      "kernel_grouped_conv_fwd_multiple_abd_xdl_cshuffle"
+     ]
+    }
+   ]
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    512,
+    256,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    256,
+    16,
+    32,
+    32
+   ],
+   "out_shape": [
+    1,
+    512,
+    16,
+    32,
+    32
+   ],
+   "halo_in_shape": [
+    1,
+    256,
+    18,
+    34,
+    34
+   ],
+   "halo_dhw": [
+    1,
+    1,
+    1
+   ],
+   "shard_halo_dhw": [
+    1,
+    0,
+    0
+   ],
+   "k": 3,
+   "stride": 1,
+   "padding": 1,
+   "bias": false,
+   "sites": [
+    "B:enc3 (down3)#22"
+   ],
+   "configs": [
+    "scale 8, 2 GPUs, shards (2,1,1)"
+   ],
+   "measured": [
+    {
+     "config": "B",
+     "direction": "bwd-data",
+     "ms_per_step": 0.7796,
+     "ms_per_call": 0.7796,
+     "calls": 1,
+     "pct_roofline": 24.8,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "config": "B",
+     "direction": "bwd-weight",
+     "ms_per_step": 0.4954,
+     "ms_per_call": 0.4954,
+     "calls": 1,
+     "pct_roofline": 39.0,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "config": "B",
+     "direction": "fwd",
+     "ms_per_step": 0.4096,
+     "ms_per_call": 0.4096,
+     "calls": 1,
+     "pct_roofline": 47.2,
+     "solvers": [
+      "kernel_grouped_conv_fwd_xdl_cshuffle_v3_2lds"
+     ]
+    }
+   ]
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    128,
+    64,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    64,
+    64,
+    64,
+    64
+   ],
+   "out_shape": [
+    1,
+    128,
+    64,
+    64,
+    64
+   ],
+   "halo_in_shape": [
+    1,
+    64,
+    66,
+    66,
+    66
+   ],
+   "halo_dhw": [
+    1,
+    1,
+    1
+   ],
+   "shard_halo_dhw": [
+    0,
+    0,
+    0
+   ],
+   "k": 3,
+   "stride": 1,
+   "padding": 1,
+   "bias": false,
+   "sites": [
+    "A:enc1 (down1)#8"
+   ],
+   "configs": [
+    "scale 7, 1 GPU, shards (1,1,1)"
+   ],
+   "measured": [
+    {
+     "config": "A",
+     "direction": "bwd-data",
+     "ms_per_step": 0.8504,
+     "ms_per_call": 0.8504,
+     "calls": 1,
+     "pct_roofline": 22.7,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "config": "A",
+     "direction": "bwd-weight",
+     "ms_per_step": 0.4766,
+     "ms_per_call": 0.4766,
+     "calls": 1,
+     "pct_roofline": 40.6,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "config": "A",
+     "direction": "fwd",
+     "ms_per_step": 0.2942,
+     "ms_per_call": 0.2942,
+     "calls": 1,
+     "pct_roofline": 65.7,
+     "solvers": [
+      "kernel_grouped_conv_fwd_xdl_cshuffle_v3"
+     ]
+    }
+   ]
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    1024,
+    1024,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    1024,
+    4,
+    16,
+    16
+   ],
+   "out_shape": [
+    1,
+    1024,
+    4,
+    16,
+    16
+   ],
+   "halo_in_shape": [
+    1,
+    1024,
+    6,
+    18,
+    18
+   ],
+   "halo_dhw": [
+    1,
+    1,
+    1
+   ],
+   "shard_halo_dhw": [
+    1,
+    0,
+    0
+   ],
+   "k": 3,
+   "stride": 1,
+   "padding": 1,
+   "bias": false,
+   "sites": [
+    "C:bottleneck (down4)#32"
+   ],
+   "configs": [
+    "scale 8, 4 GPUs, shards (4,1,1)"
+   ],
+   "measured": [
+    {
+     "config": "C",
+     "direction": "bwd-data",
+     "ms_per_step": 0.9524,
+     "ms_per_call": 0.9524,
+     "calls": 1,
+     "pct_roofline": 10.1,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "config": "C",
+     "direction": "bwd-weight",
+     "ms_per_step": 0.3211,
+     "ms_per_call": 0.3211,
+     "calls": 1,
+     "pct_roofline": 30.1,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "config": "C",
+     "direction": "fwd",
+     "ms_per_step": 0.3151,
+     "ms_per_call": 0.3151,
+     "calls": 1,
+     "pct_roofline": 30.7,
+     "solvers": [
+      "kernel_grouped_conv_fwd_xdl_cshuffle_v3"
+     ]
+    }
+   ]
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    64,
+    3,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    3,
+    128,
+    128,
+    128
+   ],
+   "out_shape": [
+    1,
+    64,
+    128,
+    128,
+    128
+   ],
+   "halo_in_shape": [
+    1,
+    3,
+    130,
+    130,
+    130
+   ],
+   "halo_dhw": [
+    1,
+    1,
+    1
+   ],
+   "shard_halo_dhw": [
+    0,
+    0,
+    0
+   ],
+   "k": 3,
+   "stride": 1,
+   "padding": 1,
+   "bias": false,
+   "sites": [
+    "A:enc0 (inc)#1"
+   ],
+   "configs": [
+    "scale 7, 1 GPU, shards (1,1,1)"
+   ],
+   "measured": [
+    {
+     "config": "A",
+     "direction": "bwd-weight",
+     "ms_per_step": 0.6971,
+     "ms_per_call": 0.6971,
+     "calls": 1,
+     "pct_roofline": 12.2,
+     "solvers": [
+      "kernel_grouped_conv_bwd_weight_xdl_cshuffle_v3"
+     ]
+    },
+    {
+     "config": "A",
+     "direction": "fwd",
+     "ms_per_step": 0.5992,
+     "ms_per_call": 0.5992,
+     "calls": 1,
+     "pct_roofline": 14.2,
+     "solvers": [
+      "kernel_grouped_conv_fwd_multiple_abd_xdl_cshuffle"
+     ]
+    }
+   ]
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    1024,
+    512,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    512,
+    8,
+    16,
+    16
+   ],
+   "out_shape": [
+    1,
+    1024,
+    8,
+    16,
+    16
+   ],
+   "halo_in_shape": [
+    1,
+    512,
+    10,
+    18,
+    18
+   ],
+   "halo_dhw": [
+    1,
+    1,
+    1
+   ],
+   "shard_halo_dhw": [
+    1,
+    0,
+    0
+   ],
+   "k": 3,
+   "stride": 1,
+   "padding": 1,
+   "bias": false,
+   "sites": [
+    "B:bottleneck (down4)#29"
+   ],
+   "configs": [
+    "scale 8, 2 GPUs, shards (2,1,1)"
+   ],
+   "measured": [
+    {
+     "config": "B",
+     "direction": "bwd-data",
+     "ms_per_step": 0.7379,
+     "ms_per_call": 0.7379,
+     "calls": 1,
+     "pct_roofline": 13.1,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "config": "B",
+     "direction": "bwd-weight",
+     "ms_per_step": 0.3073,
+     "ms_per_call": 0.3073,
+     "calls": 1,
+     "pct_roofline": 31.4,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "config": "B",
+     "direction": "fwd",
+     "ms_per_step": 0.2272,
+     "ms_per_call": 0.2272,
+     "calls": 1,
+     "pct_roofline": 42.5,
+     "solvers": [
+      "kernel_grouped_conv_fwd_xdl_cshuffle_v3"
+     ]
+    }
+   ]
+  },
+  {
+   "op": "ConvTranspose3d",
+   "weight_shape": [
+    256,
+    128,
+    2,
+    2,
+    2
+   ],
+   "in_shape": [
+    1,
+    256,
+    32,
+    64,
+    64
+   ],
+   "out_shape": [
+    1,
+    128,
+    64,
+    128,
+    128
+   ],
+   "halo_in_shape": [
+    1,
+    256,
+    32,
+    64,
+    64
+   ],
+   "halo_dhw": [
+    0,
+    0,
+    0
+   ],
+   "shard_halo_dhw": [
+    0,
+    0,
+    0
+   ],
+   "k": 2,
+   "stride": 2,
+   "padding": 0,
+   "bias": true,
+   "sites": [
+    "B:dec2 (up3)#51"
+   ],
+   "configs": [
+    "scale 8, 2 GPUs, shards (2,1,1)"
+   ],
+   "measured": [
+    {
+     "config": "B",
+     "direction": "bwd-data",
+     "ms_per_step": 0.4457,
+     "ms_per_call": 0.4457,
+     "calls": 1,
+     "pct_roofline": 25.7,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "config": "B",
+     "direction": "bwd-weight",
+     "ms_per_step": 0.4407,
+     "ms_per_call": 0.4407,
+     "calls": 1,
+     "pct_roofline": 26.0,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "config": "B",
+     "direction": "bwd-data",
+     "ms_per_step": 0.3786,
+     "ms_per_call": 0.3786,
+     "calls": 1,
+     "pct_roofline": 30.3,
+     "solvers": [
+      "kernel_grouped_conv_fwd_multiple_abd_xdl_cshuffle"
+     ]
+    }
+   ]
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    512,
+    256,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    256,
+    8,
+    32,
+    32
+   ],
+   "out_shape": [
+    1,
+    512,
+    8,
+    32,
+    32
+   ],
+   "halo_in_shape": [
+    1,
+    256,
+    10,
+    34,
+    34
+   ],
+   "halo_dhw": [
+    1,
+    1,
+    1
+   ],
+   "shard_halo_dhw": [
+    1,
+    0,
+    0
+   ],
+   "k": 3,
+   "stride": 1,
+   "padding": 1,
+   "bias": false,
+   "sites": [
+    "C:enc3 (down3)#22"
+   ],
+   "configs": [
+    "scale 8, 4 GPUs, shards (4,1,1)"
+   ],
+   "measured": [
+    {
+     "config": "C",
+     "direction": "bwd-data",
+     "ms_per_step": 0.7077,
+     "ms_per_call": 0.7077,
+     "calls": 1,
+     "pct_roofline": 13.7,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "config": "C",
+     "direction": "bwd-weight",
+     "ms_per_step": 0.2882,
+     "ms_per_call": 0.2882,
+     "calls": 1,
+     "pct_roofline": 33.5,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "config": "C",
+     "direction": "fwd",
+     "ms_per_step": 0.2191,
+     "ms_per_call": 0.2191,
+     "calls": 1,
+     "pct_roofline": 44.1,
+     "solvers": [
+      "kernel_grouped_conv_fwd_xdl_cshuffle_v3"
+     ]
+    }
+   ]
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    6,
+    64,
+    1,
+    1,
+    1
+   ],
+   "in_shape": [
+    1,
+    64,
+    64,
+    256,
+    256
+   ],
+   "out_shape": [
+    1,
+    6,
+    64,
+    256,
+    256
+   ],
+   "halo_in_shape": [
+    1,
+    64,
+    64,
+    256,
+    256
+   ],
+   "halo_dhw": [
+    0,
+    0,
+    0
+   ],
+   "shard_halo_dhw": [
+    0,
+    0,
+    0
+   ],
+   "k": 1,
+   "stride": 1,
+   "padding": 0,
+   "bias": true,
+   "sites": [
+    "C:outc#67"
+   ],
+   "configs": [
+    "scale 8, 4 GPUs, shards (4,1,1)"
+   ],
+   "measured": [
+    {
+     "config": "C",
+     "direction": "bwd-data",
+     "ms_per_step": 0.8846,
+     "ms_per_call": 0.8846,
+     "calls": 1,
+     "pct_roofline": 20.1,
+     "solvers": [
+      "kernel_batched_gemm_xdl_cshuffle_v3_multi_d",
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "config": "C",
+     "direction": "fwd",
+     "ms_per_step": 0.279,
+     "ms_per_call": 0.279,
+     "calls": 1,
+     "pct_roofline": 63.8,
+     "solvers": [
+      "kernel_grouped_conv_fwd_xdl_cshuffle_v3"
+     ]
+    }
+   ]
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    1024,
+    1024,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    1024,
+    8,
+    8,
+    8
+   ],
+   "out_shape": [
+    1,
+    1024,
+    8,
+    8,
+    8
+   ],
+   "halo_in_shape": [
+    1,
+    1024,
+    10,
+    10,
+    10
+   ],
+   "halo_dhw": [
+    1,
+    1,
+    1
+   ],
+   "shard_halo_dhw": [
+    0,
+    0,
+    0
+   ],
+   "k": 3,
+   "stride": 1,
+   "padding": 1,
+   "bias": false,
+   "sites": [
+    "A:bottleneck (down4)#32"
+   ],
+   "configs": [
+    "scale 7, 1 GPU, shards (1,1,1)"
+   ],
+   "measured": [
+    {
+     "config": "A",
+     "direction": "bwd-data",
+     "ms_per_step": 0.6021,
+     "ms_per_call": 0.6021,
+     "calls": 1,
+     "pct_roofline": 8.0,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "config": "A",
+     "direction": "bwd-weight",
+     "ms_per_step": 0.2279,
+     "ms_per_call": 0.2279,
+     "calls": 1,
+     "pct_roofline": 21.2,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "config": "A",
+     "direction": "fwd",
+     "ms_per_step": 0.2267,
+     "ms_per_call": 0.2267,
+     "calls": 1,
+     "pct_roofline": 21.3,
+     "solvers": [
+      "kernel_grouped_conv_fwd_xdl_cshuffle_v3"
+     ]
+    }
+   ]
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    256,
+    128,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    128,
+    32,
+    32,
+    32
+   ],
+   "out_shape": [
+    1,
+    256,
+    32,
+    32,
+    32
+   ],
+   "halo_in_shape": [
+    1,
+    128,
+    34,
+    34,
+    34
+   ],
+   "halo_dhw": [
+    1,
+    1,
+    1
+   ],
+   "shard_halo_dhw": [
+    0,
+    0,
+    0
+   ],
+   "k": 3,
+   "stride": 1,
+   "padding": 1,
+   "bias": false,
+   "sites": [
+    "A:enc2 (down2)#15"
+   ],
+   "configs": [
+    "scale 7, 1 GPU, shards (1,1,1)"
+   ],
+   "measured": [
+    {
+     "config": "A",
+     "direction": "bwd-data",
+     "ms_per_step": 0.4657,
+     "ms_per_call": 0.4657,
+     "calls": 1,
+     "pct_roofline": 20.7,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "config": "A",
+     "direction": "bwd-weight",
+     "ms_per_step": 0.3011,
+     "ms_per_call": 0.3011,
+     "calls": 1,
+     "pct_roofline": 32.1,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "config": "A",
+     "direction": "fwd",
+     "ms_per_step": 0.2263,
+     "ms_per_call": 0.2263,
+     "calls": 1,
+     "pct_roofline": 42.7,
+     "solvers": [
+      "kernel_grouped_conv_fwd_xdl_cshuffle_v3_2lds"
+     ]
+    }
+   ]
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    1024,
+    512,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    512,
+    4,
+    16,
+    16
+   ],
+   "out_shape": [
+    1,
+    1024,
+    4,
+    16,
+    16
+   ],
+   "halo_in_shape": [
+    1,
+    512,
+    6,
+    18,
+    18
+   ],
+   "halo_dhw": [
+    1,
+    1,
+    1
+   ],
+   "shard_halo_dhw": [
+    1,
+    0,
+    0
+   ],
+   "k": 3,
+   "stride": 1,
+   "padding": 1,
+   "bias": false,
+   "sites": [
+    "C:bottleneck (down4)#29"
+   ],
+   "configs": [
+    "scale 8, 4 GPUs, shards (4,1,1)"
+   ],
+   "measured": [
+    {
+     "config": "C",
+     "direction": "bwd-data",
+     "ms_per_step": 0.5983,
+     "ms_per_call": 0.5983,
+     "calls": 1,
+     "pct_roofline": 8.1,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "config": "C",
+     "direction": "bwd-weight",
+     "ms_per_step": 0.1656,
+     "ms_per_call": 0.1656,
+     "calls": 1,
+     "pct_roofline": 29.2,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "config": "C",
+     "direction": "fwd",
+     "ms_per_step": 0.1532,
+     "ms_per_call": 0.1532,
+     "calls": 1,
+     "pct_roofline": 31.5,
+     "solvers": [
+      "kernel_grouped_conv_fwd_xdl_cshuffle_v3"
+     ]
+    }
+   ]
+  },
+  {
+   "op": "ConvTranspose3d",
+   "weight_shape": [
+    128,
+    64,
+    2,
+    2,
+    2
+   ],
+   "in_shape": [
+    1,
+    128,
+    64,
+    64,
+    64
+   ],
+   "out_shape": [
+    1,
+    64,
+    128,
+    128,
+    128
+   ],
+   "halo_in_shape": [
+    1,
+    128,
+    64,
+    64,
+    64
+   ],
+   "halo_dhw": [
+    0,
+    0,
+    0
+   ],
+   "shard_halo_dhw": [
+    0,
+    0,
+    0
+   ],
+   "k": 2,
+   "stride": 2,
+   "padding": 0,
+   "bias": true,
+   "sites": [
+    "A:dec3 (up4)#59"
+   ],
+   "configs": [
+    "scale 7, 1 GPU, shards (1,1,1)"
+   ],
+   "measured": [
+    {
+     "config": "A",
+     "direction": "bwd-data",
+     "ms_per_step": 0.4025,
+     "ms_per_call": 0.4025,
+     "calls": 1,
+     "pct_roofline": 25.3,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "config": "A",
+     "direction": "bwd-weight",
+     "ms_per_step": 0.2411,
+     "ms_per_call": 0.2411,
+     "calls": 1,
+     "pct_roofline": 42.2,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "config": "A",
+     "direction": "bwd-data",
+     "ms_per_step": 0.2042,
+     "ms_per_call": 0.2042,
+     "calls": 1,
+     "pct_roofline": 49.8,
+     "solvers": [
+      "kernel_grouped_conv_fwd_multiple_abd_xdl_cshuffle"
+     ]
+    }
+   ]
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    1024,
+    512,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    512,
+    8,
+    8,
+    8
+   ],
+   "out_shape": [
+    1,
+    1024,
+    8,
+    8,
+    8
+   ],
+   "halo_in_shape": [
+    1,
+    512,
+    10,
+    10,
+    10
+   ],
+   "halo_dhw": [
+    1,
+    1,
+    1
+   ],
+   "shard_halo_dhw": [
+    0,
+    0,
+    0
+   ],
+   "k": 3,
+   "stride": 1,
+   "padding": 1,
+   "bias": false,
+   "sites": [
+    "A:bottleneck (down4)#29"
+   ],
+   "configs": [
+    "scale 7, 1 GPU, shards (1,1,1)"
+   ],
+   "measured": [
+    {
+     "config": "A",
+     "direction": "bwd-data",
+     "ms_per_step": 0.4172,
+     "ms_per_call": 0.4172,
+     "calls": 1,
+     "pct_roofline": 5.8,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "config": "A",
+     "direction": "bwd-weight",
+     "ms_per_step": 0.117,
+     "ms_per_call": 0.117,
+     "calls": 1,
+     "pct_roofline": 20.7,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "config": "A",
+     "direction": "fwd",
+     "ms_per_step": 0.1112,
+     "ms_per_call": 0.1112,
+     "calls": 1,
+     "pct_roofline": 21.7,
+     "solvers": [
+      "kernel_grouped_conv_fwd_xdl_cshuffle_v3"
+     ]
+    }
+   ]
+  },
+  {
+   "op": "ConvTranspose3d",
+   "weight_shape": [
+    256,
+    128,
+    2,
+    2,
+    2
+   ],
+   "in_shape": [
+    1,
+    256,
+    16,
+    64,
+    64
+   ],
+   "out_shape": [
+    1,
+    128,
+    32,
+    128,
+    128
+   ],
+   "halo_in_shape": [
+    1,
+    256,
+    16,
+    64,
+    64
+   ],
+   "halo_dhw": [
+    0,
+    0,
+    0
+   ],
+   "shard_halo_dhw": [
+    0,
+    0,
+    0
+   ],
+   "k": 2,
+   "stride": 2,
+   "padding": 0,
+   "bias": true,
+   "sites": [
+    "C:dec2 (up3)#51"
+   ],
+   "configs": [
+    "scale 8, 4 GPUs, shards (4,1,1)"
+   ],
+   "measured": [
+    {
+     "config": "C",
+     "direction": "bwd-weight",
+     "ms_per_step": 0.2422,
+     "ms_per_call": 0.2422,
+     "calls": 1,
+     "pct_roofline": 23.6,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "config": "C",
+     "direction": "bwd-data",
+     "ms_per_step": 0.2274,
+     "ms_per_call": 0.2274,
+     "calls": 1,
+     "pct_roofline": 25.2,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "config": "C",
+     "direction": "bwd-data",
+     "ms_per_step": 0.1592,
+     "ms_per_call": 0.1592,
+     "calls": 1,
+     "pct_roofline": 36.0,
+     "solvers": [
+      "kernel_grouped_conv_fwd_multiple_abd_xdl_cshuffle"
+     ]
+    }
+   ]
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    512,
+    256,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    256,
+    16,
+    16,
+    16
+   ],
+   "out_shape": [
+    1,
+    512,
+    16,
+    16,
+    16
+   ],
+   "halo_in_shape": [
+    1,
+    256,
+    18,
+    18,
+    18
+   ],
+   "halo_dhw": [
+    1,
+    1,
+    1
+   ],
+   "shard_halo_dhw": [
+    0,
+    0,
+    0
+   ],
+   "k": 3,
+   "stride": 1,
+   "padding": 1,
+   "bias": false,
+   "sites": [
+    "A:enc3 (down3)#22"
+   ],
+   "configs": [
+    "scale 7, 1 GPU, shards (1,1,1)"
+   ],
+   "measured": [
+    {
+     "config": "A",
+     "direction": "bwd-data",
+     "ms_per_step": 0.3144,
+     "ms_per_call": 0.3144,
+     "calls": 1,
+     "pct_roofline": 15.4,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "config": "A",
+     "direction": "bwd-weight",
+     "ms_per_step": 0.1559,
+     "ms_per_call": 0.1559,
+     "calls": 1,
+     "pct_roofline": 31.0,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "config": "A",
+     "direction": "fwd",
+     "ms_per_step": 0.1251,
+     "ms_per_call": 0.1251,
+     "calls": 1,
+     "pct_roofline": 38.6,
+     "solvers": [
+      "kernel_grouped_conv_fwd_xdl_cshuffle_v3"
+     ]
+    }
+   ]
+  },
+  {
+   "op": "ConvTranspose3d",
+   "weight_shape": [
+    512,
+    256,
+    2,
+    2,
+    2
+   ],
+   "in_shape": [
+    1,
+    512,
+    16,
+    32,
+    32
+   ],
+   "out_shape": [
+    1,
+    256,
+    32,
+    64,
+    64
+   ],
+   "halo_in_shape": [
+    1,
+    512,
+    16,
+    32,
+    32
+   ],
+   "halo_dhw": [
+    0,
+    0,
+    0
+   ],
+   "shard_halo_dhw": [
+    0,
+    0,
+    0
+   ],
+   "k": 2,
+   "stride": 2,
+   "padding": 0,
+   "bias": true,
+   "sites": [
+    "B:dec1 (up2)#43"
+   ],
+   "configs": [
+    "scale 8, 2 GPUs, shards (2,1,1)"
+   ],
+   "measured": [
+    {
+     "config": "B",
+     "direction": "bwd-weight",
+     "ms_per_step": 0.2355,
+     "ms_per_call": 0.2355,
+     "calls": 1,
+     "pct_roofline": 24.3,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "config": "B",
+     "direction": "bwd-data",
+     "ms_per_step": 0.1843,
+     "ms_per_call": 0.1843,
+     "calls": 1,
+     "pct_roofline": 31.1,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "config": "B",
+     "direction": "bwd-data",
+     "ms_per_step": 0.1434,
+     "ms_per_call": 0.1434,
+     "calls": 1,
+     "pct_roofline": 39.9,
+     "solvers": [
+      "kernel_grouped_conv_fwd_xdl_cshuffle_v3_2lds"
+     ]
+    }
+   ]
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    6,
+    64,
+    1,
+    1,
+    1
+   ],
+   "in_shape": [
+    1,
+    64,
+    128,
+    128,
+    128
+   ],
+   "out_shape": [
+    1,
+    6,
+    128,
+    128,
+    128
+   ],
+   "halo_in_shape": [
+    1,
+    64,
+    128,
+    128,
+    128
+   ],
+   "halo_dhw": [
+    0,
+    0,
+    0
+   ],
+   "shard_halo_dhw": [
+    0,
+    0,
+    0
+   ],
+   "k": 1,
+   "stride": 1,
+   "padding": 0,
+   "bias": true,
+   "sites": [
+    "A:outc#67"
+   ],
+   "configs": [
+    "scale 7, 1 GPU, shards (1,1,1)"
+   ],
+   "measured": [
+    {
+     "config": "A",
+     "direction": "bwd-data",
+     "ms_per_step": 0.4321,
+     "ms_per_call": 0.4321,
+     "calls": 1,
+     "pct_roofline": 20.6,
+     "solvers": [
+      "kernel_batched_gemm_xdl_cshuffle_v3_multi_d",
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "config": "A",
+     "direction": "fwd",
+     "ms_per_step": 0.0981,
+     "ms_per_call": 0.0981,
+     "calls": 1,
+     "pct_roofline": 90.7,
+     "solvers": [
+      "kernel_grouped_conv_fwd_xdl_cshuffle_v3"
+     ]
+    }
+   ]
+  },
+  {
+   "op": "ConvTranspose3d",
+   "weight_shape": [
+    256,
+    128,
+    2,
+    2,
+    2
+   ],
+   "in_shape": [
+    1,
+    256,
+    32,
+    32,
+    32
+   ],
+   "out_shape": [
+    1,
+    128,
+    64,
+    64,
+    64
+   ],
+   "halo_in_shape": [
+    1,
+    256,
+    32,
+    32,
+    32
+   ],
+   "halo_dhw": [
+    0,
+    0,
+    0
+   ],
+   "shard_halo_dhw": [
+    0,
+    0,
+    0
+   ],
+   "k": 2,
+   "stride": 2,
+   "padding": 0,
+   "bias": true,
+   "sites": [
+    "A:dec2 (up3)#51"
+   ],
+   "configs": [
+    "scale 7, 1 GPU, shards (1,1,1)"
+   ],
+   "measured": [
+    {
+     "config": "A",
+     "direction": "bwd-weight",
+     "ms_per_step": 0.175,
+     "ms_per_call": 0.175,
+     "calls": 1,
+     "pct_roofline": 16.4,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "config": "A",
+     "direction": "bwd-data",
+     "ms_per_step": 0.1207,
+     "ms_per_call": 0.1207,
+     "calls": 1,
+     "pct_roofline": 23.7,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "config": "A",
+     "direction": "bwd-data",
+     "ms_per_step": 0.0907,
+     "ms_per_call": 0.0907,
+     "calls": 1,
+     "pct_roofline": 31.6,
+     "solvers": [
+      "kernel_grouped_conv_fwd_xdl_cshuffle_v3_2lds"
+     ]
+    }
+   ]
+  },
+  {
+   "op": "ConvTranspose3d",
+   "weight_shape": [
+    512,
+    256,
+    2,
+    2,
+    2
+   ],
+   "in_shape": [
+    1,
+    512,
+    8,
+    32,
+    32
+   ],
+   "out_shape": [
+    1,
+    256,
+    16,
+    64,
+    64
+   ],
+   "halo_in_shape": [
+    1,
+    512,
+    8,
+    32,
+    32
+   ],
+   "halo_dhw": [
+    0,
+    0,
+    0
+   ],
+   "shard_halo_dhw": [
+    0,
+    0,
+    0
+   ],
+   "k": 2,
+   "stride": 2,
+   "padding": 0,
+   "bias": true,
+   "sites": [
+    "C:dec1 (up2)#43"
+   ],
+   "configs": [
+    "scale 8, 4 GPUs, shards (4,1,1)"
+   ],
+   "measured": [
+    {
+     "config": "C",
+     "direction": "bwd-weight",
+     "ms_per_step": 0.136,
+     "ms_per_call": 0.136,
+     "calls": 1,
+     "pct_roofline": 21.1,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "config": "C",
+     "direction": "bwd-data",
+     "ms_per_step": 0.1238,
+     "ms_per_call": 0.1238,
+     "calls": 1,
+     "pct_roofline": 23.1,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "config": "C",
+     "direction": "bwd-data",
+     "ms_per_step": 0.0872,
+     "ms_per_call": 0.0872,
+     "calls": 1,
+     "pct_roofline": 32.8,
+     "solvers": [
+      "kernel_grouped_conv_fwd_xdl_cshuffle_v3"
+     ]
+    }
+   ]
+  },
+  {
+   "op": "ConvTranspose3d",
+   "weight_shape": [
+    1024,
+    512,
+    2,
+    2,
+    2
+   ],
+   "in_shape": [
+    1,
+    1024,
+    8,
+    16,
+    16
+   ],
+   "out_shape": [
+    1,
+    512,
+    16,
+    32,
+    32
+   ],
+   "halo_in_shape": [
+    1,
+    1024,
+    8,
+    16,
+    16
+   ],
+   "halo_dhw": [
+    0,
+    0,
+    0
+   ],
+   "shard_halo_dhw": [
+    0,
+    0,
+    0
+   ],
+   "k": 2,
+   "stride": 2,
+   "padding": 0,
+   "bias": true,
+   "sites": [
+    "B:dec0 (up1)#35"
+   ],
+   "configs": [
+    "scale 8, 2 GPUs, shards (2,1,1)"
+   ],
+   "measured": [
+    {
+     "config": "B",
+     "direction": "bwd-weight",
+     "ms_per_step": 0.1488,
+     "ms_per_call": 0.1488,
+     "calls": 1,
+     "pct_roofline": 19.2,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "config": "B",
+     "direction": "bwd-data",
+     "ms_per_step": 0.1153,
+     "ms_per_call": 0.1153,
+     "calls": 1,
+     "pct_roofline": 24.8,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "config": "B",
+     "direction": "bwd-data",
+     "ms_per_step": 0.0816,
+     "ms_per_call": 0.0816,
+     "calls": 1,
+     "pct_roofline": 35.1,
+     "solvers": [
+      "kernel_grouped_conv_fwd_xdl_cshuffle_v3"
+     ]
+    }
+   ]
+  },
+  {
+   "op": "ConvTranspose3d",
+   "weight_shape": [
+    1024,
+    512,
+    2,
+    2,
+    2
+   ],
+   "in_shape": [
+    1,
+    1024,
+    4,
+    16,
+    16
+   ],
+   "out_shape": [
+    1,
+    512,
+    8,
+    32,
+    32
+   ],
+   "halo_in_shape": [
+    1,
+    1024,
+    4,
+    16,
+    16
+   ],
+   "halo_dhw": [
+    0,
+    0,
+    0
+   ],
+   "shard_halo_dhw": [
+    0,
+    0,
+    0
+   ],
+   "k": 2,
+   "stride": 2,
+   "padding": 0,
+   "bias": true,
+   "sites": [
+    "C:dec0 (up1)#35"
+   ],
+   "configs": [
+    "scale 8, 4 GPUs, shards (4,1,1)"
+   ],
+   "measured": [
+    {
+     "config": "C",
+     "direction": "bwd-weight",
+     "ms_per_step": 0.0815,
+     "ms_per_call": 0.0815,
+     "calls": 1,
+     "pct_roofline": 17.6,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "config": "C",
+     "direction": "bwd-data",
+     "ms_per_step": 0.0733,
+     "ms_per_call": 0.0733,
+     "calls": 1,
+     "pct_roofline": 19.5,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "config": "C",
+     "direction": "bwd-data",
+     "ms_per_step": 0.0611,
+     "ms_per_call": 0.0611,
+     "calls": 1,
+     "pct_roofline": 23.4,
+     "solvers": [
+      "kernel_grouped_conv_fwd_xdl_cshuffle_v3"
+     ]
+    }
+   ]
+  },
+  {
+   "op": "ConvTranspose3d",
+   "weight_shape": [
+    512,
+    256,
+    2,
+    2,
+    2
+   ],
+   "in_shape": [
+    1,
+    512,
+    16,
+    16,
+    16
+   ],
+   "out_shape": [
+    1,
+    256,
+    32,
+    32,
+    32
+   ],
+   "halo_in_shape": [
+    1,
+    512,
+    16,
+    16,
+    16
+   ],
+   "halo_dhw": [
+    0,
+    0,
+    0
+   ],
+   "shard_halo_dhw": [
+    0,
+    0,
+    0
+   ],
+   "k": 2,
+   "stride": 2,
+   "padding": 0,
+   "bias": true,
+   "sites": [
+    "A:dec1 (up2)#43"
+   ],
+   "configs": [
+    "scale 7, 1 GPU, shards (1,1,1)"
+   ],
+   "measured": [
+    {
+     "config": "A",
+     "direction": "bwd-weight",
+     "ms_per_step": 0.0821,
+     "ms_per_call": 0.0821,
+     "calls": 1,
+     "pct_roofline": 17.4,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "config": "A",
+     "direction": "bwd-data",
+     "ms_per_step": 0.065,
+     "ms_per_call": 0.065,
+     "calls": 1,
+     "pct_roofline": 22.0,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "config": "A",
+     "direction": "bwd-data",
+     "ms_per_step": 0.0458,
+     "ms_per_call": 0.0458,
+     "calls": 1,
+     "pct_roofline": 31.3,
+     "solvers": [
+      "kernel_grouped_conv_fwd_xdl_cshuffle_v3"
+     ]
+    }
+   ]
+  },
+  {
+   "op": "ConvTranspose3d",
+   "weight_shape": [
+    1024,
+    512,
+    2,
+    2,
+    2
+   ],
+   "in_shape": [
+    1,
+    1024,
+    8,
+    8,
+    8
+   ],
+   "out_shape": [
+    1,
+    512,
+    16,
+    16,
+    16
+   ],
+   "halo_in_shape": [
+    1,
+    1024,
+    8,
+    8,
+    8
+   ],
+   "halo_dhw": [
+    0,
+    0,
+    0
+   ],
+   "shard_halo_dhw": [
+    0,
+    0,
+    0
+   ],
+   "k": 2,
+   "stride": 2,
+   "padding": 0,
+   "bias": true,
+   "sites": [
+    "A:dec0 (up1)#35"
+   ],
+   "configs": [
+    "scale 7, 1 GPU, shards (1,1,1)"
+   ],
+   "measured": [
+    {
+     "config": "A",
+     "direction": "bwd-data",
+     "ms_per_step": 0.056,
+     "ms_per_call": 0.056,
+     "calls": 1,
+     "pct_roofline": 12.8,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "config": "A",
+     "direction": "bwd-weight",
+     "ms_per_step": 0.05,
+     "ms_per_call": 0.05,
+     "calls": 1,
+     "pct_roofline": 14.3,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "config": "A",
+     "direction": "bwd-data",
+     "ms_per_step": 0.043,
+     "ms_per_call": 0.043,
+     "calls": 1,
+     "pct_roofline": 16.6,
+     "solvers": [
+      "kernel_grouped_conv_fwd_xdl_cshuffle_v3"
+     ]
+    }
+   ]
+  }
+ ]
+}

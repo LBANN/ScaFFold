@@ -1,0 +1,5065 @@
+{
+ "source": "work/triton-conv/bin/conv_census.py, three training steps per configuration, wrapped entry points",
+ "form": "adapter",
+ "note": "The shape and padding the kernel was handed, read off a real call. Every k>1 convolution here is padded: the ScaFFold adapter exchanges a halo only on genuinely split axes.",
+ "configs": [
+  {
+   "tag": "A",
+   "desc": "scale 7, 1 GPU, shards (1,1,1)",
+   "capture": "cens_A.census.json"
+  },
+  {
+   "tag": "B",
+   "desc": "scale 8, 1 GPU, shards (1,1,1)",
+   "capture": "cens_B.census.json"
+  },
+  {
+   "tag": "C",
+   "desc": "scale 8, 2 GPUs, shards (2,1,1)",
+   "capture": "cens_C.r0.census.json"
+  },
+  {
+   "tag": "D",
+   "desc": "scale 8, 4 GPUs, shards (4,1,1)",
+   "capture": "cens_D.r0.census.json"
+  }
+ ],
+ "n_problems": 88,
+ "problems": [
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    64,
+    128,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    128,
+    256,
+    256,
+    256
+   ],
+   "out_shape": [
+    1,
+    64,
+    256,
+    256,
+    256
+   ],
+   "kernel": [
+    3,
+    3,
+    3
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": true,
+   "sites": [
+    "B:up_list.4.conv.double_conv.0"
+   ],
+   "configs": [
+    "scale 8, 1 GPU, shards (1,1,1)"
+   ],
+   "name": "B-up_list.4.conv.double_conv.0"
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    64,
+    128,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    128,
+    130,
+    256,
+    256
+   ],
+   "out_shape": [
+    1,
+    64,
+    128,
+    256,
+    256
+   ],
+   "kernel": [
+    3,
+    3,
+    3
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "padding": [
+    0,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": true,
+   "sites": [
+    "C:up_list.4.conv.double_conv.0"
+   ],
+   "configs": [
+    "scale 8, 2 GPUs, shards (2,1,1)"
+   ],
+   "name": "C-up_list.4.conv.double_conv.0"
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    64,
+    64,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    64,
+    256,
+    256,
+    256
+   ],
+   "out_shape": [
+    1,
+    64,
+    256,
+    256,
+    256
+   ],
+   "kernel": [
+    3,
+    3,
+    3
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": true,
+   "sites": [
+    "B:down_list.0.double_conv.3",
+    "B:up_list.4.conv.double_conv.3"
+   ],
+   "configs": [
+    "scale 8, 1 GPU, shards (1,1,1)"
+   ],
+   "name": "B-down_list.0.double_conv.3"
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    3,
+    64,
+    1,
+    1,
+    1
+   ],
+   "in_shape": [
+    1,
+    64,
+    256,
+    256,
+    256
+   ],
+   "out_shape": [
+    1,
+    3,
+    256,
+    256,
+    256
+   ],
+   "kernel": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "padding": [
+    0,
+    0,
+    0
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": true,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": true,
+   "sites": [
+    "B:up_list.5.conv"
+   ],
+   "configs": [
+    "scale 8, 1 GPU, shards (1,1,1)"
+   ],
+   "name": "B-up_list.5.conv"
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    64,
+    128,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    128,
+    66,
+    256,
+    256
+   ],
+   "out_shape": [
+    1,
+    64,
+    64,
+    256,
+    256
+   ],
+   "kernel": [
+    3,
+    3,
+    3
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "padding": [
+    0,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": true,
+   "sites": [
+    "D:up_list.4.conv.double_conv.0"
+   ],
+   "configs": [
+    "scale 8, 4 GPUs, shards (4,1,1)"
+   ],
+   "name": "D-up_list.4.conv.double_conv.0"
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    64,
+    64,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    64,
+    130,
+    256,
+    256
+   ],
+   "out_shape": [
+    1,
+    64,
+    128,
+    256,
+    256
+   ],
+   "kernel": [
+    3,
+    3,
+    3
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "padding": [
+    0,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": true,
+   "sites": [
+    "C:down_list.0.double_conv.3",
+    "C:up_list.4.conv.double_conv.3"
+   ],
+   "configs": [
+    "scale 8, 2 GPUs, shards (2,1,1)"
+   ],
+   "name": "C-down_list.0.double_conv.3"
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    128,
+    256,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    256,
+    128,
+    128,
+    128
+   ],
+   "out_shape": [
+    1,
+    128,
+    128,
+    128,
+    128
+   ],
+   "kernel": [
+    3,
+    3,
+    3
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": true,
+   "sites": [
+    "B:up_list.3.conv.double_conv.0"
+   ],
+   "configs": [
+    "scale 8, 1 GPU, shards (1,1,1)"
+   ],
+   "name": "B-up_list.3.conv.double_conv.0"
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    3,
+    64,
+    1,
+    1,
+    1
+   ],
+   "in_shape": [
+    1,
+    64,
+    128,
+    256,
+    256
+   ],
+   "out_shape": [
+    1,
+    3,
+    128,
+    256,
+    256
+   ],
+   "kernel": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "padding": [
+    0,
+    0,
+    0
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": true,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": true,
+   "sites": [
+    "C:up_list.5.conv"
+   ],
+   "configs": [
+    "scale 8, 2 GPUs, shards (2,1,1)"
+   ],
+   "name": "C-up_list.5.conv"
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    128,
+    256,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    256,
+    66,
+    128,
+    128
+   ],
+   "out_shape": [
+    1,
+    128,
+    64,
+    128,
+    128
+   ],
+   "kernel": [
+    3,
+    3,
+    3
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "padding": [
+    0,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": true,
+   "sites": [
+    "C:up_list.3.conv.double_conv.0"
+   ],
+   "configs": [
+    "scale 8, 2 GPUs, shards (2,1,1)"
+   ],
+   "name": "C-up_list.3.conv.double_conv.0"
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    64,
+    64,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    64,
+    66,
+    256,
+    256
+   ],
+   "out_shape": [
+    1,
+    64,
+    64,
+    256,
+    256
+   ],
+   "kernel": [
+    3,
+    3,
+    3
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "padding": [
+    0,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": true,
+   "sites": [
+    "D:down_list.0.double_conv.3",
+    "D:up_list.4.conv.double_conv.3"
+   ],
+   "configs": [
+    "scale 8, 4 GPUs, shards (4,1,1)"
+   ],
+   "name": "D-down_list.0.double_conv.3"
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    64,
+    128,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    128,
+    128,
+    128,
+    128
+   ],
+   "out_shape": [
+    1,
+    64,
+    128,
+    128,
+    128
+   ],
+   "kernel": [
+    3,
+    3,
+    3
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": true,
+   "sites": [
+    "A:up_list.3.conv.double_conv.0"
+   ],
+   "configs": [
+    "scale 7, 1 GPU, shards (1,1,1)"
+   ],
+   "name": "A-up_list.3.conv.double_conv.0"
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    128,
+    128,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    128,
+    128,
+    128,
+    128
+   ],
+   "out_shape": [
+    1,
+    128,
+    128,
+    128,
+    128
+   ],
+   "kernel": [
+    3,
+    3,
+    3
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": true,
+   "sites": [
+    "B:down_list.1.maxpool_conv.1.double_conv.3",
+    "B:up_list.3.conv.double_conv.3"
+   ],
+   "configs": [
+    "scale 8, 1 GPU, shards (1,1,1)"
+   ],
+   "name": "B-down_list.1.maxpool_conv.1.double_conv.3"
+  },
+  {
+   "op": "ConvTranspose3d",
+   "weight_shape": [
+    128,
+    64,
+    2,
+    2,
+    2
+   ],
+   "in_shape": [
+    1,
+    128,
+    128,
+    128,
+    128
+   ],
+   "out_shape": [
+    1,
+    64,
+    256,
+    256,
+    256
+   ],
+   "kernel": [
+    2,
+    2,
+    2
+   ],
+   "stride": [
+    2,
+    2,
+    2
+   ],
+   "padding": [
+    0,
+    0,
+    0
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": true,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": true,
+   "sites": [
+    "B:up_list.4.up"
+   ],
+   "configs": [
+    "scale 8, 1 GPU, shards (1,1,1)"
+   ],
+   "name": "B-up_list.4.up"
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    3,
+    64,
+    1,
+    1,
+    1
+   ],
+   "in_shape": [
+    1,
+    64,
+    64,
+    256,
+    256
+   ],
+   "out_shape": [
+    1,
+    3,
+    64,
+    256,
+    256
+   ],
+   "kernel": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "padding": [
+    0,
+    0,
+    0
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": true,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": true,
+   "sites": [
+    "D:up_list.5.conv"
+   ],
+   "configs": [
+    "scale 8, 4 GPUs, shards (4,1,1)"
+   ],
+   "name": "D-up_list.5.conv"
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    128,
+    256,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    256,
+    34,
+    128,
+    128
+   ],
+   "out_shape": [
+    1,
+    128,
+    32,
+    128,
+    128
+   ],
+   "kernel": [
+    3,
+    3,
+    3
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "padding": [
+    0,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": true,
+   "sites": [
+    "D:up_list.3.conv.double_conv.0"
+   ],
+   "configs": [
+    "scale 8, 4 GPUs, shards (4,1,1)"
+   ],
+   "name": "D-up_list.3.conv.double_conv.0"
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    128,
+    128,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    128,
+    66,
+    128,
+    128
+   ],
+   "out_shape": [
+    1,
+    128,
+    64,
+    128,
+    128
+   ],
+   "kernel": [
+    3,
+    3,
+    3
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "padding": [
+    0,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": true,
+   "sites": [
+    "C:down_list.1.maxpool_conv.1.double_conv.3",
+    "C:up_list.3.conv.double_conv.3"
+   ],
+   "configs": [
+    "scale 8, 2 GPUs, shards (2,1,1)"
+   ],
+   "name": "C-down_list.1.maxpool_conv.1.double_conv.3"
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    64,
+    64,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    64,
+    128,
+    128,
+    128
+   ],
+   "out_shape": [
+    1,
+    64,
+    128,
+    128,
+    128
+   ],
+   "kernel": [
+    3,
+    3,
+    3
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": false,
+   "sites": [
+    "A:down_list.0.double_conv.3",
+    "A:up_list.3.conv.double_conv.3"
+   ],
+   "configs": [
+    "scale 7, 1 GPU, shards (1,1,1)"
+   ],
+   "name": "A-down_list.0.double_conv.3"
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    3,
+    64,
+    1,
+    1,
+    1
+   ],
+   "in_shape": [
+    1,
+    64,
+    128,
+    128,
+    128
+   ],
+   "out_shape": [
+    1,
+    3,
+    128,
+    128,
+    128
+   ],
+   "kernel": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "padding": [
+    0,
+    0,
+    0
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": true,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": false,
+   "sites": [
+    "A:up_list.4.conv"
+   ],
+   "configs": [
+    "scale 7, 1 GPU, shards (1,1,1)"
+   ],
+   "name": "A-up_list.4.conv"
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    128,
+    64,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    64,
+    128,
+    128,
+    128
+   ],
+   "out_shape": [
+    1,
+    128,
+    128,
+    128,
+    128
+   ],
+   "kernel": [
+    3,
+    3,
+    3
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": true,
+   "sites": [
+    "B:down_list.1.maxpool_conv.1.double_conv.0"
+   ],
+   "configs": [
+    "scale 8, 1 GPU, shards (1,1,1)"
+   ],
+   "name": "B-down_list.1.maxpool_conv.1.double_conv.0"
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    256,
+    512,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    512,
+    64,
+    64,
+    64
+   ],
+   "out_shape": [
+    1,
+    256,
+    64,
+    64,
+    64
+   ],
+   "kernel": [
+    3,
+    3,
+    3
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": false,
+   "sites": [
+    "B:up_list.2.conv.double_conv.0"
+   ],
+   "configs": [
+    "scale 8, 1 GPU, shards (1,1,1)"
+   ],
+   "name": "B-up_list.2.conv.double_conv.0"
+  },
+  {
+   "op": "ConvTranspose3d",
+   "weight_shape": [
+    128,
+    64,
+    2,
+    2,
+    2
+   ],
+   "in_shape": [
+    1,
+    128,
+    64,
+    128,
+    128
+   ],
+   "out_shape": [
+    1,
+    64,
+    128,
+    256,
+    256
+   ],
+   "kernel": [
+    2,
+    2,
+    2
+   ],
+   "stride": [
+    2,
+    2,
+    2
+   ],
+   "padding": [
+    0,
+    0,
+    0
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": true,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": true,
+   "sites": [
+    "C:up_list.4.up"
+   ],
+   "configs": [
+    "scale 8, 2 GPUs, shards (2,1,1)"
+   ],
+   "name": "C-up_list.4.up"
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    256,
+    512,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    512,
+    34,
+    64,
+    64
+   ],
+   "out_shape": [
+    1,
+    256,
+    32,
+    64,
+    64
+   ],
+   "kernel": [
+    3,
+    3,
+    3
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "padding": [
+    0,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": false,
+   "sites": [
+    "C:up_list.2.conv.double_conv.0"
+   ],
+   "configs": [
+    "scale 8, 2 GPUs, shards (2,1,1)"
+   ],
+   "name": "C-up_list.2.conv.double_conv.0"
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    128,
+    128,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    128,
+    34,
+    128,
+    128
+   ],
+   "out_shape": [
+    1,
+    128,
+    32,
+    128,
+    128
+   ],
+   "kernel": [
+    3,
+    3,
+    3
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "padding": [
+    0,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": false,
+   "sites": [
+    "D:down_list.1.maxpool_conv.1.double_conv.3",
+    "D:up_list.3.conv.double_conv.3"
+   ],
+   "configs": [
+    "scale 8, 4 GPUs, shards (4,1,1)"
+   ],
+   "name": "D-down_list.1.maxpool_conv.1.double_conv.3"
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    128,
+    64,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    64,
+    66,
+    128,
+    128
+   ],
+   "out_shape": [
+    1,
+    128,
+    64,
+    128,
+    128
+   ],
+   "kernel": [
+    3,
+    3,
+    3
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "padding": [
+    0,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": false,
+   "sites": [
+    "C:down_list.1.maxpool_conv.1.double_conv.0"
+   ],
+   "configs": [
+    "scale 8, 2 GPUs, shards (2,1,1)"
+   ],
+   "name": "C-down_list.1.maxpool_conv.1.double_conv.0"
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    128,
+    256,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    256,
+    64,
+    64,
+    64
+   ],
+   "out_shape": [
+    1,
+    128,
+    64,
+    64,
+    64
+   ],
+   "kernel": [
+    3,
+    3,
+    3
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": false,
+   "sites": [
+    "A:up_list.2.conv.double_conv.0"
+   ],
+   "configs": [
+    "scale 7, 1 GPU, shards (1,1,1)"
+   ],
+   "name": "A-up_list.2.conv.double_conv.0"
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    256,
+    256,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    256,
+    64,
+    64,
+    64
+   ],
+   "out_shape": [
+    1,
+    256,
+    64,
+    64,
+    64
+   ],
+   "kernel": [
+    3,
+    3,
+    3
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": false,
+   "sites": [
+    "B:down_list.2.maxpool_conv.1.double_conv.3",
+    "B:up_list.2.conv.double_conv.3"
+   ],
+   "configs": [
+    "scale 8, 1 GPU, shards (1,1,1)"
+   ],
+   "name": "B-down_list.2.maxpool_conv.1.double_conv.3"
+  },
+  {
+   "op": "ConvTranspose3d",
+   "weight_shape": [
+    256,
+    128,
+    2,
+    2,
+    2
+   ],
+   "in_shape": [
+    1,
+    256,
+    64,
+    64,
+    64
+   ],
+   "out_shape": [
+    1,
+    128,
+    128,
+    128,
+    128
+   ],
+   "kernel": [
+    2,
+    2,
+    2
+   ],
+   "stride": [
+    2,
+    2,
+    2
+   ],
+   "padding": [
+    0,
+    0,
+    0
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": true,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": true,
+   "sites": [
+    "B:up_list.3.up"
+   ],
+   "configs": [
+    "scale 8, 1 GPU, shards (1,1,1)"
+   ],
+   "name": "B-up_list.3.up"
+  },
+  {
+   "op": "ConvTranspose3d",
+   "weight_shape": [
+    128,
+    64,
+    2,
+    2,
+    2
+   ],
+   "in_shape": [
+    1,
+    128,
+    32,
+    128,
+    128
+   ],
+   "out_shape": [
+    1,
+    64,
+    64,
+    256,
+    256
+   ],
+   "kernel": [
+    2,
+    2,
+    2
+   ],
+   "stride": [
+    2,
+    2,
+    2
+   ],
+   "padding": [
+    0,
+    0,
+    0
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": true,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": true,
+   "sites": [
+    "D:up_list.4.up"
+   ],
+   "configs": [
+    "scale 8, 4 GPUs, shards (4,1,1)"
+   ],
+   "name": "D-up_list.4.up"
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    64,
+    3,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    3,
+    256,
+    256,
+    256
+   ],
+   "out_shape": [
+    1,
+    64,
+    256,
+    256,
+    256
+   ],
+   "kernel": [
+    3,
+    3,
+    3
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": true,
+   "sites": [
+    "B:down_list.0.double_conv.0"
+   ],
+   "configs": [
+    "scale 8, 1 GPU, shards (1,1,1)"
+   ],
+   "name": "B-down_list.0.double_conv.0"
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    256,
+    512,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    512,
+    18,
+    64,
+    64
+   ],
+   "out_shape": [
+    1,
+    256,
+    16,
+    64,
+    64
+   ],
+   "kernel": [
+    3,
+    3,
+    3
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "padding": [
+    0,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": false,
+   "sites": [
+    "D:up_list.2.conv.double_conv.0"
+   ],
+   "configs": [
+    "scale 8, 4 GPUs, shards (4,1,1)"
+   ],
+   "name": "D-up_list.2.conv.double_conv.0"
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    256,
+    256,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    256,
+    34,
+    64,
+    64
+   ],
+   "out_shape": [
+    1,
+    256,
+    32,
+    64,
+    64
+   ],
+   "kernel": [
+    3,
+    3,
+    3
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "padding": [
+    0,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": false,
+   "sites": [
+    "C:down_list.2.maxpool_conv.1.double_conv.3",
+    "C:up_list.2.conv.double_conv.3"
+   ],
+   "configs": [
+    "scale 8, 2 GPUs, shards (2,1,1)"
+   ],
+   "name": "C-down_list.2.maxpool_conv.1.double_conv.3"
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    128,
+    64,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    64,
+    34,
+    128,
+    128
+   ],
+   "out_shape": [
+    1,
+    128,
+    32,
+    128,
+    128
+   ],
+   "kernel": [
+    3,
+    3,
+    3
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "padding": [
+    0,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": false,
+   "sites": [
+    "D:down_list.1.maxpool_conv.1.double_conv.0"
+   ],
+   "configs": [
+    "scale 8, 4 GPUs, shards (4,1,1)"
+   ],
+   "name": "D-down_list.1.maxpool_conv.1.double_conv.0"
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    128,
+    128,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    128,
+    64,
+    64,
+    64
+   ],
+   "out_shape": [
+    1,
+    128,
+    64,
+    64,
+    64
+   ],
+   "kernel": [
+    3,
+    3,
+    3
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": false,
+   "sites": [
+    "A:down_list.1.maxpool_conv.1.double_conv.3",
+    "A:up_list.2.conv.double_conv.3"
+   ],
+   "configs": [
+    "scale 7, 1 GPU, shards (1,1,1)"
+   ],
+   "name": "A-down_list.1.maxpool_conv.1.double_conv.3"
+  },
+  {
+   "op": "ConvTranspose3d",
+   "weight_shape": [
+    128,
+    64,
+    2,
+    2,
+    2
+   ],
+   "in_shape": [
+    1,
+    128,
+    64,
+    64,
+    64
+   ],
+   "out_shape": [
+    1,
+    64,
+    128,
+    128,
+    128
+   ],
+   "kernel": [
+    2,
+    2,
+    2
+   ],
+   "stride": [
+    2,
+    2,
+    2
+   ],
+   "padding": [
+    0,
+    0,
+    0
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": true,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": false,
+   "sites": [
+    "A:up_list.3.up"
+   ],
+   "configs": [
+    "scale 7, 1 GPU, shards (1,1,1)"
+   ],
+   "name": "A-up_list.3.up"
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    256,
+    128,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    128,
+    64,
+    64,
+    64
+   ],
+   "out_shape": [
+    1,
+    256,
+    64,
+    64,
+    64
+   ],
+   "kernel": [
+    3,
+    3,
+    3
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": false,
+   "sites": [
+    "B:down_list.2.maxpool_conv.1.double_conv.0"
+   ],
+   "configs": [
+    "scale 8, 1 GPU, shards (1,1,1)"
+   ],
+   "name": "B-down_list.2.maxpool_conv.1.double_conv.0"
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    512,
+    1024,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    1024,
+    32,
+    32,
+    32
+   ],
+   "out_shape": [
+    1,
+    512,
+    32,
+    32,
+    32
+   ],
+   "kernel": [
+    3,
+    3,
+    3
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": false,
+   "sites": [
+    "B:up_list.1.conv.double_conv.0"
+   ],
+   "configs": [
+    "scale 8, 1 GPU, shards (1,1,1)"
+   ],
+   "name": "B-up_list.1.conv.double_conv.0"
+  },
+  {
+   "op": "ConvTranspose3d",
+   "weight_shape": [
+    256,
+    128,
+    2,
+    2,
+    2
+   ],
+   "in_shape": [
+    1,
+    256,
+    32,
+    64,
+    64
+   ],
+   "out_shape": [
+    1,
+    128,
+    64,
+    128,
+    128
+   ],
+   "kernel": [
+    2,
+    2,
+    2
+   ],
+   "stride": [
+    2,
+    2,
+    2
+   ],
+   "padding": [
+    0,
+    0,
+    0
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": true,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": false,
+   "sites": [
+    "C:up_list.3.up"
+   ],
+   "configs": [
+    "scale 8, 2 GPUs, shards (2,1,1)"
+   ],
+   "name": "C-up_list.3.up"
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    64,
+    3,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    3,
+    130,
+    256,
+    256
+   ],
+   "out_shape": [
+    1,
+    64,
+    128,
+    256,
+    256
+   ],
+   "kernel": [
+    3,
+    3,
+    3
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "padding": [
+    0,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": true,
+   "sites": [
+    "C:down_list.0.double_conv.0"
+   ],
+   "configs": [
+    "scale 8, 2 GPUs, shards (2,1,1)"
+   ],
+   "name": "C-down_list.0.double_conv.0"
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    512,
+    1024,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    1024,
+    18,
+    32,
+    32
+   ],
+   "out_shape": [
+    1,
+    512,
+    16,
+    32,
+    32
+   ],
+   "kernel": [
+    3,
+    3,
+    3
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "padding": [
+    0,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": false,
+   "sites": [
+    "C:up_list.1.conv.double_conv.0"
+   ],
+   "configs": [
+    "scale 8, 2 GPUs, shards (2,1,1)"
+   ],
+   "name": "C-up_list.1.conv.double_conv.0"
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    256,
+    256,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    256,
+    18,
+    64,
+    64
+   ],
+   "out_shape": [
+    1,
+    256,
+    16,
+    64,
+    64
+   ],
+   "kernel": [
+    3,
+    3,
+    3
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "padding": [
+    0,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": false,
+   "sites": [
+    "D:down_list.2.maxpool_conv.1.double_conv.3",
+    "D:up_list.2.conv.double_conv.3"
+   ],
+   "configs": [
+    "scale 8, 4 GPUs, shards (4,1,1)"
+   ],
+   "name": "D-down_list.2.maxpool_conv.1.double_conv.3"
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    256,
+    128,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    128,
+    34,
+    64,
+    64
+   ],
+   "out_shape": [
+    1,
+    256,
+    32,
+    64,
+    64
+   ],
+   "kernel": [
+    3,
+    3,
+    3
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "padding": [
+    0,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": false,
+   "sites": [
+    "C:down_list.2.maxpool_conv.1.double_conv.0"
+   ],
+   "configs": [
+    "scale 8, 2 GPUs, shards (2,1,1)"
+   ],
+   "name": "C-down_list.2.maxpool_conv.1.double_conv.0"
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    128,
+    64,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    64,
+    64,
+    64,
+    64
+   ],
+   "out_shape": [
+    1,
+    128,
+    64,
+    64,
+    64
+   ],
+   "kernel": [
+    3,
+    3,
+    3
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": false,
+   "sites": [
+    "A:down_list.1.maxpool_conv.1.double_conv.0"
+   ],
+   "configs": [
+    "scale 7, 1 GPU, shards (1,1,1)"
+   ],
+   "name": "A-down_list.1.maxpool_conv.1.double_conv.0"
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    256,
+    512,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    512,
+    32,
+    32,
+    32
+   ],
+   "out_shape": [
+    1,
+    256,
+    32,
+    32,
+    32
+   ],
+   "kernel": [
+    3,
+    3,
+    3
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": false,
+   "sites": [
+    "A:up_list.1.conv.double_conv.0"
+   ],
+   "configs": [
+    "scale 7, 1 GPU, shards (1,1,1)"
+   ],
+   "name": "A-up_list.1.conv.double_conv.0"
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    512,
+    512,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    512,
+    32,
+    32,
+    32
+   ],
+   "out_shape": [
+    1,
+    512,
+    32,
+    32,
+    32
+   ],
+   "kernel": [
+    3,
+    3,
+    3
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": false,
+   "sites": [
+    "B:down_list.3.maxpool_conv.1.double_conv.3",
+    "B:up_list.1.conv.double_conv.3"
+   ],
+   "configs": [
+    "scale 8, 1 GPU, shards (1,1,1)"
+   ],
+   "name": "B-down_list.3.maxpool_conv.1.double_conv.3"
+  },
+  {
+   "op": "ConvTranspose3d",
+   "weight_shape": [
+    512,
+    256,
+    2,
+    2,
+    2
+   ],
+   "in_shape": [
+    1,
+    512,
+    32,
+    32,
+    32
+   ],
+   "out_shape": [
+    1,
+    256,
+    64,
+    64,
+    64
+   ],
+   "kernel": [
+    2,
+    2,
+    2
+   ],
+   "stride": [
+    2,
+    2,
+    2
+   ],
+   "padding": [
+    0,
+    0,
+    0
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": true,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": false,
+   "sites": [
+    "B:up_list.2.up"
+   ],
+   "configs": [
+    "scale 8, 1 GPU, shards (1,1,1)"
+   ],
+   "name": "B-up_list.2.up"
+  },
+  {
+   "op": "ConvTranspose3d",
+   "weight_shape": [
+    256,
+    128,
+    2,
+    2,
+    2
+   ],
+   "in_shape": [
+    1,
+    256,
+    16,
+    64,
+    64
+   ],
+   "out_shape": [
+    1,
+    128,
+    32,
+    128,
+    128
+   ],
+   "kernel": [
+    2,
+    2,
+    2
+   ],
+   "stride": [
+    2,
+    2,
+    2
+   ],
+   "padding": [
+    0,
+    0,
+    0
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": true,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": false,
+   "sites": [
+    "D:up_list.3.up"
+   ],
+   "configs": [
+    "scale 8, 4 GPUs, shards (4,1,1)"
+   ],
+   "name": "D-up_list.3.up"
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    64,
+    3,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    3,
+    66,
+    256,
+    256
+   ],
+   "out_shape": [
+    1,
+    64,
+    64,
+    256,
+    256
+   ],
+   "kernel": [
+    3,
+    3,
+    3
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "padding": [
+    0,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": true,
+   "sites": [
+    "D:down_list.0.double_conv.0"
+   ],
+   "configs": [
+    "scale 8, 4 GPUs, shards (4,1,1)"
+   ],
+   "name": "D-down_list.0.double_conv.0"
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    512,
+    1024,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    1024,
+    10,
+    32,
+    32
+   ],
+   "out_shape": [
+    1,
+    512,
+    8,
+    32,
+    32
+   ],
+   "kernel": [
+    3,
+    3,
+    3
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "padding": [
+    0,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": false,
+   "sites": [
+    "D:up_list.1.conv.double_conv.0"
+   ],
+   "configs": [
+    "scale 8, 4 GPUs, shards (4,1,1)"
+   ],
+   "name": "D-up_list.1.conv.double_conv.0"
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    512,
+    512,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    512,
+    18,
+    32,
+    32
+   ],
+   "out_shape": [
+    1,
+    512,
+    16,
+    32,
+    32
+   ],
+   "kernel": [
+    3,
+    3,
+    3
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "padding": [
+    0,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": false,
+   "sites": [
+    "C:down_list.3.maxpool_conv.1.double_conv.3",
+    "C:up_list.1.conv.double_conv.3"
+   ],
+   "configs": [
+    "scale 8, 2 GPUs, shards (2,1,1)"
+   ],
+   "name": "C-down_list.3.maxpool_conv.1.double_conv.3"
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    256,
+    128,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    128,
+    18,
+    64,
+    64
+   ],
+   "out_shape": [
+    1,
+    256,
+    16,
+    64,
+    64
+   ],
+   "kernel": [
+    3,
+    3,
+    3
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "padding": [
+    0,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": false,
+   "sites": [
+    "D:down_list.2.maxpool_conv.1.double_conv.0"
+   ],
+   "configs": [
+    "scale 8, 4 GPUs, shards (4,1,1)"
+   ],
+   "name": "D-down_list.2.maxpool_conv.1.double_conv.0"
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    256,
+    256,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    256,
+    32,
+    32,
+    32
+   ],
+   "out_shape": [
+    1,
+    256,
+    32,
+    32,
+    32
+   ],
+   "kernel": [
+    3,
+    3,
+    3
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": false,
+   "sites": [
+    "A:down_list.2.maxpool_conv.1.double_conv.3",
+    "A:up_list.1.conv.double_conv.3"
+   ],
+   "configs": [
+    "scale 7, 1 GPU, shards (1,1,1)"
+   ],
+   "name": "A-down_list.2.maxpool_conv.1.double_conv.3"
+  },
+  {
+   "op": "ConvTranspose3d",
+   "weight_shape": [
+    256,
+    128,
+    2,
+    2,
+    2
+   ],
+   "in_shape": [
+    1,
+    256,
+    32,
+    32,
+    32
+   ],
+   "out_shape": [
+    1,
+    128,
+    64,
+    64,
+    64
+   ],
+   "kernel": [
+    2,
+    2,
+    2
+   ],
+   "stride": [
+    2,
+    2,
+    2
+   ],
+   "padding": [
+    0,
+    0,
+    0
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": true,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": false,
+   "sites": [
+    "A:up_list.2.up"
+   ],
+   "configs": [
+    "scale 7, 1 GPU, shards (1,1,1)"
+   ],
+   "name": "A-up_list.2.up"
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    512,
+    256,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    256,
+    32,
+    32,
+    32
+   ],
+   "out_shape": [
+    1,
+    512,
+    32,
+    32,
+    32
+   ],
+   "kernel": [
+    3,
+    3,
+    3
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": false,
+   "sites": [
+    "B:down_list.3.maxpool_conv.1.double_conv.0"
+   ],
+   "configs": [
+    "scale 8, 1 GPU, shards (1,1,1)"
+   ],
+   "name": "B-down_list.3.maxpool_conv.1.double_conv.0"
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    1024,
+    2048,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    2048,
+    16,
+    16,
+    16
+   ],
+   "out_shape": [
+    1,
+    1024,
+    16,
+    16,
+    16
+   ],
+   "kernel": [
+    3,
+    3,
+    3
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": false,
+   "sites": [
+    "B:up_list.0.conv.double_conv.0"
+   ],
+   "configs": [
+    "scale 8, 1 GPU, shards (1,1,1)"
+   ],
+   "name": "B-up_list.0.conv.double_conv.0"
+  },
+  {
+   "op": "ConvTranspose3d",
+   "weight_shape": [
+    512,
+    256,
+    2,
+    2,
+    2
+   ],
+   "in_shape": [
+    1,
+    512,
+    16,
+    32,
+    32
+   ],
+   "out_shape": [
+    1,
+    256,
+    32,
+    64,
+    64
+   ],
+   "kernel": [
+    2,
+    2,
+    2
+   ],
+   "stride": [
+    2,
+    2,
+    2
+   ],
+   "padding": [
+    0,
+    0,
+    0
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": true,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": false,
+   "sites": [
+    "C:up_list.2.up"
+   ],
+   "configs": [
+    "scale 8, 2 GPUs, shards (2,1,1)"
+   ],
+   "name": "C-up_list.2.up"
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    64,
+    3,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    3,
+    128,
+    128,
+    128
+   ],
+   "out_shape": [
+    1,
+    64,
+    128,
+    128,
+    128
+   ],
+   "kernel": [
+    3,
+    3,
+    3
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": false,
+   "sites": [
+    "A:down_list.0.double_conv.0"
+   ],
+   "configs": [
+    "scale 7, 1 GPU, shards (1,1,1)"
+   ],
+   "name": "A-down_list.0.double_conv.0"
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    1024,
+    2048,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    2048,
+    10,
+    16,
+    16
+   ],
+   "out_shape": [
+    1,
+    1024,
+    8,
+    16,
+    16
+   ],
+   "kernel": [
+    3,
+    3,
+    3
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "padding": [
+    0,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": false,
+   "sites": [
+    "C:up_list.0.conv.double_conv.0"
+   ],
+   "configs": [
+    "scale 8, 2 GPUs, shards (2,1,1)"
+   ],
+   "name": "C-up_list.0.conv.double_conv.0"
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    512,
+    512,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    512,
+    10,
+    32,
+    32
+   ],
+   "out_shape": [
+    1,
+    512,
+    8,
+    32,
+    32
+   ],
+   "kernel": [
+    3,
+    3,
+    3
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "padding": [
+    0,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": false,
+   "sites": [
+    "D:down_list.3.maxpool_conv.1.double_conv.3",
+    "D:up_list.1.conv.double_conv.3"
+   ],
+   "configs": [
+    "scale 8, 4 GPUs, shards (4,1,1)"
+   ],
+   "name": "D-down_list.3.maxpool_conv.1.double_conv.3"
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    512,
+    256,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    256,
+    18,
+    32,
+    32
+   ],
+   "out_shape": [
+    1,
+    512,
+    16,
+    32,
+    32
+   ],
+   "kernel": [
+    3,
+    3,
+    3
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "padding": [
+    0,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": false,
+   "sites": [
+    "C:down_list.3.maxpool_conv.1.double_conv.0"
+   ],
+   "configs": [
+    "scale 8, 2 GPUs, shards (2,1,1)"
+   ],
+   "name": "C-down_list.3.maxpool_conv.1.double_conv.0"
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    256,
+    128,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    128,
+    32,
+    32,
+    32
+   ],
+   "out_shape": [
+    1,
+    256,
+    32,
+    32,
+    32
+   ],
+   "kernel": [
+    3,
+    3,
+    3
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": false,
+   "sites": [
+    "A:down_list.2.maxpool_conv.1.double_conv.0"
+   ],
+   "configs": [
+    "scale 7, 1 GPU, shards (1,1,1)"
+   ],
+   "name": "A-down_list.2.maxpool_conv.1.double_conv.0"
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    512,
+    1024,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    1024,
+    16,
+    16,
+    16
+   ],
+   "out_shape": [
+    1,
+    512,
+    16,
+    16,
+    16
+   ],
+   "kernel": [
+    3,
+    3,
+    3
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": false,
+   "sites": [
+    "A:up_list.0.conv.double_conv.0"
+   ],
+   "configs": [
+    "scale 7, 1 GPU, shards (1,1,1)"
+   ],
+   "name": "A-up_list.0.conv.double_conv.0"
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    1024,
+    1024,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    1024,
+    16,
+    16,
+    16
+   ],
+   "out_shape": [
+    1,
+    1024,
+    16,
+    16,
+    16
+   ],
+   "kernel": [
+    3,
+    3,
+    3
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": false,
+   "sites": [
+    "B:down_list.4.maxpool_conv.1.double_conv.3",
+    "B:up_list.0.conv.double_conv.3"
+   ],
+   "configs": [
+    "scale 8, 1 GPU, shards (1,1,1)"
+   ],
+   "name": "B-down_list.4.maxpool_conv.1.double_conv.3"
+  },
+  {
+   "op": "ConvTranspose3d",
+   "weight_shape": [
+    1024,
+    512,
+    2,
+    2,
+    2
+   ],
+   "in_shape": [
+    1,
+    1024,
+    16,
+    16,
+    16
+   ],
+   "out_shape": [
+    1,
+    512,
+    32,
+    32,
+    32
+   ],
+   "kernel": [
+    2,
+    2,
+    2
+   ],
+   "stride": [
+    2,
+    2,
+    2
+   ],
+   "padding": [
+    0,
+    0,
+    0
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": true,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": false,
+   "sites": [
+    "B:up_list.1.up"
+   ],
+   "configs": [
+    "scale 8, 1 GPU, shards (1,1,1)"
+   ],
+   "name": "B-up_list.1.up"
+  },
+  {
+   "op": "ConvTranspose3d",
+   "weight_shape": [
+    512,
+    256,
+    2,
+    2,
+    2
+   ],
+   "in_shape": [
+    1,
+    512,
+    8,
+    32,
+    32
+   ],
+   "out_shape": [
+    1,
+    256,
+    16,
+    64,
+    64
+   ],
+   "kernel": [
+    2,
+    2,
+    2
+   ],
+   "stride": [
+    2,
+    2,
+    2
+   ],
+   "padding": [
+    0,
+    0,
+    0
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": true,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": false,
+   "sites": [
+    "D:up_list.2.up"
+   ],
+   "configs": [
+    "scale 8, 4 GPUs, shards (4,1,1)"
+   ],
+   "name": "D-up_list.2.up"
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    1024,
+    2048,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    2048,
+    6,
+    16,
+    16
+   ],
+   "out_shape": [
+    1,
+    1024,
+    4,
+    16,
+    16
+   ],
+   "kernel": [
+    3,
+    3,
+    3
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "padding": [
+    0,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": false,
+   "sites": [
+    "D:up_list.0.conv.double_conv.0"
+   ],
+   "configs": [
+    "scale 8, 4 GPUs, shards (4,1,1)"
+   ],
+   "name": "D-up_list.0.conv.double_conv.0"
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    1024,
+    1024,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    1024,
+    10,
+    16,
+    16
+   ],
+   "out_shape": [
+    1,
+    1024,
+    8,
+    16,
+    16
+   ],
+   "kernel": [
+    3,
+    3,
+    3
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "padding": [
+    0,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": false,
+   "sites": [
+    "C:down_list.4.maxpool_conv.1.double_conv.3",
+    "C:up_list.0.conv.double_conv.3"
+   ],
+   "configs": [
+    "scale 8, 2 GPUs, shards (2,1,1)"
+   ],
+   "name": "C-down_list.4.maxpool_conv.1.double_conv.3"
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    512,
+    256,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    256,
+    10,
+    32,
+    32
+   ],
+   "out_shape": [
+    1,
+    512,
+    8,
+    32,
+    32
+   ],
+   "kernel": [
+    3,
+    3,
+    3
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "padding": [
+    0,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": false,
+   "sites": [
+    "D:down_list.3.maxpool_conv.1.double_conv.0"
+   ],
+   "configs": [
+    "scale 8, 4 GPUs, shards (4,1,1)"
+   ],
+   "name": "D-down_list.3.maxpool_conv.1.double_conv.0"
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    512,
+    512,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    512,
+    16,
+    16,
+    16
+   ],
+   "out_shape": [
+    1,
+    512,
+    16,
+    16,
+    16
+   ],
+   "kernel": [
+    3,
+    3,
+    3
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": false,
+   "sites": [
+    "A:down_list.3.maxpool_conv.1.double_conv.3",
+    "A:up_list.0.conv.double_conv.3"
+   ],
+   "configs": [
+    "scale 7, 1 GPU, shards (1,1,1)"
+   ],
+   "name": "A-down_list.3.maxpool_conv.1.double_conv.3"
+  },
+  {
+   "op": "ConvTranspose3d",
+   "weight_shape": [
+    512,
+    256,
+    2,
+    2,
+    2
+   ],
+   "in_shape": [
+    1,
+    512,
+    16,
+    16,
+    16
+   ],
+   "out_shape": [
+    1,
+    256,
+    32,
+    32,
+    32
+   ],
+   "kernel": [
+    2,
+    2,
+    2
+   ],
+   "stride": [
+    2,
+    2,
+    2
+   ],
+   "padding": [
+    0,
+    0,
+    0
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": true,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": false,
+   "sites": [
+    "A:up_list.1.up"
+   ],
+   "configs": [
+    "scale 7, 1 GPU, shards (1,1,1)"
+   ],
+   "name": "A-up_list.1.up"
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    1024,
+    512,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    512,
+    16,
+    16,
+    16
+   ],
+   "out_shape": [
+    1,
+    1024,
+    16,
+    16,
+    16
+   ],
+   "kernel": [
+    3,
+    3,
+    3
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": false,
+   "sites": [
+    "B:down_list.4.maxpool_conv.1.double_conv.0"
+   ],
+   "configs": [
+    "scale 8, 1 GPU, shards (1,1,1)"
+   ],
+   "name": "B-down_list.4.maxpool_conv.1.double_conv.0"
+  },
+  {
+   "op": "ConvTranspose3d",
+   "weight_shape": [
+    1024,
+    512,
+    2,
+    2,
+    2
+   ],
+   "in_shape": [
+    1,
+    1024,
+    8,
+    16,
+    16
+   ],
+   "out_shape": [
+    1,
+    512,
+    16,
+    32,
+    32
+   ],
+   "kernel": [
+    2,
+    2,
+    2
+   ],
+   "stride": [
+    2,
+    2,
+    2
+   ],
+   "padding": [
+    0,
+    0,
+    0
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": true,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": false,
+   "sites": [
+    "C:up_list.1.up"
+   ],
+   "configs": [
+    "scale 8, 2 GPUs, shards (2,1,1)"
+   ],
+   "name": "C-up_list.1.up"
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    1024,
+    1024,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    1024,
+    6,
+    16,
+    16
+   ],
+   "out_shape": [
+    1,
+    1024,
+    4,
+    16,
+    16
+   ],
+   "kernel": [
+    3,
+    3,
+    3
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "padding": [
+    0,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": false,
+   "sites": [
+    "D:down_list.4.maxpool_conv.1.double_conv.3",
+    "D:up_list.0.conv.double_conv.3"
+   ],
+   "configs": [
+    "scale 8, 4 GPUs, shards (4,1,1)"
+   ],
+   "name": "D-down_list.4.maxpool_conv.1.double_conv.3"
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    1024,
+    512,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    512,
+    10,
+    16,
+    16
+   ],
+   "out_shape": [
+    1,
+    1024,
+    8,
+    16,
+    16
+   ],
+   "kernel": [
+    3,
+    3,
+    3
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "padding": [
+    0,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": false,
+   "sites": [
+    "C:down_list.4.maxpool_conv.1.double_conv.0"
+   ],
+   "configs": [
+    "scale 8, 2 GPUs, shards (2,1,1)"
+   ],
+   "name": "C-down_list.4.maxpool_conv.1.double_conv.0"
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    512,
+    256,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    256,
+    16,
+    16,
+    16
+   ],
+   "out_shape": [
+    1,
+    512,
+    16,
+    16,
+    16
+   ],
+   "kernel": [
+    3,
+    3,
+    3
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": false,
+   "sites": [
+    "A:down_list.3.maxpool_conv.1.double_conv.0"
+   ],
+   "configs": [
+    "scale 7, 1 GPU, shards (1,1,1)"
+   ],
+   "name": "A-down_list.3.maxpool_conv.1.double_conv.0"
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    2048,
+    2048,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    2048,
+    8,
+    8,
+    8
+   ],
+   "out_shape": [
+    1,
+    2048,
+    8,
+    8,
+    8
+   ],
+   "kernel": [
+    3,
+    3,
+    3
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": false,
+   "sites": [
+    "B:down_list.5.maxpool_conv.1.double_conv.3"
+   ],
+   "configs": [
+    "scale 8, 1 GPU, shards (1,1,1)"
+   ],
+   "name": "B-down_list.5.maxpool_conv.1.double_conv.3"
+  },
+  {
+   "op": "ConvTranspose3d",
+   "weight_shape": [
+    2048,
+    1024,
+    2,
+    2,
+    2
+   ],
+   "in_shape": [
+    1,
+    2048,
+    8,
+    8,
+    8
+   ],
+   "out_shape": [
+    1,
+    1024,
+    16,
+    16,
+    16
+   ],
+   "kernel": [
+    2,
+    2,
+    2
+   ],
+   "stride": [
+    2,
+    2,
+    2
+   ],
+   "padding": [
+    0,
+    0,
+    0
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": true,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": false,
+   "sites": [
+    "B:up_list.0.up"
+   ],
+   "configs": [
+    "scale 8, 1 GPU, shards (1,1,1)"
+   ],
+   "name": "B-up_list.0.up"
+  },
+  {
+   "op": "ConvTranspose3d",
+   "weight_shape": [
+    1024,
+    512,
+    2,
+    2,
+    2
+   ],
+   "in_shape": [
+    1,
+    1024,
+    4,
+    16,
+    16
+   ],
+   "out_shape": [
+    1,
+    512,
+    8,
+    32,
+    32
+   ],
+   "kernel": [
+    2,
+    2,
+    2
+   ],
+   "stride": [
+    2,
+    2,
+    2
+   ],
+   "padding": [
+    0,
+    0,
+    0
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": true,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": false,
+   "sites": [
+    "D:up_list.1.up"
+   ],
+   "configs": [
+    "scale 8, 4 GPUs, shards (4,1,1)"
+   ],
+   "name": "D-up_list.1.up"
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    2048,
+    2048,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    2048,
+    6,
+    8,
+    8
+   ],
+   "out_shape": [
+    1,
+    2048,
+    4,
+    8,
+    8
+   ],
+   "kernel": [
+    3,
+    3,
+    3
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "padding": [
+    0,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": false,
+   "sites": [
+    "C:down_list.5.maxpool_conv.1.double_conv.3"
+   ],
+   "configs": [
+    "scale 8, 2 GPUs, shards (2,1,1)"
+   ],
+   "name": "C-down_list.5.maxpool_conv.1.double_conv.3"
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    1024,
+    512,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    512,
+    6,
+    16,
+    16
+   ],
+   "out_shape": [
+    1,
+    1024,
+    4,
+    16,
+    16
+   ],
+   "kernel": [
+    3,
+    3,
+    3
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "padding": [
+    0,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": false,
+   "sites": [
+    "D:down_list.4.maxpool_conv.1.double_conv.0"
+   ],
+   "configs": [
+    "scale 8, 4 GPUs, shards (4,1,1)"
+   ],
+   "name": "D-down_list.4.maxpool_conv.1.double_conv.0"
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    1024,
+    1024,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    1024,
+    8,
+    8,
+    8
+   ],
+   "out_shape": [
+    1,
+    1024,
+    8,
+    8,
+    8
+   ],
+   "kernel": [
+    3,
+    3,
+    3
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": false,
+   "sites": [
+    "A:down_list.4.maxpool_conv.1.double_conv.3"
+   ],
+   "configs": [
+    "scale 7, 1 GPU, shards (1,1,1)"
+   ],
+   "name": "A-down_list.4.maxpool_conv.1.double_conv.3"
+  },
+  {
+   "op": "ConvTranspose3d",
+   "weight_shape": [
+    1024,
+    512,
+    2,
+    2,
+    2
+   ],
+   "in_shape": [
+    1,
+    1024,
+    8,
+    8,
+    8
+   ],
+   "out_shape": [
+    1,
+    512,
+    16,
+    16,
+    16
+   ],
+   "kernel": [
+    2,
+    2,
+    2
+   ],
+   "stride": [
+    2,
+    2,
+    2
+   ],
+   "padding": [
+    0,
+    0,
+    0
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": true,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": false,
+   "sites": [
+    "A:up_list.0.up"
+   ],
+   "configs": [
+    "scale 7, 1 GPU, shards (1,1,1)"
+   ],
+   "name": "A-up_list.0.up"
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    2048,
+    1024,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    1024,
+    8,
+    8,
+    8
+   ],
+   "out_shape": [
+    1,
+    2048,
+    8,
+    8,
+    8
+   ],
+   "kernel": [
+    3,
+    3,
+    3
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": false,
+   "sites": [
+    "B:down_list.5.maxpool_conv.1.double_conv.0"
+   ],
+   "configs": [
+    "scale 8, 1 GPU, shards (1,1,1)"
+   ],
+   "name": "B-down_list.5.maxpool_conv.1.double_conv.0"
+  },
+  {
+   "op": "ConvTranspose3d",
+   "weight_shape": [
+    2048,
+    1024,
+    2,
+    2,
+    2
+   ],
+   "in_shape": [
+    1,
+    2048,
+    4,
+    8,
+    8
+   ],
+   "out_shape": [
+    1,
+    1024,
+    8,
+    16,
+    16
+   ],
+   "kernel": [
+    2,
+    2,
+    2
+   ],
+   "stride": [
+    2,
+    2,
+    2
+   ],
+   "padding": [
+    0,
+    0,
+    0
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": true,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": false,
+   "sites": [
+    "C:up_list.0.up"
+   ],
+   "configs": [
+    "scale 8, 2 GPUs, shards (2,1,1)"
+   ],
+   "name": "C-up_list.0.up"
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    2048,
+    2048,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    2048,
+    4,
+    8,
+    8
+   ],
+   "out_shape": [
+    1,
+    2048,
+    2,
+    8,
+    8
+   ],
+   "kernel": [
+    3,
+    3,
+    3
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "padding": [
+    0,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": false,
+   "sites": [
+    "D:down_list.5.maxpool_conv.1.double_conv.3"
+   ],
+   "configs": [
+    "scale 8, 4 GPUs, shards (4,1,1)"
+   ],
+   "name": "D-down_list.5.maxpool_conv.1.double_conv.3"
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    2048,
+    1024,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    1024,
+    6,
+    8,
+    8
+   ],
+   "out_shape": [
+    1,
+    2048,
+    4,
+    8,
+    8
+   ],
+   "kernel": [
+    3,
+    3,
+    3
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "padding": [
+    0,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": false,
+   "sites": [
+    "C:down_list.5.maxpool_conv.1.double_conv.0"
+   ],
+   "configs": [
+    "scale 8, 2 GPUs, shards (2,1,1)"
+   ],
+   "name": "C-down_list.5.maxpool_conv.1.double_conv.0"
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    1024,
+    512,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    512,
+    8,
+    8,
+    8
+   ],
+   "out_shape": [
+    1,
+    1024,
+    8,
+    8,
+    8
+   ],
+   "kernel": [
+    3,
+    3,
+    3
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": false,
+   "sites": [
+    "A:down_list.4.maxpool_conv.1.double_conv.0"
+   ],
+   "configs": [
+    "scale 7, 1 GPU, shards (1,1,1)"
+   ],
+   "name": "A-down_list.4.maxpool_conv.1.double_conv.0"
+  },
+  {
+   "op": "Conv3d",
+   "weight_shape": [
+    2048,
+    1024,
+    3,
+    3,
+    3
+   ],
+   "in_shape": [
+    1,
+    1024,
+    4,
+    8,
+    8
+   ],
+   "out_shape": [
+    1,
+    2048,
+    2,
+    8,
+    8
+   ],
+   "kernel": [
+    3,
+    3,
+    3
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "padding": [
+    0,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": false,
+   "sites": [
+    "D:down_list.5.maxpool_conv.1.double_conv.0"
+   ],
+   "configs": [
+    "scale 8, 4 GPUs, shards (4,1,1)"
+   ],
+   "name": "D-down_list.5.maxpool_conv.1.double_conv.0"
+  },
+  {
+   "op": "ConvTranspose3d",
+   "weight_shape": [
+    2048,
+    1024,
+    2,
+    2,
+    2
+   ],
+   "in_shape": [
+    1,
+    2048,
+    2,
+    8,
+    8
+   ],
+   "out_shape": [
+    1,
+    1024,
+    4,
+    16,
+    16
+   ],
+   "kernel": [
+    2,
+    2,
+    2
+   ],
+   "stride": [
+    2,
+    2,
+    2
+   ],
+   "padding": [
+    0,
+    0,
+    0
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": true,
+   "dtype": "bf16",
+   "memory_format": "channels_last_3d",
+   "dctensor": true,
+   "large": false,
+   "sites": [
+    "D:up_list.0.up"
+   ],
+   "configs": [
+    "scale 8, 4 GPUs, shards (4,1,1)"
+   ],
+   "name": "D-up_list.0.up"
+  }
+ ]
+}
