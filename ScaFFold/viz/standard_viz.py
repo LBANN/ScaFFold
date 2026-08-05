@@ -49,7 +49,9 @@ def main(config: RunConfig):
                 if "val_loss_avg" in row:
                     val_loss.append(float(row["val_loss_avg"]))
 
-        plot_title = f"v={config.vol_size}, c={config.n_categories}, u={config.unet_layers}"
+        plot_title = (
+            f"v={config.vol_size}, c={config.n_categories}, u={config.unet_layers}"
+        )
         line_thickness = 2
         fontsize = 20
         tick_fontsize = 14
@@ -64,7 +66,9 @@ def main(config: RunConfig):
         plt.tick_params(axis="both", which="major", labelsize=tick_fontsize)
         plt.yscale("log")
         plt.title(plot_title, fontsize=12)
-        plt.legend(loc="upper left", bbox_to_anchor=legend_loc, fontsize=legend_fontsize)
+        plt.legend(
+            loc="upper left", bbox_to_anchor=legend_loc, fontsize=legend_fontsize
+        )
         plt.grid(True, axis="y")
         plt.savefig(figures_path / "train_loss.png", dpi=300, bbox_inches="tight")
         plt.close(figures[-1])
@@ -76,7 +80,9 @@ def main(config: RunConfig):
         plt.ylabel("Val dice score", fontsize=fontsize)
         plt.tick_params(axis="both", which="major", labelsize=tick_fontsize)
         plt.title(plot_title, fontsize=12)
-        plt.legend(loc="upper left", bbox_to_anchor=legend_loc, fontsize=legend_fontsize)
+        plt.legend(
+            loc="upper left", bbox_to_anchor=legend_loc, fontsize=legend_fontsize
+        )
         plt.grid(True, axis="y")
         plt.savefig(figures_path / "val_dice.png", dpi=300, bbox_inches="tight")
         plt.close(figures[-1])
@@ -89,7 +95,9 @@ def main(config: RunConfig):
             plt.ylabel("Val loss", fontsize=fontsize)
             plt.tick_params(axis="both", which="major", labelsize=tick_fontsize)
             plt.title(plot_title, fontsize=12)
-            plt.legend(loc="upper left", bbox_to_anchor=legend_loc, fontsize=legend_fontsize)
+            plt.legend(
+                loc="upper left", bbox_to_anchor=legend_loc, fontsize=legend_fontsize
+            )
             plt.grid(True, axis="y")
             plt.savefig(figures_path / "val_loss.png", dpi=300, bbox_inches="tight")
             plt.close(figures[-1])

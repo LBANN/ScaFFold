@@ -131,8 +131,8 @@ from ..gather_gemm import (
     select_config,
 )
 from ..reduce_gemm import (
-    candidate_bwd_weight_configs,
     bwd_weight_config,
+    candidate_bwd_weight_configs,
     conv3d_backward_weight,
     grad_weight_empty,
     split_count,
@@ -297,15 +297,18 @@ def _autograd_control(build_forward: Callable[[], tuple]):
 # -- conv: the ordinary convolution -----------------------------------------
 
 
-def _conv_fwd(problem: ConvProblem, device: str,
-              control: bool = True) -> _Case:
+def _conv_fwd(problem: ConvProblem, device: str, control: bool = True) -> _Case:
     dtype = _TORCH_DTYPE[problem.dtype]
     k = tuple(problem.kernel)
     x = _randn(problem.input_shape, device, dtype)
     w = _randn(problem.weight_shape, device, dtype)
     b = _bias(problem, device, dtype)
-    y = torch.empty(problem.output_shape, device=device, dtype=dtype,
-                    memory_format=torch.channels_last_3d)
+    y = torch.empty(
+        problem.output_shape,
+        device=device,
+        dtype=dtype,
+        memory_format=torch.channels_last_3d,
+    )
     m = problem.n * math.prod(problem.out_spatial)
 
     def triton(cfg):
@@ -314,8 +317,8 @@ def _conv_fwd(problem: ConvProblem, device: str,
             # channels-last, which is what a ScaFFold parameter is, and the
             # kernel reads that layout in place.  Passing ``weight_rsck=`` here
             # would time a path the integration no longer takes.
-            conv3d_forward(x, w, b, problem.stride, problem.padding,
-                           config=cfg, out=y)
+            conv3d_forward(x, w, b, problem.stride, problem.padding, config=cfg, out=y)
+
         return run
 
     def miopen():
@@ -329,30 +332,45 @@ def _conv_fwd(problem: ConvProblem, device: str,
         return got, ref
 
     return _Case(
-        triton=triton, miopen=miopen if control else None, transform=None,
+        triton=triton,
+        miopen=miopen if control else None,
+        transform=None,
         candidates=lambda: candidate_configs(m, problem.cin, problem.cout, dtype),
         refine=_gather_refine,
         shipped_config=lambda: select_config(m, problem.cin, problem.cout, k, dtype),
-        reference=reference if control else None, primary=x, keep=(x, w, b, y),
+        reference=reference if control else None,
+        primary=x,
+        keep=(x, w, b, y),
     )
 
 
-def _conv_bwd_data(problem: ConvProblem, device: str,
-                   control: bool = True) -> _Case:
+def _conv_bwd_data(problem: ConvProblem, device: str, control: bool = True) -> _Case:
     dtype = _TORCH_DTYPE[problem.dtype]
     k = tuple(problem.kernel)
     w = _randn(problem.weight_shape, device, dtype)
     b = _bias(problem, device, dtype)
     gy = _randn(problem.output_shape, device, dtype)
-    gx = torch.empty(problem.input_shape, device=device, dtype=dtype,
-                     memory_format=torch.channels_last_3d)
+    gx = torch.empty(
+        problem.input_shape,
+        device=device,
+        dtype=dtype,
+        memory_format=torch.channels_last_3d,
+    )
 
     def triton(cfg):
         def run():
             # As in the forward: the channels-last parameter is the operand, and
             # the tap flip and the transpose are both constexprs in the kernel.
-            conv3d_backward_data(gy, w, problem.input_shape, problem.stride,
-                                 problem.padding, config=cfg, out=gx)
+            conv3d_backward_data(
+                gy,
+                w,
+                problem.input_shape,
+                problem.stride,
+                problem.padding,
+                config=cfg,
+                out=gx,
+            )
+
         return run
 
     def build():
@@ -372,30 +390,33 @@ def _conv_bwd_data(problem: ConvProblem, device: str,
         torch.autograd.grad(yg, (xg,), gy, retain_graph=True)
 
     def reference():
-        got = conv3d_backward_data(gy, w, problem.input_shape, problem.stride,
-                                   problem.padding)
+        got = conv3d_backward_data(
+            gy, w, problem.input_shape, problem.stride, problem.padding
+        )
         ref = torch.autograd.grad(yg, (xg,), gy, retain_graph=True)[0]
         return got, ref
 
     return _Case(
-        triton=triton, miopen=miopen if control else None, transform=None,
+        triton=triton,
+        miopen=miopen if control else None,
+        transform=None,
         # Swapped: backward-data reduces over Cout and its GEMM's N is Cin.
         candidates=lambda: candidate_configs(
-            problem.n * math.prod(problem.spatial), problem.cout, problem.cin,
-            dtype),
+            problem.n * math.prod(problem.spatial), problem.cout, problem.cin, dtype
+        ),
         refine=_gather_refine,
         shipped_config=lambda: bwd_data_config(
-            problem.output_shape, problem.cin, k, dtype,
-            padding=problem.padding),
-        reference=reference if control else None, primary=gy,
+            problem.output_shape, problem.cin, k, dtype, padding=problem.padding
+        ),
+        reference=reference if control else None,
+        primary=gy,
         # ``xg``/``yg`` are kept because the graph (and so the control) dies
         # with them.
         keep=(gy, w, b, gx, xg, yg),
     )
 
 
-def _conv_bwd_weight(problem: ConvProblem, device: str,
-                     control: bool = True) -> _Case:
+def _conv_bwd_weight(problem: ConvProblem, device: str, control: bool = True) -> _Case:
     dtype = _TORCH_DTYPE[problem.dtype]
     k = tuple(problem.kernel)
     x = _randn(problem.input_shape, device, dtype)
@@ -408,22 +429,42 @@ def _conv_bwd_weight(problem: ConvProblem, device: str,
 
     def candidates():
         return candidate_bwd_weight_configs(
-            problem.cout, problem.cin, k, k_total, dtype,
-            splits=(0,), padded=padded,
+            problem.cout,
+            problem.cin,
+            k,
+            k_total,
+            dtype,
+            splits=(0,),
+            padded=padded,
         )
 
     def splits_for(cfg):
-        return split_count(cfg, problem.cout, problem.cin, problem.tap_count,
-                           k_total, problem.out_spatial[2])[0]
+        return split_count(
+            cfg,
+            problem.cout,
+            problem.cin,
+            problem.tap_count,
+            k_total,
+            problem.out_spatial[2],
+        )[0]
 
-    ws = _sweep_workspace(candidates(), splits_for, problem.cout, problem.cin,
-                          k, device)
+    ws = _sweep_workspace(
+        candidates(), splits_for, problem.cout, problem.cin, k, device
+    )
 
     def triton(cfg):
         def run():
-            conv3d_backward_weight(x, problem.weight_shape, gy, problem.stride,
-                                   problem.padding, config=cfg, workspace=ws,
-                                   out=gw)
+            conv3d_backward_weight(
+                x,
+                problem.weight_shape,
+                gy,
+                problem.stride,
+                problem.padding,
+                config=cfg,
+                workspace=ws,
+                out=gw,
+            )
+
         return run
 
     def build():
@@ -438,17 +479,23 @@ def _conv_bwd_weight(problem: ConvProblem, device: str,
         torch.autograd.grad(yg, (wg,), gy, retain_graph=True)
 
     def reference():
-        got = conv3d_backward_weight(x, problem.weight_shape, gy,
-                                     problem.stride, problem.padding)
+        got = conv3d_backward_weight(
+            x, problem.weight_shape, gy, problem.stride, problem.padding
+        )
         ref = torch.autograd.grad(yg, (wg,), gy, retain_graph=True)[0]
         return got, ref
 
     return _Case(
-        triton=triton, miopen=miopen if control else None, transform=None,
-        candidates=candidates, refine=_bwd_weight_refine,
+        triton=triton,
+        miopen=miopen if control else None,
+        transform=None,
+        candidates=candidates,
+        refine=_bwd_weight_refine,
         shipped_config=lambda: bwd_weight_config(
-            problem.cout, problem.cin, k, k_total, dtype, padded=padded),
-        reference=reference if control else None, primary=x,
+            problem.cout, problem.cin, k, k_total, dtype, padded=padded
+        ),
+        reference=reference if control else None,
+        primary=x,
         keep=(x, w, b, gy, gw, ws, wg, yg),
     )
 
@@ -460,20 +507,24 @@ def _conv_bwd_weight(problem: ConvProblem, device: str,
 # the call, rather than a shared helper naming it three times differently.
 
 
-def _convt_fwd(problem: ConvProblem, device: str,
-               control: bool = True) -> _Case:
+def _convt_fwd(problem: ConvProblem, device: str, control: bool = True) -> _Case:
     dtype = _TORCH_DTYPE[problem.dtype]
     k = tuple(problem.kernel)
     x = _randn(problem.input_shape, device, dtype)
     w = _randn(problem.weight_shape, device, dtype)
     b = _bias(problem, device, dtype)
-    y = torch.empty(problem.output_shape, device=device, dtype=dtype,
-                    memory_format=torch.channels_last_3d)
+    y = torch.empty(
+        problem.output_shape,
+        device=device,
+        dtype=dtype,
+        memory_format=torch.channels_last_3d,
+    )
     m = problem.n * math.prod(problem.spatial)
 
     def triton(cfg):
         def run():
             conv_transpose3d_forward(x, w, b, k, config=cfg, out=y)
+
         return run
 
     def miopen():
@@ -487,18 +538,23 @@ def _convt_fwd(problem: ConvProblem, device: str,
         return got, ref
 
     return _Case(
-        triton=triton, miopen=miopen if control else None, transform=None,
+        triton=triton,
+        miopen=miopen if control else None,
+        transform=None,
         candidates=lambda: candidate_transposed_configs(
-            m, problem.cin, problem.cout, problem.tap_count, dtype),
+            m, problem.cin, problem.cout, problem.tap_count, dtype
+        ),
         refine=_gather_refine,
-        shipped_config=lambda: transposed_config(m, problem.cin, problem.cout,
-                                                 k, dtype),
-        reference=reference if control else None, primary=x, keep=(x, w, b, y),
+        shipped_config=lambda: transposed_config(
+            m, problem.cin, problem.cout, k, dtype
+        ),
+        reference=reference if control else None,
+        primary=x,
+        keep=(x, w, b, y),
     )
 
 
-def _convt_bwd_data(problem: ConvProblem, device: str,
-                    control: bool = True) -> _Case:
+def _convt_bwd_data(problem: ConvProblem, device: str, control: bool = True) -> _Case:
     """``grad_input = conv3d(grad_output, w, stride=k)`` -- an ordinary forward.
 
     So the config that runs is :func:`~triton_conv3d.gather_gemm.select_config`'s
@@ -513,16 +569,22 @@ def _convt_bwd_data(problem: ConvProblem, device: str,
     w = _randn(problem.weight_shape, device, dtype)
     b = _bias(problem, device, dtype)
     gy = _randn(problem.output_shape, device, dtype)
-    gx = torch.empty(problem.input_shape, device=device, dtype=dtype,
-                     memory_format=torch.channels_last_3d)
+    gx = torch.empty(
+        problem.input_shape,
+        device=device,
+        dtype=dtype,
+        memory_format=torch.channels_last_3d,
+    )
     # The strided convolution's M is this operator's *input* volume, and its
     # (cin, cout) are (Cout, Cin) of the transposed operator.
     m = problem.n * math.prod(problem.spatial)
 
     def triton(cfg):
         def run():
-            conv_transpose3d_backward_data(gy, w, problem.input_shape, k,
-                                           config=cfg, out=gx)
+            conv_transpose3d_backward_data(
+                gy, w, problem.input_shape, k, config=cfg, out=gx
+            )
+
         return run
 
     def build():
@@ -542,17 +604,19 @@ def _convt_bwd_data(problem: ConvProblem, device: str,
         return got, ref
 
     return _Case(
-        triton=triton, miopen=miopen if control else None, transform=None,
+        triton=triton,
+        miopen=miopen if control else None,
+        transform=None,
         candidates=lambda: candidate_configs(m, problem.cout, problem.cin, dtype),
         refine=_gather_refine,
         shipped_config=lambda: select_config(m, problem.cout, problem.cin, k, dtype),
-        reference=reference if control else None, primary=gy,
+        reference=reference if control else None,
+        primary=gy,
         keep=(x, w, b, gy, gx, xg, yg),
     )
 
 
-def _convt_bwd_weight(problem: ConvProblem, device: str,
-                      control: bool = True) -> _Case:
+def _convt_bwd_weight(problem: ConvProblem, device: str, control: bool = True) -> _Case:
     """The same reduction ``conv3d_backward_weight`` performs, operands swapped.
 
     ``grad_output`` is the strided convolution's input and ``x`` is its output
@@ -567,27 +631,42 @@ def _convt_bwd_weight(problem: ConvProblem, device: str,
     w = _randn(problem.weight_shape, device, dtype)
     b = _bias(problem, device, dtype)
     gy = _randn(problem.output_shape, device, dtype)
-    gw = grad_transposed_weight_empty(problem.cin, problem.cout, k,
-                                      dtype=dtype, device=device)
+    gw = grad_transposed_weight_empty(
+        problem.cin, problem.cout, k, dtype=dtype, device=device
+    )
     k_total = problem.n * math.prod(problem.spatial)
 
     def candidates():
         return candidate_bwd_weight_configs(
-            problem.cin, problem.cout, k, k_total, dtype,
-            splits=(0,), padded=False,
+            problem.cin,
+            problem.cout,
+            k,
+            k_total,
+            dtype,
+            splits=(0,),
+            padded=False,
         )
 
     def splits_for(cfg):
-        return split_count(cfg, problem.cin, problem.cout, problem.tap_count,
-                           k_total, problem.spatial[2])[0]
+        return split_count(
+            cfg,
+            problem.cin,
+            problem.cout,
+            problem.tap_count,
+            k_total,
+            problem.spatial[2],
+        )[0]
 
-    ws = _sweep_workspace(candidates(), splits_for, problem.cin, problem.cout,
-                          k, device)
+    ws = _sweep_workspace(
+        candidates(), splits_for, problem.cin, problem.cout, k, device
+    )
 
     def triton(cfg):
         def run():
-            conv_transpose3d_backward_weight(x, problem.weight_shape, gy, k,
-                                             config=cfg, workspace=ws, out=gw)
+            conv_transpose3d_backward_weight(
+                x, problem.weight_shape, gy, k, config=cfg, workspace=ws, out=gw
+            )
+
         return run
 
     def build():
@@ -607,11 +686,16 @@ def _convt_bwd_weight(problem: ConvProblem, device: str,
         return got, ref
 
     return _Case(
-        triton=triton, miopen=miopen if control else None, transform=None,
-        candidates=candidates, refine=_bwd_weight_refine,
+        triton=triton,
+        miopen=miopen if control else None,
+        transform=None,
+        candidates=candidates,
+        refine=_bwd_weight_refine,
         shipped_config=lambda: bwd_weight_config(
-            problem.cin, problem.cout, k, k_total, dtype, padded=False),
-        reference=reference if control else None, primary=x,
+            problem.cin, problem.cout, k, k_total, dtype, padded=False
+        ),
+        reference=reference if control else None,
+        primary=x,
         keep=(x, w, b, gy, gw, ws, wg, yg),
     )
 
@@ -624,11 +708,15 @@ def _sweep_workspace(cands, splits_for, cout, cin, k, device) -> torch.Tensor:
     """
     max_splits = max(
         [splits_for(c) for c in cands]
-        + [splits_for(dataclasses.replace(c, SPLIT_K=sk))
-           for c in cands for sk in _SPLIT_SWEEP]
+        + [
+            splits_for(dataclasses.replace(c, SPLIT_K=sk))
+            for c in cands
+            for sk in _SPLIT_SWEEP
+        ]
     )
-    return torch.empty(workspace_elements(max_splits, cout, cin, k),
-                       dtype=torch.float32, device=device)
+    return torch.empty(
+        workspace_elements(max_splits, cout, cin, k), dtype=torch.float32, device=device
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -677,9 +765,9 @@ _FORMS: dict[str, Callable[[ConvProblem], ConvProblem]] = {
 
 _FORM_NOTES = {
     "distconv": "DistConv's halo'd, unpadded form -- what the MIOpen baseline "
-                "was profiled in",
+    "was profiled in",
     "adapter": "the form ScaFFold's Triton rung is handed -- what production "
-               "runs, padded at every configuration",
+    "runs, padded at every configuration",
     "logical": "the module's own statement, unhalo'd and padded",
 }
 
@@ -692,8 +780,11 @@ _OPERATORS: dict[str, _Op] = {
         # Corpus order is measured-cost order, and it is what every stored
         # capture's ``--problems`` indices refer to.
         order=lambda p: 0,
-        build={"fwd": _conv_fwd, "bwd-data": _conv_bwd_data,
-               "bwd-weight": _conv_bwd_weight},
+        build={
+            "fwd": _conv_fwd,
+            "bwd-data": _conv_bwd_data,
+            "bwd-weight": _conv_bwd_weight,
+        },
     ),
     "convT": _Op(
         name="convT",
@@ -703,8 +794,11 @@ _OPERATORS: dict[str, _Op] = {
         # Cheapest first, as ``m5_convT_bench`` ran them, so a re-capture lines
         # up row for row with ``m5_shipped_*.json``.
         order=lambda p: math.prod(p.spatial) * p.cin,
-        build={"fwd": _convt_fwd, "bwd-data": _convt_bwd_data,
-               "bwd-weight": _convt_bwd_weight},
+        build={
+            "fwd": _convt_fwd,
+            "bwd-data": _convt_bwd_data,
+            "bwd-weight": _convt_bwd_weight,
+        },
     ),
 }
 
@@ -714,8 +808,13 @@ def operator_of(problem: ConvProblem) -> Operator:
     return "convT" if problem.transposed else "conv"
 
 
-def _build(problem: ConvProblem, direction: Direction, device: str = "cuda",
-           operator: Operator | None = None, control: bool = True) -> _Case:
+def _build(
+    problem: ConvProblem,
+    direction: Direction,
+    device: str = "cuda",
+    operator: Operator | None = None,
+    control: bool = True,
+) -> _Case:
     """Operands and launchers for one problem in one direction.
 
     A lookup into :data:`_OPERATORS`, not a switch: the operator is resolved
@@ -772,8 +871,9 @@ class _Region:
         return self.kind == "kernel"
 
 
-def _timed_region(variants: Mapping[str, Callable[[], object]],
-                  launcher: str = "exclude") -> _Region:
+def _timed_region(
+    variants: Mapping[str, Callable[[], object]], launcher: str = "exclude"
+) -> _Region:
     """Decide, for one cell, what the published number will contain.
 
     **Excluded** from a ``kind="kernel"`` measurement, on **every** arm: Python
@@ -820,17 +920,27 @@ def _timed_region(variants: Mapping[str, Callable[[], object]],
     """
     names = list(variants)
     if launcher == "include":
-        return _Region("call", 1, variants, {},
-                       "Python call: kernel + dispatch + config lookup + launcher")
+        return _Region(
+            "call",
+            1,
+            variants,
+            {},
+            "Python call: kernel + dispatch + config lookup + launcher",
+        )
     if launcher != "exclude":
         raise ValueError(f"unknown launcher policy {launcher!r}")
 
     eager = {n: per_call_ms(variants[n]) for n in names}
     durations = [eager[n] for n in names]
     if not graph_is_worthwhile(durations):
-        return _Region("call", 1, variants, eager,
-                       f"Python call: every arm is above {min(durations):.1f} ms, "
-                       "where the measured host cost (<=0.08 ms) is under 0.2%")
+        return _Region(
+            "call",
+            1,
+            variants,
+            eager,
+            f"Python call: every arm is above {min(durations):.1f} ms, "
+            "where the measured host cost (<=0.08 ms) is under 0.2%",
+        )
     chunk = common_chunk(durations)
     captured: dict[str, Callable[[], object]] = {}
     try:
@@ -840,12 +950,22 @@ def _timed_region(variants: Mapping[str, Callable[[], object]],
         captured.clear()
         torch.cuda.synchronize()
         torch.cuda.empty_cache()
-        return _Region("call", 1, variants, eager,
-                       f"Python call: {n!r} could not be captured ({exc}), so no "
-                       "arm was -- a mixed measurement is worth up to 1.4x")
-    return _Region("kernel", chunk, captured, eager,
-                   f"CUDA graph replay, {chunk} calls per graph: kernels only, "
-                   "no dispatch, no config lookup, no launcher, on every arm")
+        return _Region(
+            "call",
+            1,
+            variants,
+            eager,
+            f"Python call: {n!r} could not be captured ({exc}), so no "
+            "arm was -- a mixed measurement is worth up to 1.4x",
+        )
+    return _Region(
+        "kernel",
+        chunk,
+        captured,
+        eager,
+        f"CUDA graph replay, {chunk} calls per graph: kernels only, "
+        "no dispatch, no config lookup, no launcher, on every arm",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -853,8 +973,9 @@ def _timed_region(variants: Mapping[str, Callable[[], object]],
 # ---------------------------------------------------------------------------
 
 
-def _sweep(case: _Case, configs: list[ConvConfig],
-           verbose: bool = False) -> list[tuple[ConvConfig, float]]:
+def _sweep(
+    case: _Case, configs: list[ConvConfig], verbose: bool = False
+) -> list[tuple[ConvConfig, float]]:
     """Time every config once, cheaply.  Failures (LDS overflow, OOM) are skipped.
 
     Eager, deliberately: this pass only has to *rank*, it runs hundreds of
@@ -880,20 +1001,36 @@ def _sweep(case: _Case, configs: list[ConvConfig],
         # whichever config is fastest -- exactly the config the sweep is trying
         # to find.  Sizing the block by time makes the restart the same fraction
         # for every candidate.
-        meas = interleaved({"t": run}, warmup=None, iters=None, rounds=3,
-                           warmup_s=0.02, warmup_min=2, block_ms=5.0,
-                           measure_tax=False)["t"]
+        meas = interleaved(
+            {"t": run},
+            warmup=None,
+            iters=None,
+            rounds=3,
+            warmup_s=0.02,
+            warmup_min=2,
+            block_ms=5.0,
+            measure_tax=False,
+        )["t"]
         ranked.append((cfg, meas.median))
     ranked.sort(key=lambda kv: kv[1])
     return ranked
 
 
-def measure_problem(problem: ConvProblem, *, direction: Direction = "fwd",
-                    operator: Operator | None = None,
-                    max_configs: int = 0, iters: int = 0, rounds: int = 0,
-                    shipped: bool = False, verbose: bool = False,
-                    budget_s: float = 20.0, target_rel: float = 0.02,
-                    launcher: str = "exclude", control: str = "miopen") -> dict:
+def measure_problem(
+    problem: ConvProblem,
+    *,
+    direction: Direction = "fwd",
+    operator: Operator | None = None,
+    max_configs: int = 0,
+    iters: int = 0,
+    rounds: int = 0,
+    shipped: bool = False,
+    verbose: bool = False,
+    budget_s: float = 20.0,
+    target_rel: float = 0.02,
+    launcher: str = "exclude",
+    control: str = "miopen",
+) -> dict:
     """Sweep, then race the finalists against MIOpen in one interleaved block.
 
     ``control="none"`` drops the MIOpen arm and measures the Triton kernels
@@ -930,7 +1067,8 @@ def measure_problem(problem: ConvProblem, *, direction: Direction = "fwd",
         "problem": problem.label,
         "operator": op,
         "direction": direction,
-        "cin": problem.cin, "cout": problem.cout,
+        "cin": problem.cin,
+        "cout": problem.cout,
         "spatial": list(problem.spatial),
         "kernel": list(problem.kernel),
         "padding": list(problem.padding),
@@ -945,8 +1083,7 @@ def measure_problem(problem: ConvProblem, *, direction: Direction = "fwd",
     case = None
     region = None
     try:
-        case = _build(problem, direction, operator=op,
-                      control=(control == "miopen"))
+        case = _build(problem, direction, operator=op, control=(control == "miopen"))
         # ``UntypedStorage.size()`` is already in *bytes*, which is what the
         # specializer's ``is_within_2gb`` compares -- multiplying by the
         # element size again would report every operand as ineligible.
@@ -993,10 +1130,14 @@ def measure_problem(problem: ConvProblem, *, direction: Direction = "fwd",
         # per call, on that arm only.  See :class:`on_capture_stream`.
         with on_capture_stream():
             region = _timed_region(variants, launcher)
-            meas = interleaved(region.fns,
-                               warmup=3 if pinned else None,
-                               iters=iters or None, rounds=rounds or None,
-                               budget_s=budget_s, target_rel=target_rel)
+            meas = interleaved(
+                region.fns,
+                warmup=3 if pinned else None,
+                iters=iters or None,
+                rounds=rounds or None,
+                budget_s=budget_s,
+                target_rel=target_rel,
+            )
         # ``region.chunk`` calls sit behind one replay, so every *absolute* time
         # is that many times too large.  Every *relative* one -- the half-widths,
         # the paired ratio, the convergence test the harness already ran -- is
@@ -1031,8 +1172,9 @@ def measure_problem(problem: ConvProblem, *, direction: Direction = "fwd",
             measure_stop=best.stop,
             measure_balanced=best.balanced,
             measure_seconds=best.seconds,
-            rsck_ms=(meas["rsck_transform"].median / c
-                     if "rsck_transform" in meas else 0.0),
+            rsck_ms=(
+                meas["rsck_transform"].median / c if "rsck_transform" in meas else 0.0
+            ),
         )
         # Only when there *is* a control.  An absent MIOpen number is left
         # absent rather than written as zero: every consumer of these rows
@@ -1056,8 +1198,7 @@ def measure_problem(problem: ConvProblem, *, direction: Direction = "fwd",
                 miopen_rel_ci=mio.rel_half_width,
                 miopen_tax_frac=mio.tax_frac,
                 miopen_eager_ms=region.eager_ms.get("miopen", 0.0),
-                miopen_pct_roofline=100 * problem.efficiency(mio.median / c,
-                                                             direction),
+                miopen_pct_roofline=100 * problem.efficiency(mio.median / c, direction),
                 miopen_tflops=problem.flops(direction) / (mio.median / c * 1e-3) / 1e12,
                 speedup=sp.point,
                 speedup_lo=sp.lo,
@@ -1081,9 +1222,7 @@ def measure_problem(problem: ConvProblem, *, direction: Direction = "fwd",
                 continue
             e = row[f"{arm}_eager_ms"]
             row[f"{arm}_launcher_ms"] = (e - row[f"{arm}_ms"]) if e else 0.0
-        row["finalists"] = {
-            str(owner[nm]): meas[nm].median / c for nm in owner
-        }
+        row["finalists"] = {str(owner[nm]): meas[nm].median / c for nm in owner}
         return row
     except Exception as exc:  # noqa: BLE001
         row["error"] = f"{type(exc).__name__}: {exc}"
@@ -1094,8 +1233,9 @@ def measure_problem(problem: ConvProblem, *, direction: Direction = "fwd",
         torch.cuda.empty_cache()
 
 
-def _correctness(problem: ConvProblem, direction: Direction,
-                 operator: Operator | None = None) -> dict:
+def _correctness(
+    problem: ConvProblem, direction: Direction, operator: Operator | None = None
+) -> dict:
     """Error against MIOpen's own answer, on the shape just measured.
 
     Not a substitute for the test suite -- ``tests/`` holds the bitwise-exact
@@ -1110,8 +1250,10 @@ def _correctness(problem: ConvProblem, direction: Direction,
         got, ref = case.reference()
         d = (got.float() - ref.float()).abs()
         scale = ref.float().pow(2).mean().sqrt().item() or 1.0
-        return {"max_abs_vs_miopen": d.max().item(),
-                "rms_rel_vs_miopen": (d.pow(2).mean().sqrt().item() / scale)}
+        return {
+            "max_abs_vs_miopen": d.max().item(),
+            "rms_rel_vs_miopen": (d.pow(2).mean().sqrt().item() / scale),
+        }
     except Exception as exc:  # noqa: BLE001
         return {"correctness_error": f"{type(exc).__name__}: {exc}"}
     finally:
@@ -1143,76 +1285,117 @@ def main() -> None:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    ap.add_argument("--operator", default="all",
-                    choices=["conv", "convT", "all"],
-                    help="which operator; 'all' measures both (default). "
-                         "Supersedes the old --skip-transposed, which was "
-                         "store_true with default True and so could never be "
-                         "turned off")
-    ap.add_argument("--direction", default="fwd",
-                    choices=["fwd", "bwd-data", "bwd-weight", "all"])
-    ap.add_argument("--top", type=int, default=8,
-                    help="hottest N corpus problems (0 = all)")
-    ap.add_argument("--problems", default=None,
-                    help="comma-separated corpus indices, overriding --top")
+    ap.add_argument(
+        "--operator",
+        default="all",
+        choices=["conv", "convT", "all"],
+        help="which operator; 'all' measures both (default). "
+        "Supersedes the old --skip-transposed, which was "
+        "store_true with default True and so could never be "
+        "turned off",
+    )
+    ap.add_argument(
+        "--direction", default="fwd", choices=["fwd", "bwd-data", "bwd-weight", "all"]
+    )
+    ap.add_argument(
+        "--top", type=int, default=8, help="hottest N corpus problems (0 = all)"
+    )
+    ap.add_argument(
+        "--problems",
+        default=None,
+        help="comma-separated corpus indices, overriding --top",
+    )
     ap.add_argument("--max-configs", type=int, default=0)
-    ap.add_argument("--iters", type=int, default=0,
-                    help="calls per timed block; 0 (default) sizes it online "
-                         "from the measured per-call time")
-    ap.add_argument("--rounds", type=int, default=0,
-                    help="rounds of the race; 0 (default) grows until the "
-                         "speedup's 95%% interval is inside --precision or "
-                         "--budget seconds are spent")
-    ap.add_argument("--budget", type=float, default=20.0,
-                    help="wall-clock seconds per cell's race (default 20)")
-    ap.add_argument("--precision", type=float, default=0.02,
-                    help="target relative 95%% half-width on the reported "
-                         "speedup and on each arm's median (default 0.02)")
-    ap.add_argument("--launcher", default="exclude",
-                    choices=["exclude", "include"],
-                    help="'exclude' (default): both arms are replayed from a "
-                         "CUDA graph, so the number is kernel time -- no "
-                         "dispatch, no config lookup, no launcher.  'include': "
-                         "both arms are called from Python, so the number is "
-                         "what a caller pays today")
-    ap.add_argument("--shipped", action="store_true",
-                    help="skip the sweep and time the config the entry point "
-                         "resolves on its own -- the kernel a caller gets")
-    ap.add_argument("--control", default="miopen", choices=["miopen", "none"],
-                    help="'miopen' (default): race the Triton kernel against a "
-                         "real MIOpen control and report a paired speedup with "
-                         "its interval. 'none': measure the Triton kernel "
-                         "alone, emitting no miopen_* and no speedup key. The "
-                         "control is what makes a capture expensive -- MIOpen's "
-                         "find cannot be replayed from disk under "
-                         "cudnn.benchmark=True and costs 92-174 s per cell on "
-                         "this corpus, which is 98% of a cell's wall clock")
-    ap.add_argument("--corpus", default="scaffold",
-                    choices=["scaffold", "census"],
-                    help="which problem list --top/--problems index into. "
-                         "'scaffold' (default) is the 57 profiled problems, "
-                         "cost-ordered, and is the key every stored capture "
-                         "refers to -- its indices must not move. 'census' is "
-                         "the 88 problems an instrumented step actually issued "
-                         "at all four configurations, which is the only list "
-                         "containing configuration B and the 2048-channel "
-                         "sites; it is already in the adapter form, carries no "
-                         "MIOpen timings and is not cost-ordered, so --form is "
-                         "ignored for it and --top means 'the first N', not "
-                         "'the hottest N'")
-    ap.add_argument("--form", default="distconv",
-                    choices=["distconv", "adapter", "logical"],
-                    help="which of the three shapes of a ScaFFold convolution "
-                         "to measure. 'distconv' (default) is the halo'd, "
-                         "unpadded form upstream DistConv issues and the form "
-                         "every capture on disk was taken in; 'adapter' is what "
-                         "ScaFFold's own Triton rung is handed, which is what "
-                         "production runs and is padded everywhere; 'logical' "
-                         "is the module's own statement. See the module "
-                         "docstring -- these are three different tuning "
-                         "problems, not three views of one")
-    ap.add_argument("--check", action="store_true",
-                    help="also compare each result against MIOpen's")
+    ap.add_argument(
+        "--iters",
+        type=int,
+        default=0,
+        help="calls per timed block; 0 (default) sizes it online "
+        "from the measured per-call time",
+    )
+    ap.add_argument(
+        "--rounds",
+        type=int,
+        default=0,
+        help="rounds of the race; 0 (default) grows until the "
+        "speedup's 95%% interval is inside --precision or "
+        "--budget seconds are spent",
+    )
+    ap.add_argument(
+        "--budget",
+        type=float,
+        default=20.0,
+        help="wall-clock seconds per cell's race (default 20)",
+    )
+    ap.add_argument(
+        "--precision",
+        type=float,
+        default=0.02,
+        help="target relative 95%% half-width on the reported "
+        "speedup and on each arm's median (default 0.02)",
+    )
+    ap.add_argument(
+        "--launcher",
+        default="exclude",
+        choices=["exclude", "include"],
+        help="'exclude' (default): both arms are replayed from a "
+        "CUDA graph, so the number is kernel time -- no "
+        "dispatch, no config lookup, no launcher.  'include': "
+        "both arms are called from Python, so the number is "
+        "what a caller pays today",
+    )
+    ap.add_argument(
+        "--shipped",
+        action="store_true",
+        help="skip the sweep and time the config the entry point "
+        "resolves on its own -- the kernel a caller gets",
+    )
+    ap.add_argument(
+        "--control",
+        default="miopen",
+        choices=["miopen", "none"],
+        help="'miopen' (default): race the Triton kernel against a "
+        "real MIOpen control and report a paired speedup with "
+        "its interval. 'none': measure the Triton kernel "
+        "alone, emitting no miopen_* and no speedup key. The "
+        "control is what makes a capture expensive -- MIOpen's "
+        "find cannot be replayed from disk under "
+        "cudnn.benchmark=True and costs 92-174 s per cell on "
+        "this corpus, which is 98% of a cell's wall clock",
+    )
+    ap.add_argument(
+        "--corpus",
+        default="scaffold",
+        choices=["scaffold", "census"],
+        help="which problem list --top/--problems index into. "
+        "'scaffold' (default) is the 57 profiled problems, "
+        "cost-ordered, and is the key every stored capture "
+        "refers to -- its indices must not move. 'census' is "
+        "the 88 problems an instrumented step actually issued "
+        "at all four configurations, which is the only list "
+        "containing configuration B and the 2048-channel "
+        "sites; it is already in the adapter form, carries no "
+        "MIOpen timings and is not cost-ordered, so --form is "
+        "ignored for it and --top means 'the first N', not "
+        "'the hottest N'",
+    )
+    ap.add_argument(
+        "--form",
+        default="distconv",
+        choices=["distconv", "adapter", "logical"],
+        help="which of the three shapes of a ScaFFold convolution "
+        "to measure. 'distconv' (default) is the halo'd, "
+        "unpadded form upstream DistConv issues and the form "
+        "every capture on disk was taken in; 'adapter' is what "
+        "ScaFFold's own Triton rung is handed, which is what "
+        "production runs and is padded everywhere; 'logical' "
+        "is the module's own statement. See the module "
+        "docstring -- these are three different tuning "
+        "problems, not three views of one",
+    )
+    ap.add_argument(
+        "--check", action="store_true", help="also compare each result against MIOpen's"
+    )
     ap.add_argument("--verbose", action="store_true")
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
@@ -1237,38 +1420,51 @@ def main() -> None:
             "triton_conv3d/tests/ instead."
         )
 
-    corpus = list(census_corpus() if args.corpus == "census"
-                  else scaffold_corpus())
+    corpus = list(census_corpus() if args.corpus == "census" else scaffold_corpus())
     picks = _pick(corpus, args)
     operators = list(OPERATORS) if args.operator == "all" else [args.operator]
     directions = list(DIRECTIONS) if args.direction == "all" else [args.direction]
 
     props = torch.cuda.get_device_properties(0)
-    print(f"device {props.name}, {props.multi_processor_count} CUs, "
-          f"torch {torch.__version__}, cudnn.benchmark={torch.backends.cudnn.benchmark}")
-    print(f"control: {args.control}"
-          + ("" if args.control == "miopen" else
-             "  (Triton alone; no speedup is reported and none should be "
-             "inferred)"))
-    print(f"timed region: {args.launcher} launcher "
-          f"({'CUDA graph replay -- kernels only, both arms' if args.launcher == 'exclude' else 'Python call -- kernel + dispatch + lookup + launcher, both arms'})")
+    print(
+        f"device {props.name}, {props.multi_processor_count} CUs, "
+        f"torch {torch.__version__}, cudnn.benchmark={torch.backends.cudnn.benchmark}"
+    )
+    print(
+        f"control: {args.control}"
+        + (
+            ""
+            if args.control == "miopen"
+            else "  (Triton alone; no speedup is reported and none should be inferred)"
+        )
+    )
+    print(
+        f"timed region: {args.launcher} launcher "
+        f"({'CUDA graph replay -- kernels only, both arms' if args.launcher == 'exclude' else 'Python call -- kernel + dispatch + lookup + launcher, both arms'})"
+    )
 
     rows: list[dict] = []
     out_path = pathlib.Path(args.out) if args.out else None
     t0 = time.time()
     for opname in operators:
         op = _OPERATORS[opname]
-        mine = sorted([(i, p) for i, p in picks if op.selects(p)],
-                      key=lambda ip: op.order(ip[1]))
+        mine = sorted(
+            [(i, p) for i, p in picks if op.selects(p)], key=lambda ip: op.order(ip[1])
+        )
         if not mine:
             continue
         for direction in directions:
-            form_note = ("recorded from a real step; already the adapter form"
-                         if args.corpus == "census" else op.form_note(args.form))
-            print(f"\n== {opname} {direction} -- {len(mine)} problems, "
-                  f"--corpus {args.corpus} --form "
-                  f"{'adapter' if args.corpus == 'census' else args.form}: "
-                  f"{form_note}\n")
+            form_note = (
+                "recorded from a real step; already the adapter form"
+                if args.corpus == "census"
+                else op.form_note(args.form)
+            )
+            print(
+                f"\n== {opname} {direction} -- {len(mine)} problems, "
+                f"--corpus {args.corpus} --form "
+                f"{'adapter' if args.corpus == 'census' else args.form}: "
+                f"{form_note}\n"
+            )
             for idx, p in mine:
                 # The census records the shape *as the kernel was handed it*,
                 # so it is already in the adapter form and carries no halo to
@@ -1276,23 +1472,30 @@ def main() -> None:
                 # no-op today and a silent lie the day the census gains a halo
                 # field, so it is skipped by name rather than by luck.
                 hp = p if args.corpus == "census" else op.form(p, args.form)
-                print(f"  [{idx}] {hp.qualified_label}  "
-                      f"(GEMM {hp.gemm_shape(direction)})")
+                print(
+                    f"  [{idx}] {hp.qualified_label}  (GEMM {hp.gemm_shape(direction)})"
+                )
                 sys.stdout.flush()
                 row = measure_problem(
-                    hp, direction=direction, operator=opname,
-                    max_configs=args.max_configs, iters=args.iters,
-                    rounds=args.rounds, shipped=args.shipped,
-                    verbose=args.verbose, budget_s=args.budget,
-                    target_rel=args.precision, launcher=args.launcher,
-                    control=args.control)
+                    hp,
+                    direction=direction,
+                    operator=opname,
+                    max_configs=args.max_configs,
+                    iters=args.iters,
+                    rounds=args.rounds,
+                    shipped=args.shipped,
+                    verbose=args.verbose,
+                    budget_s=args.budget,
+                    target_rel=args.precision,
+                    launcher=args.launcher,
+                    control=args.control,
+                )
                 row["corpus_index"] = idx
                 row["logical_problem"] = p.label
                 # The form is recorded per row, not only in the header: a row
                 # lifted out of one capture and quoted beside another is
                 # precisely how a halo'd number became "what production runs".
-                row["shape_form"] = ("adapter" if args.corpus == "census"
-                                     else args.form)
+                row["shape_form"] = "adapter" if args.corpus == "census" else args.form
                 row["corpus"] = args.corpus
                 row["qualified_problem"] = hp.qualified_label
                 row["padding"] = list(hp.padding)
@@ -1303,58 +1506,106 @@ def main() -> None:
                 _print_row(row)
                 sys.stdout.flush()
                 if out_path:
-                    out_path.write_text(json.dumps(
-                        {"device": props.name, "torch": torch.__version__,
-                         "operator": args.operator, "direction": args.direction,
-                         "shape_form": ("adapter" if args.corpus == "census"
-                                        else args.form),
-                         "corpus": args.corpus,
-                         "launcher": args.launcher,
-                         "control": args.control,
-                         "cudnn_benchmark": True, "rows": rows}, indent=1) + "\n")
+                    out_path.write_text(
+                        json.dumps(
+                            {
+                                "device": props.name,
+                                "torch": torch.__version__,
+                                "operator": args.operator,
+                                "direction": args.direction,
+                                "shape_form": (
+                                    "adapter" if args.corpus == "census" else args.form
+                                ),
+                                "corpus": args.corpus,
+                                "launcher": args.launcher,
+                                "control": args.control,
+                                "cudnn_benchmark": True,
+                                "rows": rows,
+                            },
+                            indent=1,
+                        )
+                        + "\n"
+                    )
 
     ok = [r for r in rows if "error" not in r]
     # Two tables, not one with empty cells: without a control there are no
     # MIOpen columns to leave blank, and a blank column in a results table is
     # read as a missing value rather than as an absent measurement.
     if args.control == "miopen":
-        print("\n" + format_table(
-            [[
-                f"{r['operator']} {r['direction']}",
-                r["problem"],
-                f"{r['gemm'][0]}x{r['gemm'][1]}x{r['gemm'][2]}",
-                f"{r['triton_ms']:.4f}", f"{r['triton_pct_roofline']:.0f}%",
-                f"{r['miopen_ms']:.4f}", f"{r['miopen_pct_roofline']:.0f}%",
-                f"{r['speedup']:.3f}x",
-                f"+-{r['speedup_rel_ci']:.1%}"
-                + ("" if r["speedup_significant"] else "?"),
-                f"{r['measure_rounds']}/{r['measure_stop'][:4]}",
-                f"{r['timed_region'][:4]}x{r['graph_chunk']}",
-                r["triton_config"],
-            ] for r in ok],
-            ["cell", "problem", "M x N x K", "triton ms", "%roof", "miopen ms",
-             "%roof", "speedup", "95% CI", "rounds", "timed", "best config"],
-            aligns="lllrrrrrrrrl",
-        ))
+        print(
+            "\n"
+            + format_table(
+                [
+                    [
+                        f"{r['operator']} {r['direction']}",
+                        r["problem"],
+                        f"{r['gemm'][0]}x{r['gemm'][1]}x{r['gemm'][2]}",
+                        f"{r['triton_ms']:.4f}",
+                        f"{r['triton_pct_roofline']:.0f}%",
+                        f"{r['miopen_ms']:.4f}",
+                        f"{r['miopen_pct_roofline']:.0f}%",
+                        f"{r['speedup']:.3f}x",
+                        f"+-{r['speedup_rel_ci']:.1%}"
+                        + ("" if r["speedup_significant"] else "?"),
+                        f"{r['measure_rounds']}/{r['measure_stop'][:4]}",
+                        f"{r['timed_region'][:4]}x{r['graph_chunk']}",
+                        r["triton_config"],
+                    ]
+                    for r in ok
+                ],
+                [
+                    "cell",
+                    "problem",
+                    "M x N x K",
+                    "triton ms",
+                    "%roof",
+                    "miopen ms",
+                    "%roof",
+                    "speedup",
+                    "95% CI",
+                    "rounds",
+                    "timed",
+                    "best config",
+                ],
+                aligns="lllrrrrrrrrl",
+            )
+        )
     else:
-        print("\n" + format_table(
-            [[
-                f"{r['operator']} {r['direction']}",
-                r["qualified_problem"],
-                f"{r['gemm'][0]}x{r['gemm'][1]}x{r['gemm'][2]}",
-                f"{r['triton_ms']:.4f}",
-                f"+-{r['triton_rel_ci']:.1%}",
-                f"{r['triton_cov']:.2%}",
-                f"{r['triton_pct_roofline']:.0f}%",
-                f"{r['triton_tflops']:.1f}",
-                f"{r['measure_rounds']}/{r['measure_stop'][:4]}",
-                f"{r['timed_region'][:4]}x{r['graph_chunk']}",
-                r["triton_config"],
-            ] for r in ok],
-            ["cell", "problem", "M x N x K", "triton ms", "95% CI", "CoV",
-             "%roof", "TFLOP/s", "rounds", "timed", "config"],
-            aligns="lllrrrrrrrl",
-        ))
+        print(
+            "\n"
+            + format_table(
+                [
+                    [
+                        f"{r['operator']} {r['direction']}",
+                        r["qualified_problem"],
+                        f"{r['gemm'][0]}x{r['gemm'][1]}x{r['gemm'][2]}",
+                        f"{r['triton_ms']:.4f}",
+                        f"+-{r['triton_rel_ci']:.1%}",
+                        f"{r['triton_cov']:.2%}",
+                        f"{r['triton_pct_roofline']:.0f}%",
+                        f"{r['triton_tflops']:.1f}",
+                        f"{r['measure_rounds']}/{r['measure_stop'][:4]}",
+                        f"{r['timed_region'][:4]}x{r['graph_chunk']}",
+                        r["triton_config"],
+                    ]
+                    for r in ok
+                ],
+                [
+                    "cell",
+                    "problem",
+                    "M x N x K",
+                    "triton ms",
+                    "95% CI",
+                    "CoV",
+                    "%roof",
+                    "TFLOP/s",
+                    "rounds",
+                    "timed",
+                    "config",
+                ],
+                aligns="lllrrrrrrrl",
+            )
+        )
     print(f"\nelapsed {time.time() - t0:.0f} s")
     if out_path:
         print(f"wrote {out_path}")
@@ -1364,9 +1615,11 @@ def _print_row(row: dict) -> None:
     if "error" in row:
         print(f"      ERROR {row['error'][:110]}")
         return
+
     def launcher(arm):
         v = row.get(f"{arm}_launcher_ms", 0.0)
         return f", launcher +{v:.4f}" if v else ""
+
     out = (
         f"      triton {row['triton_ms']:8.4f} +-{row['triton_rel_ci']:.1%} ms "
         f"({row['triton_pct_roofline']:5.1f}% roof, stall {row['triton_stall']:.2f}x, "
@@ -1387,12 +1640,16 @@ def _print_row(row: dict) -> None:
     else:
         # No control ran.  Say so where the speedup would have been, rather
         # than leaving a blank a reader could take for a missing win.
-        out += (f"      no MIOpen control (--control none)  "
-                f"{row['measure_rounds']}r/{row['measure_stop']}")
+        out += (
+            f"      no MIOpen control (--control none)  "
+            f"{row['measure_rounds']}r/{row['measure_stop']}"
+        )
     out += f" in {row['measure_seconds']:.1f}s   {row['timed_region_note']}"
     if row.get("rsck_ms"):
-        out += (f"\n      weight transform {row['rsck_ms']:.4f} ms "
-                f"({100*row['rsck_ms']/row['triton_ms']:.1f}% of kernel)")
+        out += (
+            f"\n      weight transform {row['rsck_ms']:.4f} ms "
+            f"({100 * row['rsck_ms'] / row['triton_ms']:.1f}% of kernel)"
+        )
     if "max_abs_vs_miopen" in row:
         out += f"\n      max_abs vs MIOpen {row['max_abs_vs_miopen']:.3e}"
     print(out)

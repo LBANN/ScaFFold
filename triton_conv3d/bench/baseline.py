@@ -148,7 +148,9 @@ def _callable(problem: ConvProblem, direction: Direction, device: str, dtype):
 
     x, w, b = _build(problem, device, dtype)
     op = F.conv_transpose3d if problem.transposed else F.conv3d
-    fwd = lambda: op(x, w, b, stride=problem.stride, padding=problem.padding)
+
+    def fwd():
+        return op(x, w, b, stride=problem.stride, padding=problem.padding)
 
     if direction == "fwd":
         with torch.no_grad():
@@ -157,7 +159,10 @@ def _callable(problem: ConvProblem, direction: Direction, device: str, dtype):
     y = fwd()
     gy = torch.randn_like(y)
     inputs = (x,) if direction == "bwd-data" else (w,)
-    fn = lambda: torch.autograd.grad(y, inputs, gy, retain_graph=True)
+
+    def fn():
+        return torch.autograd.grad(y, inputs, gy, retain_graph=True)
+
     return fn, (x, w, y, gy)
 
 
@@ -177,8 +182,9 @@ def measure_one(
             "cudnn.benchmark is off; MIOpen will answer from its heuristic "
             "instead of searching and the result is not a baseline"
         )
-    dtype = {"bf16": torch.bfloat16, "fp32": torch.float32,
-             "fp16": torch.float16}[problem.dtype]
+    dtype = {"bf16": torch.bfloat16, "fp32": torch.float32, "fp16": torch.float16}[
+        problem.dtype
+    ]
     record: dict = {
         "problem": problem.label,
         "direction": direction,
@@ -216,13 +222,25 @@ def measure_one(
         rough_ms = (time.perf_counter() - t0) * 1e3
 
         if rough_ms > max_call_ms:
-            record.update(ms=rough_ms, best_ms=rough_ms, iters=1, rounds=1,
-                          spread=0.0, rel_ci=float("inf"), stop="single-call",
-                          note="single call; exceeds max_call_ms")
+            record.update(
+                ms=rough_ms,
+                best_ms=rough_ms,
+                iters=1,
+                rounds=1,
+                spread=0.0,
+                rel_ci=float("inf"),
+                stop="single-call",
+                note="single call; exceeds max_call_ms",
+            )
         else:
-            meas = interleaved({"miopen": fn}, warmup=None, iters=None,
-                               rounds=None, budget_s=budget_s,
-                               target_rel=target_rel)["miopen"]
+            meas = interleaved(
+                {"miopen": fn},
+                warmup=None,
+                iters=None,
+                rounds=None,
+                budget_s=budget_s,
+                target_rel=target_rel,
+            )["miopen"]
             # Both statistics, because they answer different questions.  The
             # median is the control -- it is what a step actually costs on a
             # shared node.  The best round is the diagnostic: this node has
@@ -234,11 +252,18 @@ def measure_one(
             # ``rel_ci`` instead: ``spread`` is a *range* and its expectation
             # grows with ``rounds``, which is now chosen per cell, so two cells'
             # spreads are no longer comparable to each other at all.
-            record.update(ms=meas.median, best_ms=meas.best, iters=meas.iters,
-                          rounds=len(meas.rounds), spread=meas.spread,
-                          rel_ci=meas.rel_half_width, stop=meas.stop,
-                          group=meas.group, tax_frac=meas.tax_frac,
-                          measure_seconds=meas.seconds)
+            record.update(
+                ms=meas.median,
+                best_ms=meas.best,
+                iters=meas.iters,
+                rounds=len(meas.rounds),
+                spread=meas.spread,
+                rel_ci=meas.rel_half_width,
+                stop=meas.stop,
+                group=meas.group,
+                tax_frac=meas.tax_frac,
+                measure_seconds=meas.seconds,
+            )
         record["tflops"] = record["flops"] / (record["ms"] * 1e-3) / 1e12
         record["pct_roofline"] = 100 * record["tflops"] / record["roofline_tflops"]
     except Exception as exc:
@@ -283,15 +308,17 @@ def cross_check(records: list[dict], problems: list[ConvProblem]) -> list[dict]:
         hit = by_key.get((r["problem"], r["direction"]))
         if hit is None:
             continue
-        rows.append({
-            "problem": r["problem"],
-            "direction": r["direction"],
-            "isolated_ms": r["ms"],
-            "profiled_ms": hit["ms_per_call"],
-            "ratio": r["ms"] / hit["ms_per_call"],
-            "config": hit["config"],
-            "profiled_solvers": hit.get("solvers", []),
-        })
+        rows.append(
+            {
+                "problem": r["problem"],
+                "direction": r["direction"],
+                "isolated_ms": r["ms"],
+                "profiled_ms": hit["ms_per_call"],
+                "ratio": r["ms"] / hit["ms_per_call"],
+                "config": hit["config"],
+                "profiled_solvers": hit.get("solvers", []),
+            }
+        )
     return rows
 
 
@@ -299,8 +326,11 @@ def format_cross_check(rows: list[dict], tol: float = 0.25) -> str:
     table = format_table(
         [
             [
-                r["problem"], r["direction"], f"{r['isolated_ms']:.4f}",
-                f"{r['profiled_ms']:.4f}", f"{r['ratio']:.2f}x",
+                r["problem"],
+                r["direction"],
+                f"{r['isolated_ms']:.4f}",
+                f"{r['profiled_ms']:.4f}",
+                f"{r['ratio']:.2f}x",
                 "ok" if abs(r["ratio"] - 1) <= tol else "MISMATCH",
             ]
             for r in rows
@@ -316,42 +346,79 @@ def format_cross_check(rows: list[dict], tol: float = 0.25) -> str:
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     ap.add_argument("--out", default="baseline.json")
-    ap.add_argument("--resume", action="store_true",
-                    help="skip cells already present in --out")
-    ap.add_argument("--top", type=int, default=0,
-                    help="only the N hottest corpus problems (0 = all)")
-    ap.add_argument("--skip", type=int, default=0,
-                    help="skip the first N corpus problems (they are ordered by "
-                         "cost, and the most expensive one takes 45 s per call)")
-    ap.add_argument("--include-edge", action="store_true",
-                    help="also measure the synthetic edge cases")
-    ap.add_argument("--shape",
-                    choices=("halo", "production", "unhaloed", "both", "all"),
-                    default="halo",
-                    help="halo: the form upstream DistConv issues (default, and "
-                         "the form the profiled numbers measured, so the only "
-                         "one --cross-check can join); production: the form "
-                         "ScaFFold's own Triton adapter issues, padded on every "
-                         "unsplit axis -- the right MIOpen baseline for a "
-                         "Triton comparison; unhaloed: the logical statement; "
-                         "both: halo+unhaloed, as before; all: every distinct "
-                         "form")
-    ap.add_argument("--max-call-ms", type=float, default=60_000.0,
-                    help="above this, record a single call rather than a sweep")
-    ap.add_argument("--budget", type=float, default=10.0,
-                    help="wall-clock seconds per cell (default 10)")
-    ap.add_argument("--precision", type=float, default=0.02,
-                    help="target relative 95%% half-width per cell")
-    ap.add_argument("--skip-slow", action="store_true",
-                    help="skip cells a previous run recorded as slower than "
-                         "--max-call-ms; useful for a quick re-capture")
-    ap.add_argument("--cross-check", action="store_true",
-                    help="join the halo'd cells onto the profiled numbers")
-    ap.add_argument("--tolerance", type=float, default=0.25,
-                    help="cross-check band, as a fraction of the profiled time")
+    ap.add_argument(
+        "--resume", action="store_true", help="skip cells already present in --out"
+    )
+    ap.add_argument(
+        "--top",
+        type=int,
+        default=0,
+        help="only the N hottest corpus problems (0 = all)",
+    )
+    ap.add_argument(
+        "--skip",
+        type=int,
+        default=0,
+        help="skip the first N corpus problems (they are ordered by "
+        "cost, and the most expensive one takes 45 s per call)",
+    )
+    ap.add_argument(
+        "--include-edge",
+        action="store_true",
+        help="also measure the synthetic edge cases",
+    )
+    ap.add_argument(
+        "--shape",
+        choices=("halo", "production", "unhaloed", "both", "all"),
+        default="halo",
+        help="halo: the form upstream DistConv issues (default, and "
+        "the form the profiled numbers measured, so the only "
+        "one --cross-check can join); production: the form "
+        "ScaFFold's own Triton adapter issues, padded on every "
+        "unsplit axis -- the right MIOpen baseline for a "
+        "Triton comparison; unhaloed: the logical statement; "
+        "both: halo+unhaloed, as before; all: every distinct "
+        "form",
+    )
+    ap.add_argument(
+        "--max-call-ms",
+        type=float,
+        default=60_000.0,
+        help="above this, record a single call rather than a sweep",
+    )
+    ap.add_argument(
+        "--budget",
+        type=float,
+        default=10.0,
+        help="wall-clock seconds per cell (default 10)",
+    )
+    ap.add_argument(
+        "--precision",
+        type=float,
+        default=0.02,
+        help="target relative 95%% half-width per cell",
+    )
+    ap.add_argument(
+        "--skip-slow",
+        action="store_true",
+        help="skip cells a previous run recorded as slower than "
+        "--max-call-ms; useful for a quick re-capture",
+    )
+    ap.add_argument(
+        "--cross-check",
+        action="store_true",
+        help="join the halo'd cells onto the profiled numbers",
+    )
+    ap.add_argument(
+        "--tolerance",
+        type=float,
+        default=0.25,
+        help="cross-check band, as a fraction of the profiled time",
+    )
     args = ap.parse_args()
 
     if not torch.cuda.is_available():
@@ -363,23 +430,28 @@ def main() -> None:
             "ScaFFold runs"
         )
     if not os.environ.get("MIOPEN_USER_DB_PATH"):
-        print("WARNING: MIOPEN_USER_DB_PATH is unset -- every cell re-runs the "
-              "find from scratch and nothing is reusable afterwards",
-              file=sys.stderr)
+        print(
+            "WARNING: MIOPEN_USER_DB_PATH is unset -- every cell re-runs the "
+            "find from scratch and nothing is reusable afterwards",
+            file=sys.stderr,
+        )
 
-    problems = list(scaffold_corpus())[args.skip:]
+    problems = list(scaffold_corpus())[args.skip :]
     if args.top:
         problems = problems[: args.top]
     corpus_problems = list(problems)
     if args.include_edge:
         problems += list(edge_cases())
 
-    modes = {"both": ("halo", "unhaloed"),
-             "all": ("halo", "production", "unhaloed")}.get(
-        args.shape, (args.shape,))
-    _forms = {"halo": lambda p: p.halo_variant,
-              "production": lambda p: p.production_variant,
-              "unhaloed": lambda p: p}
+    modes = {
+        "both": ("halo", "unhaloed"),
+        "all": ("halo", "production", "unhaloed"),
+    }.get(args.shape, (args.shape,))
+    _forms = {
+        "halo": lambda p: p.halo_variant,
+        "production": lambda p: p.production_variant,
+        "unhaloed": lambda p: p,
+    }
     # A problem with nothing to halo is its own variant in all three forms, so
     # the multi-mode runs would otherwise measure the synthetic edge cases and
     # the k=1/transposed convs two or three times for nothing.  Deduplicated on
@@ -430,14 +502,21 @@ def main() -> None:
                 continue
             if args.skip_slow and done.get(key, {}).get("note"):
                 continue
-            rec = measure_one(problem, direction, max_call_ms=args.max_call_ms,
-                              shape_mode=mode, budget_s=args.budget,
-                              target_rel=args.precision)
+            rec = measure_one(
+                problem,
+                direction,
+                max_call_ms=args.max_call_ms,
+                shape_mode=mode,
+                budget_s=args.budget,
+                target_rel=args.precision,
+            )
             records.append(rec)
             flush()
             if "error" in rec:
-                print(f"  {problem.label:36s} {mode:8s} {direction:11s} "
-                      f"ERROR {rec['error'][:80]}")
+                print(
+                    f"  {problem.label:36s} {mode:8s} {direction:11s} "
+                    f"ERROR {rec['error'][:80]}"
+                )
             else:
                 print(
                     f"  {problem.label:36s} {mode:8s} {direction:11s} "
@@ -454,11 +533,16 @@ def main() -> None:
     print(f"\n{len(ok)}/{len(records)} cells measured -> {out_path}")
     if len(ok) < len(records):
         print("failures:")
-        print(format_table(
-            [[r["problem"], r["direction"], r["error"][:70]]
-             for r in records if "error" in r],
-            ["problem", "direction", "error"],
-        ))
+        print(
+            format_table(
+                [
+                    [r["problem"], r["direction"], r["error"][:70]]
+                    for r in records
+                    if "error" in r
+                ],
+                ["problem", "direction", "error"],
+            )
+        )
     if args.cross_check:
         rows = cross_check(records, corpus_problems)
         print("\ncross-check against the profiled ScaFFold runs:")

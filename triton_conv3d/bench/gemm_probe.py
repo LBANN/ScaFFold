@@ -39,7 +39,6 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
-import itertools
 import json
 import pathlib
 import sys
@@ -56,8 +55,7 @@ from ..shapes import (
     ConvProblem,
     hot_corpus,
 )
-from .harness import flush_caches, format_table, interleaved
-
+from .harness import format_table, interleaved
 
 # ---------------------------------------------------------------------------
 # A plain, honest GEMM
@@ -66,11 +64,18 @@ from .harness import flush_caches, format_table, interleaved
 
 @triton.jit
 def _gemm_kernel(
-    a_ptr, b_ptr, c_ptr,
-    M, N, K,
-    stride_am, stride_ak,
-    stride_bk, stride_bn,
-    stride_cm, stride_cn,
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    M,
+    N,
+    K,
+    stride_am,
+    stride_ak,
+    stride_bk,
+    stride_bn,
+    stride_cm,
+    stride_cn,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
@@ -113,8 +118,16 @@ def _gemm_kernel(
         a_ptrs = a_ptr + offs_m[:, None] * stride_am + offs_k[None, :] * stride_ak
         b_ptrs = b_ptr + offs_k[:, None] * stride_bk + offs_n[None, :] * stride_bn
     else:
-        a_ptrs = a_ptr + offs_m[:, None].to(tl.int64) * stride_am + offs_k[None, :] * stride_ak
-        b_ptrs = b_ptr + offs_k[:, None] * stride_bk + offs_n[None, :].to(tl.int64) * stride_bn
+        a_ptrs = (
+            a_ptr
+            + offs_m[:, None].to(tl.int64) * stride_am
+            + offs_k[None, :] * stride_ak
+        )
+        b_ptrs = (
+            b_ptr
+            + offs_k[:, None] * stride_bk
+            + offs_n[None, :].to(tl.int64) * stride_bn
+        )
 
     acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
     k_step = BLOCK_K * SPLIT_K
@@ -131,7 +144,9 @@ def _gemm_kernel(
         a_ptrs += k_step * stride_ak
         b_ptrs += k_step * stride_bk
 
-    c_ptrs = c_ptr + offs_m[:, None].to(tl.int64) * stride_cm + offs_n[None, :] * stride_cn
+    c_ptrs = (
+        c_ptr + offs_m[:, None].to(tl.int64) * stride_cm + offs_n[None, :] * stride_cn
+    )
     c_mask = (offs_m[:, None] < M) & (offs_n[None, :] < N)
     if SPLIT_K == 1:
         tl.store(c_ptrs, acc, mask=c_mask)
@@ -267,9 +282,19 @@ def _default_kpack(block_k: int) -> int:
     return 1 if block_k <= 16 else 2
 
 
-def _amd_config(bm: int, bn: int, bk: int, warps: int, *, group_m: int,
-                split_k: int, nonkdim: int, kpack: int | None = None,
-                waves_per_eu: int = 0, int32: bool = False) -> GemmConfig | None:
+def _amd_config(
+    bm: int,
+    bn: int,
+    bk: int,
+    warps: int,
+    *,
+    group_m: int,
+    split_k: int,
+    nonkdim: int,
+    kpack: int | None = None,
+    waves_per_eu: int = 0,
+    int32: bool = False,
+) -> GemmConfig | None:
     """One AMD-knob config, or ``None`` if a hard constraint rejects it.
 
     The constraints are not preferences.  ``BLOCK_M``/``BLOCK_N`` not divisible
@@ -288,7 +313,13 @@ def _amd_config(bm: int, bn: int, bk: int, warps: int, *, group_m: int,
     if warps < 1:
         return None
     return GemmConfig(
-        bm, bn, bk, group_m, split_k, warps, num_stages=2,
+        bm,
+        bn,
+        bk,
+        group_m,
+        split_k,
+        warps,
+        num_stages=2,
         matrix_instr_nonkdim=nonkdim,
         kpack=_default_kpack(bk) if kpack is None else kpack,
         waves_per_eu=waves_per_eu,
@@ -302,7 +333,9 @@ def _split_ks(m: int, n: int, k: int, bm: int, bn: int) -> tuple[int, ...]:
     return (1, 4, 16) if tiles < 228 and k >= 2048 else (1,)
 
 
-def _candidate_configs(m: int, n: int, k: int, knobs: str = "legacy") -> list[GemmConfig]:
+def _candidate_configs(
+    m: int, n: int, k: int, knobs: str = "legacy"
+) -> list[GemmConfig]:
     """Configs worth trying for one shape.
 
     Not ``@triton.autotune``: that recompiles inside whatever is running at the
@@ -363,8 +396,15 @@ def _candidate_configs(m: int, n: int, k: int, knobs: str = "legacy") -> list[Ge
             for nonkdim in nonkdims:
                 for group_m in group_ms:
                     for sk in _split_ks(m, n, k, bm, bn):
-                        cfg = _amd_config(bm, bn, bk, warps, group_m=group_m,
-                                          split_k=sk, nonkdim=nonkdim)
+                        cfg = _amd_config(
+                            bm,
+                            bn,
+                            bk,
+                            warps,
+                            group_m=group_m,
+                            split_k=sk,
+                            nonkdim=nonkdim,
+                        )
                         if cfg is not None and cfg not in seen:
                             seen.add(cfg)
                             out.append(cfg)
@@ -381,19 +421,31 @@ def _randn(shape: tuple[int, ...], device, dtype: torch.dtype) -> torch.Tensor:
     return torch.randn(shape, device=device, dtype=dtype)
 
 
-def _launch(a, b, c, cfg: GemmConfig, *, m: int, n: int, k: int,
-            stride_am: int, stride_bn: int):
+def _launch(
+    a, b, c, cfg: GemmConfig, *, m: int, n: int, k: int, stride_am: int, stride_bn: int
+):
     grid = (triton.cdiv(m, cfg.BLOCK_M) * triton.cdiv(n, cfg.BLOCK_N), cfg.SPLIT_K)
     _gemm_kernel[grid](
-        a, b, c,
-        m, n, k,
-        stride_am, 1,
-        b.stride(0), stride_bn,
-        c.stride(0), c.stride(1),
-        BLOCK_M=cfg.BLOCK_M, BLOCK_N=cfg.BLOCK_N, BLOCK_K=cfg.BLOCK_K,
-        GROUP_M=cfg.GROUP_M, SPLIT_K=cfg.SPLIT_K,
+        a,
+        b,
+        c,
+        m,
+        n,
+        k,
+        stride_am,
+        1,
+        b.stride(0),
+        stride_bn,
+        c.stride(0),
+        c.stride(1),
+        BLOCK_M=cfg.BLOCK_M,
+        BLOCK_N=cfg.BLOCK_N,
+        BLOCK_K=cfg.BLOCK_K,
+        GROUP_M=cfg.GROUP_M,
+        SPLIT_K=cfg.SPLIT_K,
         INT32_OFF=cfg.int32_offsets,
-        num_warps=cfg.num_warps, num_stages=cfg.num_stages,
+        num_warps=cfg.num_warps,
+        num_stages=cfg.num_stages,
         **cfg.amd_kwargs(),
     )
 
@@ -437,9 +489,17 @@ def plan_operands(m: int, n: int, k: int, mode: str, elem: int) -> dict | None:
 
 
 def best_triton_gemm(
-    m: int, n: int, k: int, *, dtype=torch.bfloat16, mode: str = "compute",
-    device="cuda", max_configs: int = 0, verbose: bool = False,
-    knobs: str = "legacy", sink: list | None = None,
+    m: int,
+    n: int,
+    k: int,
+    *,
+    dtype=torch.bfloat16,
+    mode: str = "compute",
+    device="cuda",
+    max_configs: int = 0,
+    verbose: bool = False,
+    knobs: str = "legacy",
+    sink: list | None = None,
 ) -> tuple[float, GemmConfig | None, int]:
     """Sweep configs, return ``(best ms/call, config, n_configs_that_ran)``.
 
@@ -460,8 +520,19 @@ def best_triton_gemm(
     if max_configs:
         configs = configs[:max_configs]
     try:
-        return _sweep(a, b, c, configs, m=m, n=n, k=k, stride_am=stride_am,
-                      stride_bn=stride_bn, verbose=verbose, sink=sink)
+        return _sweep(
+            a,
+            b,
+            c,
+            configs,
+            m=m,
+            n=n,
+            k=k,
+            stride_am=stride_am,
+            stride_bn=stride_bn,
+            verbose=verbose,
+            sink=sink,
+        )
     finally:
         del a, b, c
         torch.cuda.empty_cache()
@@ -471,19 +542,35 @@ def _alloc(plan: dict, m: int, n: int, k: int, device, dtype):
     a = _randn((plan["a_rows"], k), device, dtype)
     b = _randn((k, plan["b_cols"]), device, dtype)
     c = torch.empty((m, n), device=device, dtype=torch.float32)
-    return (a, b, c,
-            a.stride(0) if plan["stride_am"] is None else 0,
-            b.stride(1) if plan["stride_bn"] is None else 0)
+    return (
+        a,
+        b,
+        c,
+        a.stride(0) if plan["stride_am"] is None else 0,
+        b.stride(1) if plan["stride_bn"] is None else 0,
+    )
 
 
-def _sweep(a, b, c, configs: list[GemmConfig], *, m: int, n: int, k: int,
-           stride_am: int, stride_bn: int, verbose: bool = False,
-           sink: list | None = None) -> tuple[float, GemmConfig | None, int]:
+def _sweep(
+    a,
+    b,
+    c,
+    configs: list[GemmConfig],
+    *,
+    m: int,
+    n: int,
+    k: int,
+    stride_am: int,
+    stride_bn: int,
+    verbose: bool = False,
+    sink: list | None = None,
+) -> tuple[float, GemmConfig | None, int]:
     """Time each config on already-allocated operands; return the winner."""
     best_ms, best_cfg, ran = float("inf"), None, 0
     for cfg in configs:
-        launch = _launcher(a, b, c, cfg, m=m, n=n, k=k,
-                           stride_am=stride_am, stride_bn=stride_bn)
+        launch = _launcher(
+            a, b, c, cfg, m=m, n=n, k=k, stride_am=stride_am, stride_bn=stride_bn
+        )
         try:
             if cfg.SPLIT_K > 1:
                 c.zero_()
@@ -506,12 +593,19 @@ def _launcher(a, b, c, cfg: GemmConfig, **kw):
     return lambda: _launch(a, b, c, cfg, **kw)
 
 
-def torch_gemm_ms(m: int, n: int, k: int, *, dtype=torch.bfloat16, device="cuda") -> float:
+def torch_gemm_ms(
+    m: int, n: int, k: int, *, dtype=torch.bfloat16, device="cuda"
+) -> float:
     """hipBLASLt's time for the same GEMM -- the library reference."""
     a = _randn((m, k), device, dtype)
     b = _randn((k, n), device, dtype)
     try:
-        meas = interleaved({"t": lambda: torch.matmul(a, b)}, warmup=5, iters=5, rounds=5)
+        # Bound as defaults, not captured: the ``finally`` below deletes both
+        # names, and a closure over a deleted name is only safe by accident of
+        # when it happens to be called.
+        meas = interleaved(
+            {"t": lambda a=a, b=b: torch.matmul(a, b)}, warmup=5, iters=5, rounds=5
+        )
         return meas["t"].median
     finally:
         del a, b
@@ -523,45 +617,80 @@ def torch_gemm_ms(m: int, n: int, k: int, *, dtype=torch.bfloat16, device="cuda"
 # ---------------------------------------------------------------------------
 
 
-def run_peak(sizes=(2048, 4096, 8192), dtype=torch.bfloat16,
-             knobs: str = "legacy") -> list[dict]:
+def run_peak(
+    sizes=(2048, 4096, 8192), dtype=torch.bfloat16, knobs: str = "legacy"
+) -> list[dict]:
     peak = PEAK_FLOPS["bf16"] if dtype is torch.bfloat16 else PEAK_FLOPS["fp32"]
     rows = []
     for s in sizes:
         flops = 2 * s * s * s
-        tri_ms, cfg, ran = best_triton_gemm(s, s, s, dtype=dtype, mode="dram",
-                                            knobs=knobs)
+        tri_ms, cfg, ran = best_triton_gemm(
+            s, s, s, dtype=dtype, mode="dram", knobs=knobs
+        )
         tor_ms = torch_gemm_ms(s, s, s, dtype=dtype)
-        rows.append({
-            "size": s,
-            "triton_ms": tri_ms, "triton_tflops": flops / (tri_ms * 1e-3) / 1e12,
-            "triton_pct_peak": 100 * flops / (tri_ms * 1e-3) / peak,
-            "triton_config": str(cfg), "configs_ran": ran,
-            "torch_ms": tor_ms, "torch_tflops": flops / (tor_ms * 1e-3) / 1e12,
-            "torch_pct_peak": 100 * flops / (tor_ms * 1e-3) / peak,
-            "triton_vs_torch": tor_ms / tri_ms,
-        })
-        print(format_table(
-            [[
-                r["size"],
-                f"{r['triton_tflops']:.1f}", f"{r['triton_pct_peak']:.1f}%",
-                f"{r['torch_tflops']:.1f}", f"{r['torch_pct_peak']:.1f}%",
-                f"{r['triton_vs_torch']:.2f}x", r["triton_config"],
-            ] for r in rows[-1:]],
-            ["MNK", "triton TF/s", "%peak", "torch TF/s", "%peak", "tri/torch", "config"],
-            aligns="rrrrrrl",
-        ) if len(rows) == 1 else "  " + "  ".join([
-            str(rows[-1]["size"]),
-            f"{rows[-1]['triton_tflops']:.1f}", f"{rows[-1]['triton_pct_peak']:.1f}%",
-            f"{rows[-1]['torch_tflops']:.1f}", f"{rows[-1]['torch_pct_peak']:.1f}%",
-            f"{rows[-1]['triton_vs_torch']:.2f}x", rows[-1]["triton_config"],
-        ]))
+        rows.append(
+            {
+                "size": s,
+                "triton_ms": tri_ms,
+                "triton_tflops": flops / (tri_ms * 1e-3) / 1e12,
+                "triton_pct_peak": 100 * flops / (tri_ms * 1e-3) / peak,
+                "triton_config": str(cfg),
+                "configs_ran": ran,
+                "torch_ms": tor_ms,
+                "torch_tflops": flops / (tor_ms * 1e-3) / 1e12,
+                "torch_pct_peak": 100 * flops / (tor_ms * 1e-3) / peak,
+                "triton_vs_torch": tor_ms / tri_ms,
+            }
+        )
+        print(
+            format_table(
+                [
+                    [
+                        r["size"],
+                        f"{r['triton_tflops']:.1f}",
+                        f"{r['triton_pct_peak']:.1f}%",
+                        f"{r['torch_tflops']:.1f}",
+                        f"{r['torch_pct_peak']:.1f}%",
+                        f"{r['triton_vs_torch']:.2f}x",
+                        r["triton_config"],
+                    ]
+                    for r in rows[-1:]
+                ],
+                [
+                    "MNK",
+                    "triton TF/s",
+                    "%peak",
+                    "torch TF/s",
+                    "%peak",
+                    "tri/torch",
+                    "config",
+                ],
+                aligns="rrrrrrl",
+            )
+            if len(rows) == 1
+            else "  "
+            + "  ".join(
+                [
+                    str(rows[-1]["size"]),
+                    f"{rows[-1]['triton_tflops']:.1f}",
+                    f"{rows[-1]['triton_pct_peak']:.1f}%",
+                    f"{rows[-1]['torch_tflops']:.1f}",
+                    f"{rows[-1]['torch_pct_peak']:.1f}%",
+                    f"{rows[-1]['triton_vs_torch']:.2f}x",
+                    rows[-1]["triton_config"],
+                ]
+            )
+        )
         sys.stdout.flush()
     return rows
 
 
-def run_peak_compare(sizes=(2048, 4096, 8192), knob_sets=("legacy", "amd"),
-                     dtype=torch.bfloat16, device="cuda") -> list[dict]:
+def run_peak_compare(
+    sizes=(2048, 4096, 8192),
+    knob_sets=("legacy", "amd"),
+    dtype=torch.bfloat16,
+    device="cuda",
+) -> list[dict]:
     """Peak calibration where the knob sets are compared *against each other*.
 
     :func:`run_peak` sweeps one knob set and reports its winner, which is fine
@@ -590,23 +719,41 @@ def run_peak_compare(sizes=(2048, 4096, 8192), knob_sets=("legacy", "amd"),
             for ks in knob_sets:
                 configs = _candidate_configs(s, s, s, ks)
                 sink: list = []
-                ms, cfg, ran = _sweep(a, b, c, configs, m=s, n=s, k=s,
-                                      stride_am=stride_am, stride_bn=stride_bn,
-                                      sink=sink)
+                ms, cfg, ran = _sweep(
+                    a,
+                    b,
+                    c,
+                    configs,
+                    m=s,
+                    n=s,
+                    k=s,
+                    stride_am=stride_am,
+                    stride_bn=stride_bn,
+                    sink=sink,
+                )
                 row[f"{ks}_config"] = str(cfg)
                 row[f"{ks}_configs_ran"] = ran
                 row[f"{ks}_sweep_tflops"] = flops / (ms * 1e-3) / 1e12
                 by_str = {str(x): x for x in configs}
                 for i, (name, _) in enumerate(
-                        sorted(sink, key=lambda kv: kv[1])[:_FINALISTS]):
+                    sorted(sink, key=lambda kv: kv[1])[:_FINALISTS]
+                ):
                     owner[f"{ks}#{i}"] = (ks, by_str[name])
                     variants[f"{ks}#{i}"] = _launcher(
-                        a, b, c, by_str[name], m=s, n=s, k=s,
-                        stride_am=stride_am, stride_bn=stride_bn)
+                        a,
+                        b,
+                        c,
+                        by_str[name],
+                        m=s,
+                        n=s,
+                        k=s,
+                        stride_am=stride_am,
+                        stride_bn=stride_bn,
+                    )
             owner["torch"] = ("torch", None)
-            variants["torch"] = lambda: torch.matmul(a, b)
-            meas = interleaved(variants, warmup=5, iters=5,
-                               rounds=2 * len(variants))
+            # Defaults rather than a closure, for the reason in ``torch_gemm_ms``.
+            variants["torch"] = lambda a=a, b=b: torch.matmul(a, b)
+            meas = interleaved(variants, warmup=5, iters=5, rounds=2 * len(variants))
             for name, m_ in meas.items():
                 ks, cfg = owner[name]
                 if m_.median >= row.get(f"{ks}_ms", float("inf")):
@@ -627,17 +774,25 @@ def run_peak_compare(sizes=(2048, 4096, 8192), knob_sets=("legacy", "amd"),
             torch.cuda.empty_cache()
         rows.append(row)
         names = list(knob_sets) + ["torch"]
-        print("  " + "  ".join(
-            [f"MNK={s:<5d}"]
-            + [f"{name}={row[f'{name}_tflops']:6.1f} TF/s"
-               f" ({row[f'{name}_pct_peak']:5.1f}%, spread {row[f'{name}_spread']:.1%},"
-               f" stall {row[f'{name}_stall']:.2f}x)"
-               for name in names if f"{name}_tflops" in row]
-        ))
+        print(
+            "  "
+            + "  ".join(
+                [f"MNK={s:<5d}"]
+                + [
+                    f"{name}={row[f'{name}_tflops']:6.1f} TF/s"
+                    f" ({row[f'{name}_pct_peak']:5.1f}%, spread {row[f'{name}_spread']:.1%},"
+                    f" stall {row[f'{name}_stall']:.2f}x)"
+                    for name in names
+                    if f"{name}_tflops" in row
+                ]
+            )
+        )
         for ks in knob_sets:
-            print(f"      {ks:8s} winner {row[f'{ks}_config']} "
-                  f"[{row[f'{ks}_configs_ran']} configs, "
-                  f"{row[f'{ks}_sweep_tflops']:.1f} TF/s during the sweep]")
+            print(
+                f"      {ks:8s} winner {row[f'{ks}_config']} "
+                f"[{row[f'{ks}_configs_ran']} configs, "
+                f"{row[f'{ks}_sweep_tflops']:.1f} TF/s during the sweep]"
+            )
         sys.stdout.flush()
     return rows
 
@@ -663,8 +818,18 @@ _KNOB_SETS: dict[str, tuple[str, ...]] = {
 _FINALISTS = 3
 
 
-def _measure_cell(m: int, n: int, k: int, *, mode: str, dtype, knob_sets,
-                  keep_all: bool, max_configs: int, device="cuda") -> dict | None:
+def _measure_cell(
+    m: int,
+    n: int,
+    k: int,
+    *,
+    mode: str,
+    dtype,
+    knob_sets,
+    keep_all: bool,
+    max_configs: int,
+    device="cuda",
+) -> dict | None:
     """Sweep each knob set on one shape, then race the finalists.
 
     Returns ``None`` when the shape does not fit this mode's budget.  Operands
@@ -676,17 +841,33 @@ def _measure_cell(m: int, n: int, k: int, *, mode: str, dtype, knob_sets,
         return None
     a, b, c, stride_am, stride_bn = _alloc(plan, m, n, k, device, dtype)
     try:
-        out: dict = {"winners": {}, "ran": {}, "sweep": {}, "sinks": {},
-                     "headtohead": {}, "spread": {}, "stall": {}}
+        out: dict = {
+            "winners": {},
+            "ran": {},
+            "sweep": {},
+            "sinks": {},
+            "headtohead": {},
+            "spread": {},
+            "stall": {},
+        }
         finalists: dict[str, list[GemmConfig]] = {}
         for ks in knob_sets:
             configs = _candidate_configs(m, n, k, ks)
             if max_configs:
                 configs = configs[:max_configs]
             sink: list = []
-            ms, cfg, ran = _sweep(a, b, c, configs, m=m, n=n, k=k,
-                                  stride_am=stride_am, stride_bn=stride_bn,
-                                  sink=sink)
+            ms, cfg, ran = _sweep(
+                a,
+                b,
+                c,
+                configs,
+                m=m,
+                n=n,
+                k=k,
+                stride_am=stride_am,
+                stride_bn=stride_bn,
+                sink=sink,
+            )
             if cfg is None:
                 continue
             out["winners"][ks], out["ran"][ks], out["sweep"][ks] = cfg, ran, ms
@@ -702,22 +883,30 @@ def _measure_cell(m: int, n: int, k: int, *, mode: str, dtype, knob_sets,
                 for i, cfg in enumerate(cfgs):
                     name = f"{ks}#{i}"
                     owner[name] = ks
-                    variants[name] = _launcher(a, b, c, cfg, m=m, n=n, k=k,
-                                               stride_am=stride_am,
-                                               stride_bn=stride_bn)
+                    variants[name] = _launcher(
+                        a,
+                        b,
+                        c,
+                        cfg,
+                        m=m,
+                        n=n,
+                        k=k,
+                        stride_am=stride_am,
+                        stride_bn=stride_bn,
+                    )
                     if cfg.SPLIT_K > 1:
                         c.zero_()
             # Rounds a multiple of the variant count, so each variant occupies
             # each slot the same number of times -- with 2 variants over 5
             # rounds one of them gets the post-warmup slot three times and the
             # other twice, which is worth several percent here.
-            meas = interleaved(variants, warmup=3, iters=5,
-                               rounds=2 * len(variants))
+            meas = interleaved(variants, warmup=3, iters=5, rounds=2 * len(variants))
             out["h2h_best"] = {}
             for name, m_ in meas.items():
                 ks = owner[name]
-                out["h2h_best"][ks] = min(out["h2h_best"].get(ks, float("inf")),
-                                          m_.best)
+                out["h2h_best"][ks] = min(
+                    out["h2h_best"].get(ks, float("inf")), m_.best
+                )
                 if m_.median < out["headtohead"].get(ks, float("inf")):
                     out["headtohead"][ks] = m_.median
                     out["spread"][ks] = m_.spread
@@ -738,12 +927,17 @@ def _measure_cell(m: int, n: int, k: int, *, mode: str, dtype, knob_sets,
         torch.cuda.empty_cache()
 
 
-def run_shapes(problems: list[ConvProblem], modes=("compute", "dram"),
-               dtype=torch.bfloat16, max_configs: int = 0,
-               knobs: str = "legacy", only_n: int | None = None,
-               keep_all: bool = False,
-               prior: dict[tuple[str, str], dict] | None = None,
-               flush=None) -> list[dict]:
+def run_shapes(
+    problems: list[ConvProblem],
+    modes=("compute", "dram"),
+    dtype=torch.bfloat16,
+    max_configs: int = 0,
+    knobs: str = "legacy",
+    only_n: int | None = None,
+    keep_all: bool = False,
+    prior: dict[tuple[str, str], dict] | None = None,
+    flush=None,
+) -> list[dict]:
     """Sweep every (problem, direction) cell.
 
     ``prior`` supplies cells a previous run already measured, keyed by
@@ -769,8 +963,11 @@ def run_shapes(problems: list[ConvProblem], modes=("compute", "dram"),
                 continue
             flops = 2 * m * n * k
             row = {
-                "problem": p.label, "direction": direction,
-                "M": m, "N": n, "K": k,
+                "problem": p.label,
+                "direction": direction,
+                "M": m,
+                "N": n,
+                "K": k,
                 "conv_flops": p.flops(direction),
                 "conv_ai": p.arithmetic_intensity(direction),
                 "conv_roofline_tflops": p.roofline_flops(direction) / 1e12,
@@ -783,9 +980,16 @@ def run_shapes(problems: list[ConvProblem], modes=("compute", "dram"),
             knob_sets = _KNOB_SETS.get(knobs, (knobs,))
             for mode in modes:
                 try:
-                    cell = _measure_cell(m, n, k, mode=mode, dtype=dtype,
-                                         knob_sets=knob_sets, keep_all=keep_all,
-                                         max_configs=max_configs)
+                    cell = _measure_cell(
+                        m,
+                        n,
+                        k,
+                        mode=mode,
+                        dtype=dtype,
+                        knob_sets=knob_sets,
+                        keep_all=keep_all,
+                        max_configs=max_configs,
+                    )
                 except torch.OutOfMemoryError:
                     cell = None
                 if cell is None or not cell["winners"]:
@@ -835,8 +1039,10 @@ def run_shapes(problems: list[ConvProblem], modes=("compute", "dram"),
                 # single-set run.  Keeps the JSON shape compatible with
                 # ``probe.json`` so before/after can be diffed key for key.
                 head = knob_sets[-1]
-                record(mode, (cell["headtohead"] if len(knob_sets) > 1
-                              else cell["sweep"])[head])
+                record(
+                    mode,
+                    (cell["headtohead"] if len(knob_sets) > 1 else cell["sweep"])[head],
+                )
                 row[f"{mode}_config"] = str(cell["winners"][head])
                 row[f"{mode}_configs_ran"] = cell["ran"][head]
                 if len(knob_sets) > 1:
@@ -852,28 +1058,37 @@ def run_shapes(problems: list[ConvProblem], modes=("compute", "dram"),
                     f" ({row.get(f'{mode}_pct_peak', float('nan')):5.1f}% peak)"
                     for mode in modes
                 )
-                + (f"  miopen={row['miopen_ms']:.3f} ms"
-                   f" ({row['miopen_pct_roofline']:.0f}%)" if "miopen_ms" in row else "")
+                + (
+                    f"  miopen={row['miopen_ms']:.3f} ms"
+                    f" ({row['miopen_pct_roofline']:.0f}%)"
+                    if "miopen_ms" in row
+                    else ""
+                )
             )
             if len(knob_sets) > 1:
                 for mode in modes:
                     if row.get(f"{mode}_ms") is None:
                         continue
-                    print("      " + "  |  ".join(
-                        f"{ks}: {row[f'{mode}_{ks}_pct_peak']:5.1f}% "
-                        f"(sweep {row[f'{mode}_{ks}_sweep_tflops']:.0f} TF/s, "
-                        f"stall {row[f'{mode}_{ks}_stall']:.2f}x) "
-                        f"{row[f'{mode}_{ks}_config']}"
-                        for ks in knob_sets if f"{mode}_{ks}_pct_peak" in row
-                    ))
+                    print(
+                        "      "
+                        + "  |  ".join(
+                            f"{ks}: {row[f'{mode}_{ks}_pct_peak']:5.1f}% "
+                            f"(sweep {row[f'{mode}_{ks}_sweep_tflops']:.0f} TF/s, "
+                            f"stall {row[f'{mode}_{ks}_stall']:.2f}x) "
+                            f"{row[f'{mode}_{ks}_config']}"
+                            for ks in knob_sets
+                            if f"{mode}_{ks}_pct_peak" in row
+                        )
+                    )
             sys.stdout.flush()
             if flush:
                 flush(rows)
     return rows
 
 
-def run_isa(spec: str, *, m: int, n: int, k: int, device="cuda",
-            dtype=torch.bfloat16) -> None:
+def run_isa(
+    spec: str, *, m: int, n: int, k: int, device="cuda", dtype=torch.bfloat16
+) -> None:
     """Compile and launch exactly one config, so its ISA can be inspected.
 
     Run under ``AMDGCN_ENABLE_DUMP=1`` with a cold ``TRITON_CACHE_DIR`` -- a
@@ -886,63 +1101,90 @@ def run_isa(spec: str, *, m: int, n: int, k: int, device="cuda",
     parts = spec.split(",")
     if len(parts) != 8:
         raise SystemExit(
-            "--isa expects BM,BN,BK,GROUP_M,warps,nonkdim,kpack,int32 "
-            f"(got {spec!r})"
+            f"--isa expects BM,BN,BK,GROUP_M,warps,nonkdim,kpack,int32 (got {spec!r})"
         )
     bm, bn, bk, gm, warps, nonkdim, kpack, int32 = (int(x) for x in parts)
-    cfg = GemmConfig(bm, bn, bk, gm, 1, warps, num_stages=2,
-                     matrix_instr_nonkdim=nonkdim, kpack=kpack, waves_per_eu=0,
-                     int32_offsets=bool(int32))
+    cfg = GemmConfig(
+        bm,
+        bn,
+        bk,
+        gm,
+        1,
+        warps,
+        num_stages=2,
+        matrix_instr_nonkdim=nonkdim,
+        kpack=kpack,
+        waves_per_eu=0,
+        int32_offsets=bool(int32),
+    )
     a = _randn((m, k), device, dtype)
     b = _randn((k, n), device, dtype)
     c = torch.empty((m, n), device=device, dtype=torch.float32)
-    _launch(a, b, c, cfg, m=m, n=n, k=k,
-            stride_am=a.stride(0), stride_bn=b.stride(1))
+    _launch(a, b, c, cfg, m=m, n=n, k=k, stride_am=a.stride(0), stride_bn=b.stride(1))
     torch.cuda.synchronize()
-    print(f"ISA-DUMP-CONFIG {cfg} M={m} N={n} K={k} "
-          f"a_storage={a.untyped_storage().size()} "
-          f"b_storage={b.untyped_storage().size()} "
-          f"c_storage={c.untyped_storage().size()}")
+    print(
+        f"ISA-DUMP-CONFIG {cfg} M={m} N={n} K={k} "
+        f"a_storage={a.untyped_storage().size()} "
+        f"b_storage={b.untyped_storage().size()} "
+        f"c_storage={c.untyped_storage().size()}"
+    )
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--mode", choices=("peak", "shapes", "both", "isa"),
-                    default="both")
-    ap.add_argument("--knobs",
-                    choices=("legacy", "amd", "amd-wide",
-                             "compare", "compare-wide"),
-                    default="legacy",
-                    help="config generator.  'legacy' reproduces the M0 sweep "
-                         "(no AMD kernargs).  'amd' is Inductor's ROCm conv "
-                         "seed grid under the gfx942 MFMA constraints.  "
-                         "'amd-wide' adds skinny-N tiles and sweeps "
-                         "matrix_instr_nonkdim.  'compare[-wide]' runs several "
-                         "sets and races their champions in one interleaved "
-                         "measurement, which is the only before/after immune "
-                         "to a change of tenancy on the device.")
-    ap.add_argument("--only-n", type=int, default=None,
-                    help="restrict to cells whose GEMM N equals this")
-    ap.add_argument("--keep-all-configs", action="store_true",
-                    help="record every config's time, not just the winner")
-    ap.add_argument("--isa", default="128,128,64,6,8,16,2,0",
-                    help="BM,BN,BK,GROUP_M,warps,nonkdim,kpack,int32 for --mode isa")
-    ap.add_argument("--isa-mnk", default="4096,4096,4096",
-                    help="M,N,K for --mode isa")
-    ap.add_argument("--modes", default="compute",
-                    help="comma-separated subset of compute,dram.  'dram' is "
-                         "informative but slow -- it materializes im2col, which "
-                         "for the corpus's larger shapes means a 15-30 GiB "
-                         "operand per config -- and it is not the ceiling a "
-                         "fused kernel is measured against.")
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    ap.add_argument("--mode", choices=("peak", "shapes", "both", "isa"), default="both")
+    ap.add_argument(
+        "--knobs",
+        choices=("legacy", "amd", "amd-wide", "compare", "compare-wide"),
+        default="legacy",
+        help="config generator.  'legacy' reproduces the M0 sweep "
+        "(no AMD kernargs).  'amd' is Inductor's ROCm conv "
+        "seed grid under the gfx942 MFMA constraints.  "
+        "'amd-wide' adds skinny-N tiles and sweeps "
+        "matrix_instr_nonkdim.  'compare[-wide]' runs several "
+        "sets and races their champions in one interleaved "
+        "measurement, which is the only before/after immune "
+        "to a change of tenancy on the device.",
+    )
+    ap.add_argument(
+        "--only-n",
+        type=int,
+        default=None,
+        help="restrict to cells whose GEMM N equals this",
+    )
+    ap.add_argument(
+        "--keep-all-configs",
+        action="store_true",
+        help="record every config's time, not just the winner",
+    )
+    ap.add_argument(
+        "--isa",
+        default="128,128,64,6,8,16,2,0",
+        help="BM,BN,BK,GROUP_M,warps,nonkdim,kpack,int32 for --mode isa",
+    )
+    ap.add_argument("--isa-mnk", default="4096,4096,4096", help="M,N,K for --mode isa")
+    ap.add_argument(
+        "--modes",
+        default="compute",
+        help="comma-separated subset of compute,dram.  'dram' is "
+        "informative but slow -- it materializes im2col, which "
+        "for the corpus's larger shapes means a 15-30 GiB "
+        "operand per config -- and it is not the ceiling a "
+        "fused kernel is measured against.",
+    )
     ap.add_argument("--top", type=int, default=6, help="hottest N corpus problems")
-    ap.add_argument("--max-configs", type=int, default=0,
-                    help="cap the config sweep (0 = no cap)")
+    ap.add_argument(
+        "--max-configs", type=int, default=0, help="cap the config sweep (0 = no cap)"
+    )
     ap.add_argument("--out", default=None)
-    ap.add_argument("--resume", action="store_true",
-                    help="reuse cells (and the peak block) already present in "
-                         "--out instead of re-measuring them")
+    ap.add_argument(
+        "--resume",
+        action="store_true",
+        help="reuse cells (and the peak block) already present in "
+        "--out instead of re-measuring them",
+    )
     args = ap.parse_args()
 
     if not torch.cuda.is_available():
@@ -952,14 +1194,22 @@ def main() -> None:
         run_isa(args.isa, m=m, n=n, k=k)
         return
     props = torch.cuda.get_device_properties(0)
-    print(f"device: {props.name}, {props.multi_processor_count} CUs, "
-          f"torch {torch.__version__}, triton {triton.__version__}")
-    print(f"roofline constants: {PEAK_FLOPS['bf16']/1e12:.0f} TFLOP/s bf16, "
-          f"{HBM_BYTES_PER_S/1e12:.1f} TB/s HBM "
-          f"(crossover at {PEAK_FLOPS['bf16']/HBM_BYTES_PER_S:.0f} FLOP/byte)\n")
+    print(
+        f"device: {props.name}, {props.multi_processor_count} CUs, "
+        f"torch {torch.__version__}, triton {triton.__version__}"
+    )
+    print(
+        f"roofline constants: {PEAK_FLOPS['bf16'] / 1e12:.0f} TFLOP/s bf16, "
+        f"{HBM_BYTES_PER_S / 1e12:.1f} TB/s HBM "
+        f"(crossover at {PEAK_FLOPS['bf16'] / HBM_BYTES_PER_S:.0f} FLOP/byte)\n"
+    )
 
-    result: dict = {"device": props.name, "torch": torch.__version__,
-                    "triton": triton.__version__, "knobs": args.knobs}
+    result: dict = {
+        "device": props.name,
+        "torch": torch.__version__,
+        "triton": triton.__version__,
+        "knobs": args.knobs,
+    }
     prior: dict[tuple[str, str], dict] = {}
     out_path = pathlib.Path(args.out) if args.out else None
     if args.resume and out_path and out_path.exists():
@@ -967,8 +1217,10 @@ def main() -> None:
         prior = {(r["problem"], r["direction"]): r for r in old.get("shapes", [])}
         if old.get("peak"):
             result["peak"] = old["peak"]
-        print(f"resuming: {len(prior)} cells already measured"
-              + (", peak block reused" if "peak" in result else ""))
+        print(
+            f"resuming: {len(prior)} cells already measured"
+            + (", peak block reused" if "peak" in result else "")
+        )
 
     def write(rows=None) -> None:
         if not out_path:
@@ -978,8 +1230,10 @@ def main() -> None:
             payload["shapes"] = rows
         out_path.write_text(json.dumps(payload, indent=1) + "\n")
 
-    print(f"knob set: {args.knobs}"
-          + (f", restricted to N={args.only_n}" if args.only_n else ""))
+    print(
+        f"knob set: {args.knobs}"
+        + (f", restricted to N={args.only_n}" if args.only_n else "")
+    )
     t0 = time.time()
     if args.mode in ("peak", "both") and "peak" not in result:
         print("== peak: square bf16 GEMM, Triton vs hipBLASLt ==")
@@ -991,12 +1245,16 @@ def main() -> None:
         print()
     if args.mode in ("shapes", "both"):
         print(f"== shapes: conv-implied GEMMs, top {args.top} corpus problems ==")
-        result["shapes"] = run_shapes(list(hot_corpus(args.top)),
-                                      modes=tuple(args.modes.split(",")),
-                                      max_configs=args.max_configs,
-                                      knobs=args.knobs, only_n=args.only_n,
-                                      keep_all=args.keep_all_configs,
-                                      prior=prior, flush=write)
+        result["shapes"] = run_shapes(
+            list(hot_corpus(args.top)),
+            modes=tuple(args.modes.split(",")),
+            max_configs=args.max_configs,
+            knobs=args.knobs,
+            only_n=args.only_n,
+            keep_all=args.keep_all_configs,
+            prior=prior,
+            flush=write,
+        )
     result["elapsed_s"] = time.time() - t0
     print(f"\nelapsed {result['elapsed_s']:.0f} s")
 

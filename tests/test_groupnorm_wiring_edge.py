@@ -658,9 +658,7 @@ def test_gpu_model_double_backward_fails_loudly():
         "the double-backward graph was severed instead of raising; a second "
         "backward would contribute zero silently"
     )
-    with pytest.raises(
-        RuntimeError, match="no autograd formula|once_differentiable"
-    ):
+    with pytest.raises(RuntimeError, match="no autograd formula|once_differentiable"):
         first.pow(2).sum().backward()
 
 

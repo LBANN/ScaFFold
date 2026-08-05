@@ -767,9 +767,7 @@ def _exchange_forward(x, strategy, dim_index, dim, halo):
 
     slab_shape = list(x.shape)
     slab_shape[dim] = halo
-    recv_minus, recv_minus_view = _packed_slab(
-        slab_shape, x.dtype, x.device, zero=True
-    )
+    recv_minus, recv_minus_view = _packed_slab(slab_shape, x.dtype, x.device, zero=True)
     recv_plus, recv_plus_view = _packed_slab(slab_shape, x.dtype, x.device, zero=True)
 
     ops = []

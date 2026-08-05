@@ -135,9 +135,9 @@ import triton
 import triton.language as tl
 
 from .gather_gemm import (
-    ConvConfig,
     _LDS_BYTES,
     _MFMA_KDIM,
+    ConvConfig,
     _pow2_at_most,
     _triple,
     tune_key,
@@ -164,29 +164,65 @@ __all__ = [
 
 @triton.jit
 def _conv3d_bwd_weight_kernel(
-    X, GY, OUT,
+    X,
+    GY,
+    OUT,
     # Sizes.  ``K_TOTAL`` is ``BATCH * OUT_D * OUT_H * OUT_W``, the reduction
     # length; ``K_CHUNK`` is how much of it one split owns.
-    IN_D, IN_H, IN_W,
-    OUT_D, OUT_H, OUT_W,
-    CIN, COUT, K_TOTAL, K_CHUNK, GRID,
+    IN_D,
+    IN_H,
+    IN_W,
+    OUT_D,
+    OUT_H,
+    OUT_W,
+    CIN,
+    COUT,
+    K_TOTAL,
+    K_CHUNK,
+    GRID,
     # Element strides.  The channel stride of X and GY is 1 by construction --
     # that is what NDHWC means -- so it is neither passed nor multiplied by.
-    stride_xn, stride_xd, stride_xh, stride_xw,
-    stride_gn, stride_gd, stride_gh, stride_gw,
+    stride_xn,
+    stride_xd,
+    stride_xh,
+    stride_xw,
+    stride_gn,
+    stride_gd,
+    stride_gh,
+    stride_gw,
     # Destination: ``[split][Cout][tap][Cin]`` with the last three contiguous,
     # so one output channel's whole gradient is ``stride_wo`` long.
-    stride_ws, stride_wo,
-    NUM_M: tl.constexpr, NUM_CI: tl.constexpr, NUM_TG: tl.constexpr,
-    TAPS: tl.constexpr, TAP_BLOCK: tl.constexpr, BLOCK_NC: tl.constexpr,
-    KD: tl.constexpr, KH: tl.constexpr, KW: tl.constexpr,
-    SD: tl.constexpr, SH: tl.constexpr, SW: tl.constexpr,
-    PD: tl.constexpr, PH: tl.constexpr, PW: tl.constexpr,
-    DD: tl.constexpr, DH: tl.constexpr, DW: tl.constexpr,
-    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
-    EVEN_M: tl.constexpr, EVEN_N: tl.constexpr, EVEN_K: tl.constexpr,
-    PADDED: tl.constexpr, ROW_ALIGNED: tl.constexpr, ATOMIC: tl.constexpr,
-    NUM_XCD: tl.constexpr, INDEX_DTYPE: tl.constexpr,
+    stride_ws,
+    stride_wo,
+    NUM_M: tl.constexpr,
+    NUM_CI: tl.constexpr,
+    NUM_TG: tl.constexpr,
+    TAPS: tl.constexpr,
+    TAP_BLOCK: tl.constexpr,
+    BLOCK_NC: tl.constexpr,
+    KD: tl.constexpr,
+    KH: tl.constexpr,
+    KW: tl.constexpr,
+    SD: tl.constexpr,
+    SH: tl.constexpr,
+    SW: tl.constexpr,
+    PD: tl.constexpr,
+    PH: tl.constexpr,
+    PW: tl.constexpr,
+    DD: tl.constexpr,
+    DH: tl.constexpr,
+    DW: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    EVEN_M: tl.constexpr,
+    EVEN_N: tl.constexpr,
+    EVEN_K: tl.constexpr,
+    PADDED: tl.constexpr,
+    ROW_ALIGNED: tl.constexpr,
+    ATOMIC: tl.constexpr,
+    NUM_XCD: tl.constexpr,
+    INDEX_DTYPE: tl.constexpr,
     INPUT_PRECISION: tl.constexpr,
 ):
     # -- which tile of dW, and which slice of the reduction ------------------
@@ -209,8 +245,10 @@ def _conv3d_bwd_weight_kernel(
         rem = GRID % NUM_XCD
         xcd = pid % NUM_XCD
         seq = pid // NUM_XCD
-        pid = tl.where(xcd < rem, xcd * (per + 1),
-                       rem * (per + 1) + (xcd - rem) * per) + seq
+        pid = (
+            tl.where(xcd < rem, xcd * (per + 1), rem * (per + 1) + (xcd - rem) * per)
+            + seq
+        )
     num_tiles = NUM_M * NUM_CI * NUM_TG
     split = pid // num_tiles
     tile = pid % num_tiles
@@ -219,7 +257,7 @@ def _conv3d_bwd_weight_kernel(
     pid_ci = rest % NUM_CI
     tap0 = (rest // NUM_CI) * TAP_BLOCK
 
-    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)      # output channels
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)  # output channels
 
     # -- the N axis: TAP_BLOCK taps x BLOCK_NC input channels ---------------
     #
@@ -228,7 +266,7 @@ def _conv3d_bwd_weight_kernel(
     # constexpr, so the divisions fold away.
     col = tl.arange(0, BLOCK_N)
     t_local = col // BLOCK_NC
-    offs_n = pid_ci * BLOCK_NC + (col % BLOCK_NC)         # input channels
+    offs_n = pid_ci * BLOCK_NC + (col % BLOCK_NC)  # input channels
     # ``tl.arange`` needs a power of two, so ``TAP_BLOCK`` is one and cannot
     # divide 27.  Rather than mask the load for the ragged last group -- which
     # would cost a predicate on every B tile of every group -- the tap is
@@ -332,9 +370,12 @@ def _conv3d_bwd_weight_kernel(
             in_h = src_h[:, None] + (kh * DH)[None, :]
             in_w = src_w[:, None] + (kw * DW)[None, :]
             mask_b = (
-                (in_d >= 0) & (in_d < IN_D)
-                & (in_h >= 0) & (in_h < IN_H)
-                & (in_w >= 0) & (in_w < IN_W)
+                (in_d >= 0)
+                & (in_d < IN_D)
+                & (in_h >= 0)
+                & (in_h < IN_H)
+                & (in_w >= 0)
+                & (in_w < IN_W)
             )
             if not EVEN_N:
                 mask_b = mask_b & (offs_n < CIN)[None, :]
@@ -385,8 +426,12 @@ def _conv3d_bwd_weight_kernel(
 
 @triton.jit
 def _reduce_partials_kernel(
-    PARTIAL, OUT, N_ELEM, SPLITS,
-    BLOCK: tl.constexpr, BLOCK_S: tl.constexpr,
+    PARTIAL,
+    OUT,
+    N_ELEM,
+    SPLITS,
+    BLOCK: tl.constexpr,
+    BLOCK_S: tl.constexpr,
 ):
     """Sum the split-K partials in index order and cast to the output dtype.
 
@@ -415,7 +460,8 @@ def _reduce_partials_kernel(
         s = s0 + offs_s
         tile = tl.load(
             PARTIAL + s.to(tl.int64)[:, None] * stride + base[None, :],
-            mask=(s < SPLITS)[:, None] & mask[None, :], other=0.0,
+            mask=(s < SPLITS)[:, None] & mask[None, :],
+            other=0.0,
         )
         acc += tl.sum(tile, axis=0)
     tl.store(OUT + offs, acc.to(OUT.dtype.element_ty), mask=mask)
@@ -531,7 +577,8 @@ def _fit_bwd_weight_to_lds(cfg: BwdWeightConfig, dtype: torch.dtype) -> BwdWeigh
         return cfg
     while cfg.lds_bytes(dtype) > _LDS_BYTES and cfg.BLOCK_K // 2 >= kdim:
         cfg = dataclasses.replace(
-            cfg, BLOCK_K=cfg.BLOCK_K // 2,
+            cfg,
+            BLOCK_K=cfg.BLOCK_K // 2,
             kpack=1 if cfg.BLOCK_K // 2 <= 16 else cfg.kpack,
         )
     warps = max(1, min(cfg.num_warps, cfg.BLOCK_M * cfg.BLOCK_N // 256))
@@ -539,8 +586,13 @@ def _fit_bwd_weight_to_lds(cfg: BwdWeightConfig, dtype: torch.dtype) -> BwdWeigh
 
 
 def default_bwd_weight_config(
-    cout: int, cin: int, kernel: Sequence[int], k_total: int,
-    dtype: torch.dtype = torch.bfloat16, *, padded: bool = False,
+    cout: int,
+    cin: int,
+    kernel: Sequence[int],
+    k_total: int,
+    dtype: torch.dtype = torch.bfloat16,
+    *,
+    padded: bool = False,
 ) -> BwdWeightConfig:
     """A config that is legal for any shape and close to tuned for most.
 
@@ -619,8 +671,9 @@ def default_bwd_weight_config(
     # from the LDS budget, which at ``256 + 256`` columns lands on exactly 64 in
     # bf16 -- i.e. straight into the cliff -- so the cap has to be explicit.
     # The tuned table is free to ship 64 where a measurement says so.
-    block_k = _pow2_at_most(_LDS_BYTES // (itemsize * (block_m + block_n)),
-                            32 if block_m >= 256 else 64)
+    block_k = _pow2_at_most(
+        _LDS_BYTES // (itemsize * (block_m + block_n)), 32 if block_m >= 256 else 64
+    )
     block_k = max(kdim, block_k - block_k % kdim)
     # A K axis shorter than one tile is not an error, only waste; shrink so the
     # tiny synthetic shapes do not run a mostly-masked reduction.
@@ -628,10 +681,15 @@ def default_bwd_weight_config(
         block_k //= 2
     return _fit_bwd_weight_to_lds(
         BwdWeightConfig(
-            BLOCK_M=block_m, BLOCK_N=block_n, BLOCK_K=block_k, GROUP_M=6,
+            BLOCK_M=block_m,
+            BLOCK_N=block_n,
+            BLOCK_K=block_k,
+            GROUP_M=6,
             num_warps=min(8, max(1, block_m * block_n // 256)),
-            num_stages=2, matrix_instr_nonkdim=nonkdim,
-            kpack=1 if block_k <= 16 else 2, TAP_BLOCK=tap_block,
+            num_stages=2,
+            matrix_instr_nonkdim=nonkdim,
+            kpack=1 if block_k <= 16 else 2,
+            TAP_BLOCK=tap_block,
         ),
         dtype,
     )
@@ -643,7 +701,11 @@ def _row_aligned(block_k: int, out_w: int) -> bool:
 
 
 def split_count(
-    cfg: BwdWeightConfig, cout: int, cin: int, taps: int, k_total: int,
+    cfg: BwdWeightConfig,
+    cout: int,
+    cin: int,
+    taps: int,
+    k_total: int,
     out_w: int,
 ) -> tuple[int, int]:
     """``(splits, chunk)``: how the reduction axis is divided, and by how much.
@@ -672,13 +734,14 @@ def split_count(
     row-aligned, because the kernel's cheap scalar unravel needs every K-tile to
     stay inside one row; otherwise to a whole number of K-tiles.
     """
-    tiles = (-(-cout // cfg.BLOCK_M)
-             * -(-cin // cfg.BLOCK_NC)
-             * -(-taps // cfg.TAP_BLOCK))
+    tiles = (
+        -(-cout // cfg.BLOCK_M) * -(-cin // cfg.BLOCK_NC) * -(-taps // cfg.TAP_BLOCK)
+    )
     k_tiles = -(-k_total // cfg.BLOCK_K)
     per_split = cout * taps * cin * 4
-    ceiling = max(1, min(k_tiles // _MIN_K_TILES_PER_SPLIT,
-                         _WORKSPACE_BYTES // per_split))
+    ceiling = max(
+        1, min(k_tiles // _MIN_K_TILES_PER_SPLIT, _WORKSPACE_BYTES // per_split)
+    )
 
     if cfg.SPLIT_K:
         want = min(cfg.SPLIT_K, ceiling)
@@ -693,7 +756,8 @@ def split_count(
         loop_elems = tiles * k_total * (cfg.BLOCK_M + cfg.BLOCK_N)
         epilogue_elems = cout * taps * cin * 2 * 2
         epilogue_bound = max(
-            1, loop_elems // (_MAX_EPILOGUE_FRACTION * max(1, epilogue_elems)))
+            1, loop_elems // (_MAX_EPILOGUE_FRACTION * max(1, epilogue_elems))
+        )
         want = max(1, min(want, epilogue_bound, ceiling))
         # The snap goes last and **outranks the epilogue bound**, which is a
         # deliberate ordering and not the oversight it looks like.  ``round``
@@ -773,9 +837,14 @@ _SEED_SPLITS: tuple[int, ...] = (0, 1, 4, 16, 64, 256)
 
 
 def candidate_bwd_weight_configs(
-    cout: int, cin: int, kernel: Sequence[int], k_total: int,
+    cout: int,
+    cin: int,
+    kernel: Sequence[int],
+    k_total: int,
     dtype: torch.dtype = torch.bfloat16,
-    *, splits: Sequence[int] = _SEED_SPLITS, padded: bool = False,
+    *,
+    splits: Sequence[int] = _SEED_SPLITS,
+    padded: bool = False,
 ) -> list[BwdWeightConfig]:
     """Configs worth timing for one shape, already pruned to legal ones.
 
@@ -798,33 +867,52 @@ def candidate_bwd_weight_configs(
         for warps in {4, 8, seed_warps}:
             for sk in splits:
                 cfg = BwdWeightConfig(
-                    BLOCK_M=bm, BLOCK_N=bnc * tb, BLOCK_K=bk, GROUP_M=6,
-                    num_warps=warps, num_stages=2, matrix_instr_nonkdim=16,
-                    kpack=1 if bk <= 16 else 2, SPLIT_K=sk, TAP_BLOCK=tb,
+                    BLOCK_M=bm,
+                    BLOCK_N=bnc * tb,
+                    BLOCK_K=bk,
+                    GROUP_M=6,
+                    num_warps=warps,
+                    num_stages=2,
+                    matrix_instr_nonkdim=16,
+                    kpack=1 if bk <= 16 else 2,
+                    SPLIT_K=sk,
+                    TAP_BLOCK=tb,
                 )
-                if (cfg.validate(dtype) is not None
-                        or cfg.lds_bytes(dtype) > _LDS_BYTES
-                        or cfg in seen):
+                if (
+                    cfg.validate(dtype) is not None
+                    or cfg.lds_bytes(dtype) > _LDS_BYTES
+                    or cfg in seen
+                ):
                     continue
                 seen.add(cfg)
                 out.append(cfg)
     if not out:
-        out.append(default_bwd_weight_config(cout, cin, kernel, k_total, dtype,
-                                             padded=padded))
+        out.append(
+            default_bwd_weight_config(cout, cin, kernel, k_total, dtype, padded=padded)
+        )
     return out
 
 
-def _tuned(bm: int, bnc: int, tb: int, bk: int, warps: int,
-           sk: int = 0, nk: int = 32) -> BwdWeightConfig:
+def _tuned(
+    bm: int, bnc: int, tb: int, bk: int, warps: int, sk: int = 0, nk: int = 32
+) -> BwdWeightConfig:
     """One measured row.
 
     ``nk`` defaults to **32 here and to 16 everywhere else in the package**, and
     that asymmetry is the whole point of it.  See :data:`_TUNED_BWD_W`.
     """
-    return BwdWeightConfig(BLOCK_M=bm, BLOCK_N=bnc * tb, BLOCK_K=bk, GROUP_M=6,
-                           num_warps=warps, num_stages=2,
-                           matrix_instr_nonkdim=nk,
-                           kpack=1 if bk <= 16 else 2, SPLIT_K=sk, TAP_BLOCK=tb)
+    return BwdWeightConfig(
+        BLOCK_M=bm,
+        BLOCK_N=bnc * tb,
+        BLOCK_K=bk,
+        GROUP_M=6,
+        num_warps=warps,
+        num_stages=2,
+        matrix_instr_nonkdim=nk,
+        kpack=1 if bk <= 16 else 2,
+        SPLIT_K=sk,
+        TAP_BLOCK=tb,
+    )
 
 
 #: Measured backward-weight winners, keyed by ``(dtype, Cin, Cout, kernel)`` --
@@ -1055,8 +1143,13 @@ def register_tuned_bwd_weight(dtype, cin, cout, kernel, config) -> None:
 
 
 def bwd_weight_config(
-    cout: int, cin: int, kernel: Sequence[int], k_total: int,
-    dtype: torch.dtype = torch.bfloat16, *, padded: bool = False,
+    cout: int,
+    cin: int,
+    kernel: Sequence[int],
+    k_total: int,
+    dtype: torch.dtype = torch.bfloat16,
+    *,
+    padded: bool = False,
 ) -> BwdWeightConfig:
     """The config :func:`conv3d_backward_weight` would pick for this problem.
 
@@ -1137,9 +1230,7 @@ def bwd_weight_config(
 # ---------------------------------------------------------------------------
 
 
-def workspace_elements(
-    splits: int, cout: int, cin: int, kernel: Sequence[int]
-) -> int:
+def workspace_elements(splits: int, cout: int, cin: int, kernel: Sequence[int]) -> int:
     """fp32 elements :func:`conv3d_backward_weight` needs for ``splits`` splits."""
     return splits * cout * cin * math.prod(_triple(kernel, "kernel"))
 
@@ -1165,14 +1256,20 @@ def grad_weight_empty(
     """
     k = _triple(kernel, "kernel")
     return torch.empty(
-        (cout, cin, *k), dtype=dtype, device=device,
+        (cout, cin, *k),
+        dtype=dtype,
+        device=device,
         memory_format=torch.channels_last_3d,
     )
 
 
 def _validate_out(
-    gw: torch.Tensor, cout: int, cin: int, k: tuple[int, int, int],
-    dtype: torch.dtype, device: torch.device,
+    gw: torch.Tensor,
+    cout: int,
+    cin: int,
+    k: tuple[int, int, int],
+    dtype: torch.dtype,
+    device: torch.device,
 ) -> str | None:
     """``None`` if ``gw`` can be written as this problem's gradient, else why not.
 
@@ -1265,8 +1362,11 @@ def is_supported_bwd_weight(
     # clause is in ``gather_gemm.is_supported``; the two gates are kept symmetric
     # deliberately, because the caller picks between them by direction and a hole
     # in one of them is a hole in the ladder.
-    if (not input.is_cuda or not grad_output.is_cuda
-            or grad_output.device != input.device):
+    if (
+        not input.is_cuda
+        or not grad_output.is_cuda
+        or grad_output.device != input.device
+    ):
         return False
     try:
         s = _triple(stride, "stride")
@@ -1326,8 +1426,9 @@ def conv3d_backward_weight(
     ``weight_rsck`` hoists the weight transform in the other two directions.
     :func:`split_count` and :func:`workspace_elements` say how big it must be.
     """
-    if not is_supported_bwd_weight(input, weight_shape, grad_output, stride,
-                                   padding, dilation, groups):
+    if not is_supported_bwd_weight(
+        input, weight_shape, grad_output, stride, padding, dilation, groups
+    ):
         raise NotImplementedError(
             f"unsupported: input={tuple(input.shape)}/{input.dtype} "
             f"weight_shape={tuple(weight_shape)} "
@@ -1413,20 +1514,51 @@ def conv3d_backward_weight(
     index_dtype = tl.int64 if big else tl.int32
 
     _conv3d_bwd_weight_kernel[grid](
-        x, gy, dest,
-        in_d, in_h, in_w,
-        out_d, out_h, out_w,
-        cin, cout, k_total, chunk, grid[0],
-        x.stride(0), x.stride(2), x.stride(3), x.stride(4),
-        gy.stride(0), gy.stride(2), gy.stride(3), gy.stride(4),
-        stride_ws, taps * cin,
-        NUM_M=num_m, NUM_CI=num_ci, NUM_TG=num_tg,
-        TAPS=taps, TAP_BLOCK=config.TAP_BLOCK, BLOCK_NC=config.BLOCK_NC,
-        KD=kd, KH=kh, KW=kw,
-        SD=sd, SH=sh, SW=sw,
-        PD=pd, PH=ph, PW=pw,
-        DD=dd, DH=dh, DW=dw,
-        BLOCK_M=config.BLOCK_M, BLOCK_N=config.BLOCK_N, BLOCK_K=config.BLOCK_K,
+        x,
+        gy,
+        dest,
+        in_d,
+        in_h,
+        in_w,
+        out_d,
+        out_h,
+        out_w,
+        cin,
+        cout,
+        k_total,
+        chunk,
+        grid[0],
+        x.stride(0),
+        x.stride(2),
+        x.stride(3),
+        x.stride(4),
+        gy.stride(0),
+        gy.stride(2),
+        gy.stride(3),
+        gy.stride(4),
+        stride_ws,
+        taps * cin,
+        NUM_M=num_m,
+        NUM_CI=num_ci,
+        NUM_TG=num_tg,
+        TAPS=taps,
+        TAP_BLOCK=config.TAP_BLOCK,
+        BLOCK_NC=config.BLOCK_NC,
+        KD=kd,
+        KH=kh,
+        KW=kw,
+        SD=sd,
+        SH=sh,
+        SW=sw,
+        PD=pd,
+        PH=ph,
+        PW=pw,
+        DD=dd,
+        DH=dh,
+        DW=dw,
+        BLOCK_M=config.BLOCK_M,
+        BLOCK_N=config.BLOCK_N,
+        BLOCK_K=config.BLOCK_K,
         EVEN_M=(cout % config.BLOCK_M == 0),
         EVEN_N=(cin % config.BLOCK_NC == 0 and taps % config.TAP_BLOCK == 0),
         EVEN_K=(k_total % config.BLOCK_K == 0 and chunk % config.BLOCK_K == 0),
@@ -1443,8 +1575,13 @@ def conv3d_backward_weight(
         # not one program: at ``Cout=6, k=1`` the gradient is 384 elements.
         block = min(1024, max(64, triton.next_power_of_2(n_elem)))
         _reduce_partials_kernel[(triton.cdiv(n_elem, block),)](
-            ws, gw, n_elem, 1 if atomic else splits,
-            BLOCK=block, BLOCK_S=8, num_warps=4,
+            ws,
+            gw,
+            n_elem,
+            1 if atomic else splits,
+            BLOCK=block,
+            BLOCK_S=8,
+            num_warps=4,
         )
     return gw
 
@@ -1477,16 +1614,20 @@ def verify_isa_bwd_weight(
     n, cin, cout, d, h, w = problem_shape or (1, 64, 64, 32, 64, 64)
     k = (kernel, kernel, kernel)
     out = tuple(v + 2 * padding - (kernel - 1) for v in (d, h, w))
-    x = torch.randn((n, cin, d, h, w), device="cuda", dtype=torch.bfloat16
-                    ).contiguous(memory_format=torch.channels_last_3d)
-    gy = torch.randn((n, cout, *out), device="cuda", dtype=torch.bfloat16
-                     ).contiguous(memory_format=torch.channels_last_3d)
+    x = torch.randn((n, cin, d, h, w), device="cuda", dtype=torch.bfloat16).contiguous(
+        memory_format=torch.channels_last_3d
+    )
+    gy = torch.randn((n, cout, *out), device="cuda", dtype=torch.bfloat16).contiguous(
+        memory_format=torch.channels_last_3d
+    )
     k_total = n * out[0] * out[1] * out[2]
-    cfg = config or bwd_weight_config(cout, cin, k, k_total, torch.bfloat16,
-                                      padded=padding > 0)
-    splits, chunk = split_count(cfg, cout, cin, kernel ** 3, k_total, out[2])
-    gw = conv3d_backward_weight(x, (cout, cin, *k), gy, padding=padding,
-                                config=cfg, deterministic=deterministic)
+    cfg = config or bwd_weight_config(
+        cout, cin, k, k_total, torch.bfloat16, padded=padding > 0
+    )
+    splits, chunk = split_count(cfg, cout, cin, kernel**3, k_total, out[2])
+    gw = conv3d_backward_weight(
+        x, (cout, cin, *k), gy, padding=padding, config=cfg, deterministic=deterministic
+    )
     torch.cuda.synchronize()
     print(
         f"ISA-DUMP-CONFIG [bwd-weight] {cfg} cin={cin} cout={cout} "

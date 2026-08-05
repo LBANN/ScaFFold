@@ -77,8 +77,8 @@ from typing import Sequence
 import torch
 
 from .gather_gemm import (
-    ConvConfig,
     _MFMA_KDIM,
+    ConvConfig,
     _check_weight_rsck,
     _triple,
     conv3d_forward,
@@ -107,9 +107,16 @@ def bwd_data_padding(padding, dilation, kernel) -> tuple[int, int, int]:
 
 
 def _tuned(bm: int, bn: int, bk: int, warps: int, group_m: int = 6) -> ConvConfig:
-    return ConvConfig(BLOCK_M=bm, BLOCK_N=bn, BLOCK_K=bk, GROUP_M=group_m,
-                      num_warps=warps, num_stages=2, matrix_instr_nonkdim=16,
-                      kpack=1 if bk <= 16 else 2)
+    return ConvConfig(
+        BLOCK_M=bm,
+        BLOCK_N=bn,
+        BLOCK_K=bk,
+        GROUP_M=group_m,
+        num_warps=warps,
+        num_stages=2,
+        matrix_instr_nonkdim=16,
+        kpack=1 if bk <= 16 else 2,
+    )
 
 
 #: Measured backward-data winners, keyed by the **forward** problem's
@@ -179,8 +186,13 @@ def register_tuned_bwd_data(dtype, cin, cout, kernel, config: ConvConfig) -> Non
 
 
 def bwd_data_config(
-    grad_output_shape: Sequence[int], cin: int, kernel: Sequence[int],
-    dtype: torch.dtype = torch.bfloat16, *, padding=0, dilation=1,
+    grad_output_shape: Sequence[int],
+    cin: int,
+    kernel: Sequence[int],
+    dtype: torch.dtype = torch.bfloat16,
+    *,
+    padding=0,
+    dilation=1,
 ) -> ConvConfig:
     """The config :func:`conv3d_backward_data` would pick for this problem.
 
@@ -191,12 +203,19 @@ def bwd_data_config(
     k = _triple(kernel, "kernel")
     d = _triple(dilation, "dilation")
     p = _triple(padding, "padding")
-    in_sp = [o + 2 * (d[i] * (k[i] - 1) - p[i]) - d[i] * (k[i] - 1)
-             for i, o in enumerate(out_sp)]
+    in_sp = [
+        o + 2 * (d[i] * (k[i] - 1) - p[i]) - d[i] * (k[i] - 1)
+        for i, o in enumerate(out_sp)
+    ]
     m = n * math.prod(in_sp)
     return select_config(
-        m, cout, cin, k, dtype,
-        table=_TUNED_BWD, key=tune_key(dtype, cin, cout, k),
+        m,
+        cout,
+        cin,
+        k,
+        dtype,
+        table=_TUNED_BWD,
+        key=tune_key(dtype, cin, cout, k),
     )
 
 
@@ -239,8 +258,11 @@ def is_supported_bwd_data(
     # peer access enabled -- which is how ScaFFold runs its four GPUs -- that
     # reads another rank's memory instead of faulting.  A wrong gradient, not a
     # crash.
-    if (not grad_output.is_cuda or not weight.is_cuda
-            or weight.device != grad_output.device):
+    if (
+        not grad_output.is_cuda
+        or not weight.is_cuda
+        or weight.device != grad_output.device
+    ):
         return False
     try:
         s = _triple(stride, "stride")
@@ -307,8 +329,9 @@ def conv3d_backward_data(
     ``channels_last_3d`` parameter, pointless: pass the parameter as ``weight``
     and the kernel reads it in place.
     """
-    if not is_supported_bwd_data(grad_output, weight, input_shape, stride,
-                                 padding, dilation, groups):
+    if not is_supported_bwd_data(
+        grad_output, weight, input_shape, stride, padding, dilation, groups
+    ):
         raise NotImplementedError(
             f"unsupported: grad_output={tuple(grad_output.shape)}/"
             f"{grad_output.dtype} w={tuple(weight.shape)} "
@@ -322,7 +345,11 @@ def conv3d_backward_data(
     cout = int(grad_output.shape[1])
     if config is None:
         config = select_config(
-            n * math.prod(in_sp), cout, cin, k, grad_output.dtype,
+            n * math.prod(in_sp),
+            cout,
+            cin,
+            k,
+            grad_output.dtype,
             table=_TUNED_BWD,
             key=tune_key(grad_output.dtype, cin, cout, k),
         )
@@ -354,6 +381,14 @@ def conv3d_backward_data(
         _check_weight_rsck(weight_rsck, (*k, cin, cout), grad_output)
         w_view = weight_rsck.permute(3, 4, 0, 1, 2)
     return conv3d_forward(
-        grad_output, w_view, None, 1, pad, dilation, 1,
-        config=config, weight_flip=True, out=out,
+        grad_output,
+        w_view,
+        None,
+        1,
+        pad,
+        dilation,
+        1,
+        config=config,
+        weight_flip=True,
+        out=out,
     )

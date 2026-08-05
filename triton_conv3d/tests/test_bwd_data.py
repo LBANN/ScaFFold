@@ -88,10 +88,17 @@ def _corpus_channel_pairs() -> list[ConvProblem]:
         if shard != p.padding and shard != (0, 0, 0):
             forms.insert(1, (shard, "-shard"))
         for pad, tag in forms:
-            out.append(ConvProblem(
-                f"{p.cin}to{p.cout}{tag}", p.cin, p.cout, (6, 7, 8), p.kernel,
-                padding=pad, sites=("corpus-pair",),
-            ))
+            out.append(
+                ConvProblem(
+                    f"{p.cin}to{p.cout}{tag}",
+                    p.cin,
+                    p.cout,
+                    (6, 7, 8),
+                    p.kernel,
+                    padding=pad,
+                    sites=("corpus-pair",),
+                )
+            )
     return out
 
 
@@ -102,7 +109,8 @@ CORPUS_PAIRS = _corpus_channel_pairs()
 #: fp64.  Used only for the fp32 test below: their bf16 references are never
 #: exactly representable, which is the whole point of the note above.
 CORPUS_SMALL = [
-    p for p in scaffold_corpus()
+    p
+    for p in scaffold_corpus()
     if not p.transposed
     and math.prod(p.halo_variant.spatial) * max(p.cin, p.cout) <= 1 << 22
 ]
@@ -115,8 +123,12 @@ def _ids(problems):
 
 def _run(problem: ConvProblem, ops: dict, **kwargs) -> torch.Tensor:
     return conv3d_backward_data(
-        ops["grad_output"], ops["weight"], problem.input_shape,
-        problem.stride, problem.padding, **kwargs,
+        ops["grad_output"],
+        ops["weight"],
+        problem.input_shape,
+        problem.stride,
+        problem.padding,
+        **kwargs,
     )
 
 
@@ -134,10 +146,10 @@ def test_the_padding_identity_is_the_one_the_derivation_claims():
     ``k=3, p=1``, the right shape and the wrong answer, which does not.
     """
     assert bwd_data_padding(1, 1, 3) == (1, 1, 1)
-    assert bwd_data_padding(0, 1, 3) == (2, 2, 2)      # the halo'd form
-    assert bwd_data_padding(0, 1, 1) == (0, 0, 0)      # k=1: no gather at all
+    assert bwd_data_padding(0, 1, 3) == (2, 2, 2)  # the halo'd form
+    assert bwd_data_padding(0, 1, 1) == (0, 0, 0)  # k=1: no gather at all
     assert bwd_data_padding((0, 1, 1), 1, (1, 3, 3)) == (0, 1, 1)
-    assert bwd_data_padding(1, 2, 3) == (3, 3, 3)      # dilation widens the reach
+    assert bwd_data_padding(1, 2, 3) == (3, 3, 3)  # dilation widens the reach
 
     # And the extent identity: OD + 2p' - dil*(k-1) == ID, for every combination.
     for k in (1, 2, 3, 5):
@@ -172,8 +184,7 @@ def test_flipping_every_tap_axis_is_complementing_the_fused_index():
         for d in range(kd):
             for i in range(kh):
                 for j in range(kw):
-                    flipped = (((kd - 1 - d) * kh + (kh - 1 - i)) * kw
-                               + (kw - 1 - j))
+                    flipped = ((kd - 1 - d) * kh + (kh - 1 - i)) * kw + (kw - 1 - j)
                     fused = (d * kh + i) * kw + j
                     assert flipped == taps - 1 - fused, (kd, kh, kw, d, i, j)
 
@@ -183,8 +194,7 @@ def test_flipping_every_tap_axis_is_complementing_the_fused_index():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("problem", EDGE + CORPUS_PAIRS,
-                         ids=_ids(EDGE + CORPUS_PAIRS))
+@pytest.mark.parametrize("problem", EDGE + CORPUS_PAIRS, ids=_ids(EDGE + CORPUS_PAIRS))
 def test_selected_config_is_legal_for_every_shape(problem: ConvProblem):
     """The config picked for backward-data must still reach the matrix core.
 
@@ -194,9 +204,17 @@ def test_selected_config_is_legal_for_every_shape(problem: ConvProblem):
     than ``BLOCK_N``, and ``BLOCK_K`` is the one with the hard MFMA constraint.
     """
     dtype = reference.torch_dtype(problem)
-    cfg = bwd_data_config(problem.output_shape, problem.cin, problem.kernel, dtype,
-                          padding=problem.padding, dilation=(1, 1, 1))
-    assert cfg.validate(dtype) is None, f"{problem.label}: {cfg} -> {cfg.validate(dtype)}"
+    cfg = bwd_data_config(
+        problem.output_shape,
+        problem.cin,
+        problem.kernel,
+        dtype,
+        padding=problem.padding,
+        dilation=(1, 1, 1),
+    )
+    assert cfg.validate(dtype) is None, (
+        f"{problem.label}: {cfg} -> {cfg.validate(dtype)}"
+    )
 
 
 @pytest.mark.parametrize("problem", CORPUS_PAIRS, ids=_ids(CORPUS_PAIRS))
@@ -236,15 +254,17 @@ def test_is_supported_declines_what_the_algebra_cannot_express():
     assert is_supported_bwd_data(gy, w, shape, padding=1)
 
     assert not is_supported_bwd_data(gy, w, shape, stride=2, padding=1)
-    assert not is_supported_bwd_data(gy, w, shape, padding=3)   # p > dil*(k-1)
+    assert not is_supported_bwd_data(gy, w, shape, padding=3)  # p > dil*(k-1)
     assert not is_supported_bwd_data(gy, w, shape, padding=1, groups=2)
     assert not is_supported_bwd_data(gy, w.float(), shape, padding=1)
     # Cin of the weight must match the gradient being asked for ...
     assert not is_supported_bwd_data(gy, w, (1, 4, 4, 4, 4), padding=1)
     # ... Cout of the weight must match grad_output ...
     assert not is_supported_bwd_data(
-        gy, torch.empty((4, 8, 3, 3, 3), device="cuda", dtype=torch.bfloat16),
-        shape, padding=1,
+        gy,
+        torch.empty((4, 8, 3, 3, 3), device="cuda", dtype=torch.bfloat16),
+        shape,
+        padding=1,
     )
     # ... and grad_output's spatial extent must be the one this problem produces.
     assert not is_supported_bwd_data(gy, w, (1, 8, 6, 4, 4), padding=1)
@@ -463,9 +483,9 @@ def test_every_config_gives_the_same_answer(problem: ConvProblem):
     m = problem.n * math.prod(problem.spatial)
     # Effective widths: the reduction is over Cout and the GEMM's N is Cin.
     cfgs = candidate_configs(m, problem.cout, problem.cin, dtype, group_ms=(6, 8))
-    cfgs = list(dict.fromkeys(
-        cfgs + [default_config(m, problem.cout, problem.cin, dtype)]
-    ))
+    cfgs = list(
+        dict.fromkeys(cfgs + [default_config(m, problem.cout, problem.cin, dtype)])
+    )
     ran = 0
     for cfg in cfgs:
         try:
@@ -485,8 +505,7 @@ def test_every_config_gives_the_same_answer(problem: ConvProblem):
 
 
 @requires_gpu
-@pytest.mark.parametrize("problem", EDGE + CORPUS_PAIRS,
-                         ids=_ids(EDGE + CORPUS_PAIRS))
+@pytest.mark.parametrize("problem", EDGE + CORPUS_PAIRS, ids=_ids(EDGE + CORPUS_PAIRS))
 def test_no_worse_than_miopen(problem: ConvProblem):
     """The honest bar at realistic magnitudes, against MIOpen on the same data.
 
@@ -501,8 +520,9 @@ def test_no_worse_than_miopen(problem: ConvProblem):
         reference.incumbent(problem, ops, "bwd-data"), expected
     )
     actual = _run(problem, ops)
-    reference.assert_close(actual, expected, problem, "bwd-data",
-                           incumbent_error=incumbent_err)
+    reference.assert_close(
+        actual, expected, problem, "bwd-data", incumbent_error=incumbent_err
+    )
 
 
 @requires_gpu
@@ -555,9 +575,12 @@ def test_out_buffer_is_written_in_place_and_is_validated():
     bf16 = torch.bfloat16
     with pytest.raises(ValueError):
         _run(problem, ops, out=torch.empty((1, 16, 2, 2, 2), device="cuda", dtype=bf16))
-    with pytest.raises(ValueError):   # right shape, NCDHW
-        _run(problem, ops,
-             out=torch.empty(problem.input_shape, device="cuda", dtype=bf16))
+    with pytest.raises(ValueError):  # right shape, NCDHW
+        _run(
+            problem,
+            ops,
+            out=torch.empty(problem.input_shape, device="cuda", dtype=bf16),
+        )
     with pytest.raises(ValueError):
         _run(problem, ops, out=torch.empty_like(expected, dtype=torch.float32))
 
@@ -611,12 +634,11 @@ def test_every_weight_layout_gives_the_same_gradient():
     layouts = {
         "channels_last": w.contiguous(memory_format=torch.channels_last_3d),
         "contiguous": w.contiguous(),
-        "rsck_strided": (w.permute(2, 3, 4, 1, 0).contiguous()
-                         .permute(4, 3, 0, 1, 2)),
+        "rsck_strided": (w.permute(2, 3, 4, 1, 0).contiguous().permute(4, 3, 0, 1, 2)),
     }
     ref = _run(problem, ops)
     for name, wl in layouts.items():
-        assert torch.equal(wl, w), name          # same values, different strides
+        assert torch.equal(wl, w), name  # same values, different strides
         got = _run(problem, {**ops, "weight": wl})
         assert torch.equal(ref, got), name
     # And the hoisted buffer, which is a fourth spelling of the same values.
@@ -629,8 +651,11 @@ def test_output_is_channels_last_and_matches_torch_grad_shape():
     ops = reference.make_inputs(problem, seed=61)
     gx = _run(problem, ops)
     ref = torch.nn.grad.conv3d_input(
-        problem.input_shape, ops["weight"], ops["grad_output"],
-        stride=problem.stride, padding=problem.padding,
+        problem.input_shape,
+        ops["weight"],
+        ops["grad_output"],
+        stride=problem.stride,
+        padding=problem.padding,
     )
     assert gx.shape == ref.shape
     assert gx.is_contiguous(memory_format=torch.channels_last_3d)

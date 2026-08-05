@@ -62,7 +62,8 @@ EDGE = [p for p in edge_cases() if not p.transposed]
 #: regime the exactness question is hardest in.  See
 #: :func:`test_corpus_shapes_match_bitwise`.
 CORPUS_SMALL = [
-    p for p in scaffold_corpus()
+    p
+    for p in scaffold_corpus()
     if not p.transposed and math.prod(p.spatial) * max(p.cin, p.cout) <= 1 << 22
 ]
 
@@ -73,8 +74,12 @@ def _ids(problems):
 
 def _run(problem: ConvProblem, ops: dict, **kwargs) -> torch.Tensor:
     return conv3d_forward(
-        ops["input"], ops["weight"], ops["bias"],
-        problem.stride, problem.padding, **kwargs,
+        ops["input"],
+        ops["weight"],
+        ops["bias"],
+        problem.stride,
+        problem.padding,
+        **kwargs,
     )
 
 
@@ -137,7 +142,7 @@ def test_the_index_width_decision_covers_every_operand_including_the_weight():
     from triton_conv3d.gather_gemm import _index_dtype
 
     small = torch.empty((1 << 20,), device="meta")
-    huge = torch.empty((1 << 31,), device="meta")   # numel > 2**31 - 1 by one
+    huge = torch.empty((1 << 31,), device="meta")  # numel > 2**31 - 1 by one
     assert _index_dtype(small, small, small) == tl.int32
     assert _index_dtype(huge, small, small) == tl.int64
     assert _index_dtype(small, huge, small) == tl.int64
@@ -153,17 +158,26 @@ def test_block_k_constraint_follows_the_intrinsic_not_the_tile():
     briefing's claim that ``BLOCK_K=16`` rows get pruned at nonkdim 16 is simply
     wrong arithmetic (16 % 16 == 0).
     """
-    ok32 = ConvConfig(BLOCK_M=32, BLOCK_N=32, BLOCK_K=8, matrix_instr_nonkdim=32,
-                      num_warps=4, kpack=1)
+    ok32 = ConvConfig(
+        BLOCK_M=32, BLOCK_N=32, BLOCK_K=8, matrix_instr_nonkdim=32, num_warps=4, kpack=1
+    )
     assert ok32.validate(torch.bfloat16) is None
-    assert ConvConfig(BLOCK_M=32, BLOCK_N=32, BLOCK_K=8,
-                      matrix_instr_nonkdim=16, num_warps=4).validate(torch.bfloat16)
-    assert ConvConfig(BLOCK_K=16, matrix_instr_nonkdim=16,
-                      kpack=1).validate(torch.bfloat16) is None
+    assert ConvConfig(
+        BLOCK_M=32, BLOCK_N=32, BLOCK_K=8, matrix_instr_nonkdim=16, num_warps=4
+    ).validate(torch.bfloat16)
+    assert (
+        ConvConfig(BLOCK_K=16, matrix_instr_nonkdim=16, kpack=1).validate(
+            torch.bfloat16
+        )
+        is None
+    )
 
 
-@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16, torch.float32],
-                         ids=["bf16", "fp16", "fp32"])
+@pytest.mark.parametrize(
+    "dtype",
+    [torch.bfloat16, torch.float16, torch.float32],
+    ids=["bf16", "fp16", "fp32"],
+)
 def test_default_config_fits_in_lds_in_every_dtype(dtype):
     """The block sizes were chosen against bf16; fp32 operands are twice the bytes.
 
@@ -185,14 +199,11 @@ def test_default_config_fits_in_lds_in_every_dtype(dtype):
                 cfg = default_config(m, cin, cout, dtype)
                 assert cfg.validate(dtype) is None, f"{cin}->{cout} m={m}: {cfg}"
                 assert cfg.lds_bytes(dtype) <= _LDS_BYTES, (
-                    f"{cin}->{cout} m={m}: {cfg} needs "
-                    f"{cfg.lds_bytes(dtype)} B of LDS"
+                    f"{cin}->{cout} m={m}: {cfg} needs {cfg.lds_bytes(dtype)} B of LDS"
                 )
 
 
-@pytest.mark.parametrize(
-    "problem", EDGE + CORPUS_SMALL, ids=_ids(EDGE + CORPUS_SMALL)
-)
+@pytest.mark.parametrize("problem", EDGE + CORPUS_SMALL, ids=_ids(EDGE + CORPUS_SMALL))
 def test_default_config_is_legal_for_every_shape(problem: ConvProblem):
     """The heuristic must never hand back a config that loses the matrix core.
 
@@ -203,7 +214,9 @@ def test_default_config_is_legal_for_every_shape(problem: ConvProblem):
     dtype = reference.torch_dtype(problem)
     m = problem.n * math.prod(problem.out_spatial)
     cfg = default_config(m, problem.cin, problem.cout, dtype)
-    assert cfg.validate(dtype) is None, f"{problem.label}: {cfg} -> {cfg.validate(dtype)}"
+    assert cfg.validate(dtype) is None, (
+        f"{problem.label}: {cfg} -> {cfg.validate(dtype)}"
+    )
 
 
 @pytest.mark.parametrize("problem", CORPUS_SMALL[:6], ids=_ids(CORPUS_SMALL[:6]))
@@ -246,8 +259,9 @@ def test_is_supported_declines_what_the_kernel_cannot_do():
     assert is_supported(x, w, padding=1)
     assert not is_supported(x, w, padding=1, groups=2)
     assert not is_supported(x, w.float(), padding=1)
-    assert not is_supported(x, torch.empty((8, 4, 3, 3, 3), device="cuda",
-                                           dtype=torch.bfloat16), padding=1)
+    assert not is_supported(
+        x, torch.empty((8, 4, 3, 3, 3), device="cuda", dtype=torch.bfloat16), padding=1
+    )
     # A kernel wider than the padded input has no output voxels at all, which
     # the M-unravel cannot express.
     tiny = torch.empty((1, 8, 1, 4, 4), device="cuda", dtype=torch.bfloat16)
@@ -291,9 +305,10 @@ def test_is_supported_declines_a_bias_torch_itself_rejects():
     bias = torch.empty(32, device="cuda", dtype=bf16)
     assert is_supported(x, w, bias, padding=1)
 
-    assert not is_supported(x, w, bias[:4], padding=1)                # too short
-    assert not is_supported(x, w, torch.empty(64, device="cuda",
-                                              dtype=bf16)[::2], padding=1)
+    assert not is_supported(x, w, bias[:4], padding=1)  # too short
+    assert not is_supported(
+        x, w, torch.empty(64, device="cuda", dtype=bf16)[::2], padding=1
+    )
     assert not is_supported(x, w, bias.float(), padding=1)
     assert not is_supported(x, w, bias.cpu(), padding=1)
     assert not is_supported(x, w, bias.view(1, 32), padding=1)
@@ -372,13 +387,13 @@ def test_is_supported_all_is_exactly_the_three_gates_conjoined():
     bf16 = torch.bfloat16
     cases = [
         # (x shape, w shape, kwargs)
-        ((1, 8, 8, 8, 8), (16, 8, 3, 3, 3), dict(padding=1)),          # all yes
+        ((1, 8, 8, 8, 8), (16, 8, 3, 3, 3), dict(padding=1)),  # all yes
         ((1, 8, 8, 8, 8), (16, 8, 3, 3, 3), dict(stride=2, padding=1)),  # bwd-data no
         ((1, 8, 8, 8, 8), (16, 8, 3, 3, 3), dict(padding=1, groups=2)),  # fwd no
-        ((1, 8, 8, 8, 8), (16, 8, 3, 3, 3), dict(padding=0)),          # all yes
-        ((1, 8, 8, 8, 8), (16, 8, 1, 1, 1), dict(padding=0)),          # k=1
+        ((1, 8, 8, 8, 8), (16, 8, 3, 3, 3), dict(padding=0)),  # all yes
+        ((1, 8, 8, 8, 8), (16, 8, 1, 1, 1), dict(padding=0)),  # k=1
         ((1, 8, 8, 8, 8), (16, 8, 3, 3, 3), dict(padding=2)),  # p > dil*(k-1)
-        ((1, 8, 1, 8, 8), (16, 8, 3, 3, 3), dict(padding=1)),          # thin D
+        ((1, 8, 1, 8, 8), (16, 8, 3, 3, 3), dict(padding=1)),  # thin D
         ((1, 8, 8, 8, 8), (16, 8, 3, 3, 3), dict(dilation=2, padding=2)),
     ]
     for x_shape, w_shape, kwargs in cases:
@@ -436,20 +451,25 @@ def test_is_supported_declines_degenerate_extents():
 
     # A zero-length spatial axis: returned a volume of pure padding, where torch
     # raises "Only zero batch or zero channel inputs are supported".
-    assert not is_supported(torch.empty((1, 8, 0, 5, 6), device="cuda",
-                                        dtype=bf16), w, padding=2)
+    assert not is_supported(
+        torch.empty((1, 8, 0, 5, 6), device="cuda", dtype=bf16), w, padding=2
+    )
     # A zero-size kernel: ``(in + 2p - d(k-1) - 1)//s + 1`` gains one at k=0, so
     # the returned output was *larger* than the input.
-    assert not is_supported(x, torch.empty((16, 8, 0, 0, 0), device="cuda",
-                                           dtype=bf16), padding=0)
+    assert not is_supported(
+        x, torch.empty((16, 8, 0, 0, 0), device="cuda", dtype=bf16), padding=0
+    )
     # Cin = 0: returned Cout channels of zeros where torch returns a tensor with
     # no channels at all -- a different shape, not a different value.
-    assert not is_supported(torch.empty((1, 0, 4, 5, 6), device="cuda", dtype=bf16),
-                            torch.empty((16, 0, 3, 3, 3), device="cuda", dtype=bf16),
-                            padding=1)
+    assert not is_supported(
+        torch.empty((1, 0, 4, 5, 6), device="cuda", dtype=bf16),
+        torch.empty((16, 0, 3, 3, 3), device="cuda", dtype=bf16),
+        padding=1,
+    )
 
-    empty_batch = torch.empty((0, 8, 4, 5, 6), device="cuda",
-                              dtype=bf16).contiguous(memory_format=torch.channels_last_3d)
+    empty_batch = torch.empty((0, 8, 4, 5, 6), device="cuda", dtype=bf16).contiguous(
+        memory_format=torch.channels_last_3d
+    )
     assert is_supported(empty_batch, w, padding=1)
     assert tuple(conv3d_forward(empty_batch, w, padding=1).shape) == (0, 16, 4, 5, 6)
 
@@ -515,9 +535,9 @@ def test_bitwise_standard_rejects_a_shifted_gather():
 
     # Same problem, but the reference gathers from one voxel further along W.
     shifted = torch.roll(ops["input"], shifts=1, dims=-1)
-    wrong = reference.reference(
-        problem, {**ops, "input": shifted}, "fwd"
-    ).to(torch.bfloat16)
+    wrong = reference.reference(problem, {**ops, "input": shifted}, "fwd").to(
+        torch.bfloat16
+    )
     assert not reference.compare(actual, wrong).bitwise, (
         "a one-voxel shift of the input produced a bitwise-identical result; "
         "the comparison is not discriminating"
@@ -654,10 +674,10 @@ def test_every_config_gives_the_same_answer(problem: ConvProblem):
     m = problem.n * math.prod(problem.out_spatial)
     # Plus the shipped default, which for a shape too small for any seed tile
     # (``Cout=6``) is the only candidate there is.
-    cfgs = candidate_configs(m, problem.cin, problem.cout, dtype,
-                             group_ms=(6, 8))
-    cfgs = list(dict.fromkeys(cfgs + [default_config(m, problem.cin,
-                                                     problem.cout, dtype)]))
+    cfgs = candidate_configs(m, problem.cin, problem.cout, dtype, group_ms=(6, 8))
+    cfgs = list(
+        dict.fromkeys(cfgs + [default_config(m, problem.cin, problem.cout, dtype)])
+    )
     ran = 0
     for cfg in cfgs:
         try:
@@ -679,8 +699,7 @@ def test_every_config_gives_the_same_answer(problem: ConvProblem):
 
 
 @requires_gpu
-@pytest.mark.parametrize("problem", EDGE + CORPUS_SMALL,
-                         ids=_ids(EDGE + CORPUS_SMALL))
+@pytest.mark.parametrize("problem", EDGE + CORPUS_SMALL, ids=_ids(EDGE + CORPUS_SMALL))
 def test_no_worse_than_miopen(problem: ConvProblem):
     """The honest bar for a replacement: not better than MIOpen, but not worse.
 
@@ -696,8 +715,9 @@ def test_no_worse_than_miopen(problem: ConvProblem):
         reference.incumbent(problem, ops, "fwd"), expected
     )
     actual = _run(problem, ops)
-    reference.assert_close(actual, expected, problem, "fwd",
-                           incumbent_error=incumbent_err)
+    reference.assert_close(
+        actual, expected, problem, "fwd", incumbent_error=incumbent_err
+    )
 
 
 @requires_gpu
@@ -728,13 +748,15 @@ def test_fp32_accumulates_in_fp32():
 
 @requires_gpu
 def test_bias_is_added_once_and_broadcast_over_channels():
-    problem = ConvProblem("bias", 32, 24, (5, 6, 7), (1, 1, 1),
-                          padding=(0, 0, 0), bias=True)
+    problem = ConvProblem(
+        "bias", 32, 24, (5, 6, 7), (1, 1, 1), padding=(0, 0, 0), bias=True
+    )
     ops = reference.make_inputs(problem, seed=31, exact=True)
     with_bias = _run(problem, ops)
-    without = conv3d_forward(ops["input"], ops["weight"], None,
-                             problem.stride, problem.padding)
-    delta = (with_bias.float() - without.float())
+    without = conv3d_forward(
+        ops["input"], ops["weight"], None, problem.stride, problem.padding
+    )
+    delta = with_bias.float() - without.float()
     # The difference must be exactly the bias, in every voxel.
     expected = ops["bias"].float().view(1, -1, 1, 1, 1).expand_as(delta)
     assert torch.equal(delta, expected)
@@ -792,7 +814,7 @@ def test_out_buffer_is_written_in_place_and_is_validated():
     with pytest.raises(ValueError):
         _run(problem, ops, out=torch.empty_like(expected, dtype=torch.float32))
     with pytest.raises(ValueError):
-        _run(problem, ops, out=torch.empty(shape, dtype=bf16))          # on the CPU
+        _run(problem, ops, out=torch.empty(shape, dtype=bf16))  # on the CPU
 
 
 @requires_gpu
@@ -806,11 +828,12 @@ def test_the_output_is_allocated_directly_in_channels_last():
     invisible in the result, so what pins it is the peak allocation: the wrong
     form needs two output-sized buffers live at once, the right form needs one.
     """
-    x = torch.randn((1, 64, 64, 64, 64), device="cuda", dtype=torch.bfloat16
-                    ).contiguous(memory_format=torch.channels_last_3d)
+    x = torch.randn(
+        (1, 64, 64, 64, 64), device="cuda", dtype=torch.bfloat16
+    ).contiguous(memory_format=torch.channels_last_3d)
     w = torch.randn((64, 64, 3, 3, 3), device="cuda", dtype=torch.bfloat16)
     wr = to_rsck(w)
-    conv3d_forward(x, w, padding=1, weight_rsck=wr)   # warm the JIT out of the way
+    conv3d_forward(x, w, padding=1, weight_rsck=wr)  # warm the JIT out of the way
 
     torch.cuda.synchronize()
     torch.cuda.reset_peak_memory_stats()
@@ -844,8 +867,9 @@ def test_the_layout_conversion_is_a_no_op_only_where_stride_c_is_moot():
     ambiguous = 0
     for shape in itertools.product((1, 2, 3), repeat=5):
         t = torch.empty(shape)
-        if not (t.is_contiguous()
-                and t.is_contiguous(memory_format=torch.channels_last_3d)):
+        if not (
+            t.is_contiguous() and t.is_contiguous(memory_format=torch.channels_last_3d)
+        ):
             continue
         ambiguous += 1
         assert t.stride(1) == 1 or shape[1] == 1, shape
@@ -860,10 +884,12 @@ def test_an_ambiguous_layout_still_gives_the_right_answer():
     the result still has to be the reference's -- which it is only because the
     one stride that differs is the one a single-channel input never uses.
     """
-    x = torch.randint(-1, 2, (1, 1, 4, 5, 6), device="cuda", dtype=torch.int8
-                      ).to(torch.bfloat16)
-    w = torch.randint(-1, 2, (8, 1, 3, 3, 3), device="cuda", dtype=torch.int8
-                      ).to(torch.bfloat16)
+    x = torch.randint(-1, 2, (1, 1, 4, 5, 6), device="cuda", dtype=torch.int8).to(
+        torch.bfloat16
+    )
+    w = torch.randint(-1, 2, (8, 1, 3, 3, 3), device="cuda", dtype=torch.int8).to(
+        torch.bfloat16
+    )
     assert x.is_contiguous()
     assert x.contiguous(memory_format=torch.channels_last_3d).data_ptr() == x.data_ptr()
     assert torch.equal(conv3d_forward(x, w, padding=1), F.conv3d(x, w, padding=1))
@@ -886,13 +912,14 @@ def test_hoisted_weight_transform_is_validated():
 
     other = torch.randn((24, 16, 1, 1, 1), device="cuda", dtype=torch.bfloat16)
     with pytest.raises(ValueError):
-        _run(problem, ops, weight_rsck=to_rsck(other))        # a different kernel
+        _run(problem, ops, weight_rsck=to_rsck(other))  # a different kernel
     with pytest.raises(ValueError):
         _run(problem, ops, weight_rsck=good.float())
     # Right shape, wrong layout: the B tile load assumes Cout is contiguous.
     with pytest.raises(ValueError):
-        _run(problem, ops,
-             weight_rsck=good.transpose(3, 4).contiguous().transpose(3, 4))
+        _run(
+            problem, ops, weight_rsck=good.transpose(3, 4).contiguous().transpose(3, 4)
+        )
 
 
 @requires_gpu
@@ -919,19 +946,20 @@ def test_every_weight_layout_gives_the_same_answer():
     layouts = {
         "channels_last": w.contiguous(memory_format=torch.channels_last_3d),
         "contiguous": w.contiguous(),
-        "rsck_strided": (w.permute(2, 3, 4, 1, 0).contiguous()
-                         .permute(4, 3, 0, 1, 2)),
+        "rsck_strided": (w.permute(2, 3, 4, 1, 0).contiguous().permute(4, 3, 0, 1, 2)),
     }
     ref = _run(problem, ops)
     for name, wl in layouts.items():
-        assert torch.equal(wl, w), name          # same values, different strides
+        assert torch.equal(wl, w), name  # same values, different strides
         assert torch.equal(ref, _run(problem, {**ops, "weight": wl})), name
     assert torch.equal(ref, _run(problem, ops, weight_rsck=to_rsck(w)))
     # ``to_rsck`` of an already-RSCK-strided weight must not copy: that is what
     # makes the layout free for a caller who chooses it, and ``.contiguous()``
     # returning ``self`` is the whole mechanism.
-    assert to_rsck(layouts["rsck_strided"]).data_ptr() == \
-        layouts["rsck_strided"].data_ptr()
+    assert (
+        to_rsck(layouts["rsck_strided"]).data_ptr()
+        == layouts["rsck_strided"].data_ptr()
+    )
 
 
 @requires_gpu
@@ -953,8 +981,13 @@ def test_output_is_channels_last_and_matches_torch_shape():
     problem = ConvProblem("shape", 16, 40, (3, 11, 5))
     ops = reference.make_inputs(problem, seed=61)
     y = _run(problem, ops)
-    ref = F.conv3d(ops["input"], ops["weight"], ops["bias"],
-                   stride=problem.stride, padding=problem.padding)
+    ref = F.conv3d(
+        ops["input"],
+        ops["weight"],
+        ops["bias"],
+        stride=problem.stride,
+        padding=problem.padding,
+    )
     assert y.shape == ref.shape
     assert y.is_contiguous(memory_format=torch.channels_last_3d)
 
@@ -967,8 +1000,9 @@ def test_unsupported_calls_raise_rather_than_return_garbage():
         conv3d_forward(x, w, padding=1, groups=2)
     good_w = torch.randn((8, 8, 3, 3, 3), device="cuda", dtype=torch.bfloat16)
     with pytest.raises(ValueError):
-        conv3d_forward(x, good_w, padding=1,
-                       config=ConvConfig(BLOCK_K=8, matrix_instr_nonkdim=16))
+        conv3d_forward(
+            x, good_w, padding=1, config=ConvConfig(BLOCK_K=8, matrix_instr_nonkdim=16)
+        )
 
 
 @requires_gpu
@@ -1040,8 +1074,12 @@ def test_indices_beyond_int32_are_addressed_correctly_with_taps_and_padding():
     if free < 12 << 30:
         pytest.skip("needs ~12 GiB free")
     cin, cout, sp = 128, 16, (258, 258, 258)
-    x = torch.empty((1, cin, *sp), device="cuda", dtype=torch.bfloat16,
-                    memory_format=torch.channels_last_3d).zero_()
+    x = torch.empty(
+        (1, cin, *sp),
+        device="cuda",
+        dtype=torch.bfloat16,
+        memory_format=torch.channels_last_3d,
+    ).zero_()
     w = torch.zeros((cout, cin, 3, 3, 3), device="cuda", dtype=torch.bfloat16)
     # Tap (2,2,2) of channel 0 alone.  At padding 1 that is y[o] = x[o + 1].
     w[0, 0, 2, 2, 2] = 1.0
@@ -1084,14 +1122,15 @@ def test_a_weight_beyond_int32_is_addressed_correctly():
         pytest.skip("needs ~8 GiB free")
     bf16, cin, cout = torch.bfloat16, 16385, 65536
     wr = torch.zeros((2, 1, 1, cin, cout), device="cuda", dtype=bf16)
-    assert (2 * cin - 1) * cout > 2**31 - 1      # the largest row offset
+    assert (2 * cin - 1) * cout > 2**31 - 1  # the largest row offset
     w = torch.zeros((), device="cuda", dtype=bf16).expand(cout, cin, 2, 1, 1)
     x = torch.zeros((1, cin, 2, 1, 1), device="cuda", dtype=bf16).contiguous(
-        memory_format=torch.channels_last_3d)
+        memory_format=torch.channels_last_3d
+    )
 
-    wr[1, 0, 0, cin - 1, cout - 1] = 1.0      # the last element of the weight
+    wr[1, 0, 0, cin - 1, cout - 1] = 1.0  # the last element of the weight
     x[0, cin - 1, 1, 0, 0] = 3.0
-    wr[0, 0, 0, 0, 0] = 1.0                   # and the first
+    wr[0, 0, 0, 0, 0] = 1.0  # and the first
     x[0, 0, 0, 0, 0] = 5.0
 
     y = conv3d_forward(x, w, padding=0, weight_rsck=wr)
