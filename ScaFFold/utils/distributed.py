@@ -12,6 +12,7 @@
 #
 # SPDX-License-Identifier: (Apache-2.0)
 
+import logging
 import os
 import os.path
 import socket
@@ -20,6 +21,52 @@ from typing import Literal, Optional
 
 import torch
 import torch.distributed
+
+logger = logging.getLogger(__name__)
+
+
+def _env_int(name: str) -> Optional[int]:
+    """Return the launcher variable ``name`` as an int, or None if unusable.
+
+    Launcher variables are not always what they claim to be. A site wrapper
+    that exports ``WORLD_SIZE=`` (empty, e.g. from an unset shell variable) or
+    a placeholder like ``auto`` is common enough, and a bare ``int()`` turned
+    it into a ``ValueError`` raised from the first of these helpers anything
+    called -- killing every ``scaffold`` invocation, ``--help`` included, with
+    a traceback that named neither the variable nor a remedy.
+
+    An unusable value is treated as absent so the next source in the priority
+    order is consulted (ultimately the MPI communicator, or the documented
+    default). A non-empty value that is not an integer is warned about, because
+    unlike an empty one it looks deliberate and the fallback may not be what
+    its author intended. ``create_restart_script._sniff_launch_shape`` skips
+    empty values for the same reason.
+    """
+    value = os.environ.get(name)
+    if value is None:
+        return None
+    value = value.strip()
+    if not value:
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        logger.warning(
+            "Ignoring launcher variable %s=%r: not an integer. Falling back to "
+            "the next source for the job shape.",
+            name,
+            value,
+        )
+        return None
+
+
+def _first_env_int(names) -> Optional[int]:
+    """Return the first usable integer among ``names``, in priority order."""
+    for name in names:
+        value = _env_int(name)
+        if value is not None:
+            return value
+    return None
 
 
 def get_num_gpus() -> int:
@@ -40,39 +87,74 @@ def _mpi_comm_world():
         return None
 
 
+_LOCAL_RANK_VARS = (
+    "LOCAL_RANK",
+    "MV2_COMM_WORLD_LOCAL_RANK",
+    "OMPI_COMM_WORLD_LOCAL_RANK",
+    "PMI_LOCAL_RANK",
+    "PALS_LOCAL_RANKID",
+    "SLURM_LOCALID",
+    "FLUX_TASK_LOCAL_ID",
+)
+
+_LOCAL_SIZE_VARS = (
+    "LOCAL_WORLD_SIZE",
+    "MV2_COMM_WORLD_LOCAL_SIZE",
+    "OMPI_COMM_WORLD_LOCAL_SIZE",
+    "PMI_LOCAL_SIZE",
+    "PALS_LOCAL_SIZE",
+)
+
+_WORLD_RANK_VARS = (
+    "RANK",
+    "MV2_COMM_WORLD_RANK",
+    "OMPI_COMM_WORLD_RANK",
+    "PMI_RANK",
+    "PALS_RANKID",
+    "SLURM_PROCID",
+    "FLUX_TASK_RANK",
+)
+
+_WORLD_SIZE_VARS = (
+    "WORLD_SIZE",
+    "MV2_COMM_WORLD_SIZE",
+    "OMPI_COMM_WORLD_SIZE",
+    "PMI_SIZE",
+    "PALS_NRANKS",
+    "SLURM_NTASKS",
+    "FLUX_JOB_SIZE",
+)
+
+
 def get_local_rank(required: bool = False) -> int:
     """Return the local MPI rank."""
-    if "LOCAL_RANK" in os.environ:
-        return int(os.environ["LOCAL_RANK"])
-    if "MV2_COMM_WORLD_LOCAL_RANK" in os.environ:
-        return int(os.environ["MV2_COMM_WORLD_LOCAL_RANK"])
-    if "OMPI_COMM_WORLD_LOCAL_RANK" in os.environ:
-        return int(os.environ["OMPI_COMM_WORLD_LOCAL_RANK"])
-    if "PMI_LOCAL_RANK" in os.environ:
-        return int(os.environ["PMI_LOCAL_RANK"])
-    if "PALS_LOCAL_RANKID" in os.environ:
-        return int(os.environ["PALS_LOCAL_RANKID"])
-    if "SLURM_LOCALID" in os.environ:
-        return int(os.environ["SLURM_LOCALID"])
-    if "FLUX_TASK_LOCAL_ID" in os.environ:
-        return int(os.environ["FLUX_TASK_LOCAL_ID"])
+    value = _first_env_int(_LOCAL_RANK_VARS)
+    if value is not None:
+        return value
     if required:
         raise RuntimeError("Could not get local rank")
     return 0
 
 
 def get_local_size(required: bool = False) -> int:
-    """Return the number of local MPI ranks."""
-    if "MV2_COMM_WORLD_LOCAL_SIZE" in os.environ:
-        return int(os.environ["MV2_COMM_WORLD_LOCAL_SIZE"])
-    if "OMPI_COMM_WORLD_LOCAL_SIZE" in os.environ:
-        return int(os.environ["OMPI_COMM_WORLD_LOCAL_SIZE"])
-    if "SLURM_NNODES" in os.environ and "SLURM_NTASKS" in os.environ:
-        return int(os.environ["SLURM_NTASKS"]) // int(os.environ["SLURM_NNODES"])
-    # Flux does not have an env variable for this, so we assume an
-    # even distribution.
-    if "FLUX_JOB_SIZE" in os.environ and "FLUX_JOB_NNODES" in os.environ:
-        return int(os.environ["FLUX_JOB_SIZE"]) // int(os.environ["FLUX_JOB_NNODES"])
+    """Return the number of local MPI ranks.
+
+    Recognizes the same launchers as ``get_local_rank``: a variable honored
+    there but not here silently yields 1, which makes per-node logic (e.g. the
+    profiler's one-rank-per-node gate) treat every rank as node-local.
+    """
+    value = _first_env_int(_LOCAL_SIZE_VARS)
+    if value is not None:
+        return value
+    # Slurm and Flux report only totals; assume an even distribution. A zero
+    # node count is as unusable as a non-numeric one, so it falls through
+    # rather than raising ZeroDivisionError.
+    ntasks, nnodes = _env_int("SLURM_NTASKS"), _env_int("SLURM_NNODES")
+    if ntasks is not None and nnodes:
+        return ntasks // nnodes
+    job_size, job_nodes = _env_int("FLUX_JOB_SIZE"), _env_int("FLUX_JOB_NNODES")
+    if job_size is not None and job_nodes:
+        return job_size // job_nodes
     if required:
         raise RuntimeError("Could not get local size")
     return 1
@@ -80,20 +162,9 @@ def get_local_size(required: bool = False) -> int:
 
 def get_world_rank(required: bool = False) -> int:
     """Return the global MPI rank."""
-    if "RANK" in os.environ:
-        return int(os.environ["RANK"])
-    if "MV2_COMM_WORLD_RANK" in os.environ:
-        return int(os.environ["MV2_COMM_WORLD_RANK"])
-    if "OMPI_COMM_WORLD_RANK" in os.environ:
-        return int(os.environ["OMPI_COMM_WORLD_RANK"])
-    if "PMI_RANK" in os.environ:
-        return int(os.environ["PMI_RANK"])
-    if "PALS_RANKID" in os.environ:
-        return int(os.environ["PALS_RANKID"])
-    if "SLURM_PROCID" in os.environ:
-        return int(os.environ["SLURM_PROCID"])
-    if "FLUX_TASK_RANK" in os.environ:
-        return int(os.environ["FLUX_TASK_RANK"])
+    value = _first_env_int(_WORLD_RANK_VARS)
+    if value is not None:
+        return value
     comm = _mpi_comm_world()
     if comm is not None:
         return comm.Get_rank()
@@ -104,20 +175,9 @@ def get_world_rank(required: bool = False) -> int:
 
 def get_world_size(required: bool = False) -> int:
     """Return the number of MPI ranks."""
-    if "WORLD_SIZE" in os.environ:
-        return int(os.environ["WORLD_SIZE"])
-    if "MV2_COMM_WORLD_SIZE" in os.environ:
-        return int(os.environ["MV2_COMM_WORLD_SIZE"])
-    if "OMPI_COMM_WORLD_SIZE" in os.environ:
-        return int(os.environ["OMPI_COMM_WORLD_SIZE"])
-    if "PMI_SIZE" in os.environ:
-        return int(os.environ["PMI_SIZE"])
-    if "PALS_NRANKS" in os.environ:
-        return int(os.environ["PALS_NRANKS"])
-    if "SLURM_NTASKS" in os.environ:
-        return int(os.environ["SLURM_NTASKS"])
-    if "FLUX_JOB_SIZE" in os.environ:
-        return int(os.environ["FLUX_JOB_SIZE"])
+    value = _first_env_int(_WORLD_SIZE_VARS)
+    if value is not None:
+        return value
     comm = _mpi_comm_world()
     if comm is not None:
         return comm.Get_size()

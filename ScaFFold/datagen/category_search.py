@@ -26,6 +26,7 @@ import time
 import numpy as np
 from mpi4py import MPI
 
+from ScaFFold.datagen import layout
 from ScaFFold.datagen.generate_fractal_points import generate_fractal_points
 from ScaFFold.datagen.rng import SEED_MASK, derive_seed, seed_numba
 from ScaFFold.utils.config_utils import Config
@@ -334,10 +335,39 @@ def save_valid_category(
     target = os.path.join(fracts_write_dir, "%06d.csv" % idx)
     if os.path.exists(target):
         raise FileExistsError(f"Refusing to overwrite existing category file: {target}")
-    np.savetxt(target, params, delimiter=",")
+    _savetxt_atomic(target, params)
     existing_indices.append(idx)
     existing_params.append(params)
     return idx
+
+
+def _savetxt_atomic(target: str, params: np.array) -> None:
+    """Write one category's parameters to ``target`` atomically.
+
+    A category CSV truncated by a killed job is poison: the six-digit name is
+    all the resume scan looks at, so the category counts as done forever, while
+    every consumer (instance generation, and the search's own resume) dies
+    parsing it. The file is therefore written to a temp name in the same
+    directory -- one that neither the resume glob (``NNNNNN.csv``) nor the
+    instance loader's ``*.csv`` filter can match -- flushed, fsynced, and only
+    then ``os.replace``d onto the final name.
+    """
+    directory, name = os.path.split(target)
+    tmp_path = os.path.join(directory, f".{name}.tmp{os.getpid()}")
+    try:
+        with open(tmp_path, "w") as handle:
+            np.savetxt(handle, params, delimiter=",")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, target)
+    except BaseException:
+        # A failed write must leave nothing behind: no temp file, and no
+        # partial file under the name resume would accept.
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 def _attempt_state_path(fracts_write_dir: str, rank: int) -> str:
@@ -373,6 +403,35 @@ def write_attempt_counter(fracts_write_dir: str, rank: int, attempt_index: int) 
     os.replace(tmp, path)
 
 
+def _sweep_stale_temp_files(fracts_write_dir: str, log) -> None:
+    """Remove temp files stranded by killed writes in the category directory.
+
+    Both atomic writers here (``_savetxt_atomic`` and ``write_attempt_counter``)
+    unlink their temp file when the write raises, but a SIGKILL -- walltime, an
+    OOM, a node failure -- skips that Python-level cleanup and strands it. The
+    names carry the writer's pid, so they accumulate one per killed process and
+    nothing else ever removes them; ``instance.py`` sweeps its equivalents for
+    exactly this reason.
+
+    Called on rank 0 before any rank has written anything this run, and
+    best-effort: this is housekeeping, and it runs just before a Barrier the
+    peers are heading into, so it must not raise.
+    """
+    patterns = (
+        # .NNNNNN.csv.tmp<pid> -- a partially written category CSV.
+        f"{fracts_write_dir}/.*.csv.tmp*",
+        # .rng_attempt_rank<r>.tmp<pid> -- a partially written attempt counter.
+        f"{fracts_write_dir}/.rng_attempt_rank*.tmp*",
+    )
+    for pattern in patterns:
+        for stale in glob.glob(pattern):
+            try:
+                os.remove(stale)
+                log.info("Removed stale category-search temp file %s", stale)
+            except OSError as exc:
+                log.warning("Could not remove stale temp file %s: %s", stale, exc)
+
+
 def main(config: Config) -> None:
     """
     Generate fractal categories.
@@ -403,17 +462,22 @@ def main(config: Config) -> None:
 
     log.info("MPI size = %s", size)
 
-    # Setup directories
-    fracts_sub_dir = f"var{config.variance_threshold}"
-    fracts_write_dir = os.path.join(
-        config.fract_base_dir, fracts_sub_dir, "3DIFS_param"
-    )
+    # Setup directories. The library is keyed by seed (see
+    # ScaFFold.datagen.layout): categories are drawn from a seed-derived
+    # candidate stream, so a run under a different seed must never resume onto
+    # another seed's parameter files.
+    fracts_write_dir = layout.category_param_dir(config)
     if rank == 0:
         log.info("Writing fractals to %s", fracts_write_dir)
+        # A library in the pre-seed layout is invisible to everything below, so
+        # say why it is being ignored rather than appearing to regenerate work
+        # that is plainly still on disk.
+        layout.warn_if_legacy_library(config, log)
         if os.path.exists(fracts_write_dir) and config.datagen_from_scratch:
             log.info("Removing existing fractals directory")
             shutil.rmtree(fracts_write_dir)
         os.makedirs(fracts_write_dir, exist_ok=True)
+        _sweep_stale_temp_files(fracts_write_dir, log)
 
     # Wait until dir setup completes
     comm.Barrier()
@@ -423,18 +487,52 @@ def main(config: Config) -> None:
     # the ones a fresh run produced.
     attempt_index = read_attempt_counter(fracts_write_dir, rank)
 
-    # Parse existing category files (rank 0 owns saving/dedup). Free indices are
-    # derived from these parsed names -- filling holes, never overwriting.
-    existing_indices = parse_category_indices(fracts_write_dir)
+    # Parse existing category files on rank 0 alone and broadcast the result.
+    # Free indices are derived from these parsed names -- filling holes, never
+    # overwriting -- and, critically, the count derived below gates a loop that
+    # contains collectives. Scanning the shared filesystem independently per
+    # rank lets divergent views (stale metadata caches, a concurrent job, a
+    # partially visible directory) put one rank inside the loop while another is
+    # past it, so the two post mismatched collectives on COMM_WORLD and the job
+    # hangs. One scan, one broadcast, one shared verdict.
+    #
+    # Rank 0 also loads the parameters of the categories already on disk (only
+    # it writes, so only it needs them for the duplicate guard). That read is
+    # part of the same rank-0-only window: a category CSV that will not parse --
+    # ragged, or hand-edited -- would otherwise kill rank 0 *after* the peers
+    # had already taken the broadcast and moved on to the next collective. Scan
+    # and load are therefore one guarded decision, reported through one
+    # broadcast, exactly as ``get_dataset`` reports its selection.
     existing_params = []
+    interrupt = None
     if rank == 0:
-        for idx in existing_indices:
-            existing_params.append(
-                np.loadtxt(
-                    os.path.join(fracts_write_dir, "%06d.csv" % idx),
-                    delimiter=",",
+        try:
+            existing_indices = parse_category_indices(fracts_write_dir)
+            for idx in existing_indices:
+                existing_params.append(
+                    np.loadtxt(
+                        os.path.join(fracts_write_dir, "%06d.csv" % idx),
+                        delimiter=",",
+                    )
                 )
+            scan = ("ok", existing_indices)
+        except BaseException as e:
+            existing_params = []
+            scan = (
+                "error",
+                f"rank 0 failed to scan existing categories in "
+                f"{fracts_write_dir}: {type(e).__name__}: {e}",
             )
+            interrupt = e if isinstance(e, KeyboardInterrupt) else None
+    else:
+        scan = None
+    status, payload = comm.bcast(scan, root=0)
+    if status == "error":
+        # Rank 0 keeps an operator's interrupt; every rank aborts either way.
+        if interrupt is not None:
+            raise interrupt
+        raise RuntimeError(f"category search failed: {payload}")
+    existing_indices = payload
 
     # Calculate number of remaining fractal categories to generate
     existing_categories = len(existing_indices)

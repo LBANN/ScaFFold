@@ -21,6 +21,7 @@ device binding relative to process-group initialization.
 
 import logging
 
+import pytest
 import torch
 
 import ScaFFold.utils.distributed as distributed_mod
@@ -171,21 +172,21 @@ def test_ddp_wrap_cpu_uses_none(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_worker_singleton_smoke(monkeypatch, tiny_config, tiny_dataset):
-    """worker.main completes end to end as a one-rank gloo job on CPU.
+def _run_singleton_worker(
+    monkeypatch, tiny_config, tiny_dataset, *, port, config_overrides=None
+):
+    """Run ``worker.main`` as a one-rank gloo job on CPU; return (rc, trainer).
 
-    ScaFFold always runs distributed; the supported singleton case is a
-    one-rank launch. The worker initializes the (gloo) process group itself,
-    builds a real unsharded ParallelStrategy, and tears the group down before
-    rank-0 post-processing.
+    Training itself is stubbed (one synthetic epoch row so post-processing has
+    data), so what this exercises is the worker's own setup path.
     """
     monkeypatch.setenv("MASTER_ADDR", "127.0.0.1")
-    monkeypatch.setenv("MASTER_PORT", "29513")
+    monkeypatch.setenv("MASTER_PORT", str(port))
     # Force the CPU path so initialize_dist selects gloo: this test must not
     # depend on a working GPU/NCCL stack.
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
 
-    cfg = tiny_config()
+    cfg = tiny_config(**(config_overrides or {}))
     kwargs = dict(vars(cfg))
     kwargs.update(
         {
@@ -212,7 +213,20 @@ def test_worker_singleton_smoke(monkeypatch, tiny_config, tiny_dataset):
 
     monkeypatch.setattr(worker_mod.PyTorchTrainer, "train", fake_train)
     result = worker_mod.main(kwargs_dict=kwargs)
-    trainer = seen.get("trainer")
+    return result, seen.get("trainer")
+
+
+def test_worker_singleton_smoke(monkeypatch, tiny_config, tiny_dataset):
+    """worker.main completes end to end as a one-rank gloo job on CPU.
+
+    ScaFFold always runs distributed; the supported singleton case is a
+    one-rank launch. The worker initializes the (gloo) process group itself,
+    builds a real unsharded ParallelStrategy, and tears the group down before
+    rank-0 post-processing.
+    """
+    result, trainer = _run_singleton_worker(
+        monkeypatch, tiny_config, tiny_dataset, port=29513
+    )
 
     assert result == 0
     assert trainer is not None
@@ -226,3 +240,133 @@ def test_worker_singleton_smoke(monkeypatch, tiny_config, tiny_dataset):
     assert trainer.config.global_batch_size == trainer.config.local_batch_size
     # The worker destroyed the process group before rank-0 post-processing.
     assert not torch.distributed.is_initialized()
+
+
+# ---------------------------------------------------------------------------
+# The activation-checkpointing config flag reaches the model
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("flag, expected", [(0, False), (1, True)])
+def test_activation_checkpointing_flag_reaches_the_model(
+    monkeypatch, tiny_config, tiny_dataset, flag, expected
+):
+    """``activation_checkpointing: 1`` turns the U-Net's flag on.
+
+    ``use_checkpointing`` had no caller at all, and it has to be invoked
+    *before* the DDP wrap: afterwards the model is only reachable through
+    ``.module``, which is exactly why this asserts on the wrapped model's
+    inner module.
+    """
+    _result, trainer = _run_singleton_worker(
+        monkeypatch,
+        tiny_config,
+        tiny_dataset,
+        port=29520 + flag,
+        config_overrides={"activation_checkpointing": flag},
+    )
+
+    model = getattr(trainer.model, "module", trainer.model)
+    assert model.checkpointing is expected
+
+
+# ---------------------------------------------------------------------------
+# Local size detection
+# ---------------------------------------------------------------------------
+
+_LOCAL_SIZE_CASES = [
+    # torchrun exports LOCAL_WORLD_SIZE alongside LOCAL_RANK.
+    ({"LOCAL_WORLD_SIZE": "4"}, 4),
+    ({"MV2_COMM_WORLD_LOCAL_SIZE": "4"}, 4),
+    ({"OMPI_COMM_WORLD_LOCAL_SIZE": "4"}, 4),
+    ({"PMI_LOCAL_SIZE": "4"}, 4),
+    ({"PALS_LOCAL_SIZE": "4"}, 4),
+    ({"SLURM_NTASKS": "8", "SLURM_NNODES": "2"}, 4),
+    ({"FLUX_JOB_SIZE": "8", "FLUX_JOB_NNODES": "2"}, 4),
+]
+
+_LOCAL_SIZE_VARS = [
+    "LOCAL_WORLD_SIZE",
+    "MV2_COMM_WORLD_LOCAL_SIZE",
+    "OMPI_COMM_WORLD_LOCAL_SIZE",
+    "PMI_LOCAL_SIZE",
+    "PALS_LOCAL_SIZE",
+    "SLURM_NTASKS",
+    "SLURM_NNODES",
+    "FLUX_JOB_SIZE",
+    "FLUX_JOB_NNODES",
+]
+
+
+def test_local_size_detection_matrix(monkeypatch):
+    """Every launcher that reports a local rank has its local size honored too.
+
+    An unrecognized variable silently yields 1, which makes the per-node
+    profiler gate ``rank % ranks_per_node == 0`` select *every* rank and
+    mislabels the trace's node count.
+    """
+    for env, want_local_size in _LOCAL_SIZE_CASES:
+        for var in _LOCAL_SIZE_VARS:
+            monkeypatch.delenv(var, raising=False)
+        for key, value in env.items():
+            monkeypatch.setenv(key, value)
+        assert distributed_mod.get_local_size() == want_local_size, env
+
+
+def test_local_size_defaults_to_one(monkeypatch):
+    """With nothing to go on, one rank per node is still the assumption."""
+    for var in _LOCAL_SIZE_VARS:
+        monkeypatch.delenv(var, raising=False)
+    assert distributed_mod.get_local_size() == 1
+
+
+# ---------------------------------------------------------------------------
+# VC-3: an unusable launcher variable is ignored, not fatal
+#
+# These helpers run at the top of every entry point, so a bare int() on a
+# variable a site wrapper exported empty ("WORLD_SIZE=") or as a placeholder
+# ("auto") killed the invocation -- ``scaffold --help`` included -- with a
+# ValueError naming neither the variable nor a remedy.
+# ---------------------------------------------------------------------------
+
+
+def _clear_launcher_env(monkeypatch):
+    for var in set(_LAUNCHER_VARS) | set(_LOCAL_SIZE_VARS):
+        monkeypatch.delenv(var, raising=False)
+
+
+@pytest.mark.parametrize("value", ["", "   ", "auto"])
+def test_unusable_launcher_values_fall_through(monkeypatch, value):
+    """Empty and non-numeric values are treated as absent, never raise."""
+    _clear_launcher_env(monkeypatch)
+    for var in ("WORLD_SIZE", "RANK", "LOCAL_RANK", "LOCAL_WORLD_SIZE"):
+        monkeypatch.setenv(var, value)
+
+    # Falls through to the next source -- here the (singleton) communicator and
+    # the documented defaults.
+    assert distributed_mod.get_world_size() == 1
+    assert distributed_mod.get_world_rank() == 0
+    assert distributed_mod.get_local_rank() == 0
+    assert distributed_mod.get_local_size() == 1
+
+
+def test_unusable_value_defers_to_the_next_launcher_variable(monkeypatch, caplog):
+    """A garbage value does not mask a usable variable further down the order."""
+    _clear_launcher_env(monkeypatch)
+    monkeypatch.setenv("WORLD_SIZE", "auto")
+    monkeypatch.setenv("PALS_NRANKS", "8")
+
+    with caplog.at_level(logging.WARNING, logger=distributed_mod.logger.name):
+        assert distributed_mod.get_world_size() == 8
+
+    messages = " ".join(record.getMessage() for record in caplog.records)
+    assert "WORLD_SIZE" in messages, "the ignored value was not reported"
+
+
+def test_zero_node_count_does_not_divide_by_zero(monkeypatch):
+    """A nonsense node count falls through instead of raising."""
+    _clear_launcher_env(monkeypatch)
+    monkeypatch.setenv("SLURM_NTASKS", "8")
+    monkeypatch.setenv("SLURM_NNODES", "0")
+
+    assert distributed_mod.get_local_size() == 1

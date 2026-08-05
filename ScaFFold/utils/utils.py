@@ -113,12 +113,24 @@ def setup_mpi_logger(
 
 
 def mem_stats():
+    """Return this rank's GPU memory counters.
+
+    On a host with no visible GPU (a CPU/gloo run, or a job launched with the
+    devices masked off) there are no counters to read: report that instead of
+    raising, so a diagnostic call cannot take down a run that is otherwise
+    perfectly able to proceed.
+    """
+    rank = dist.get_rank() if dist.is_initialized() else 0
+    if not torch.cuda.is_available():
+        return {"rank": rank, "device": "cpu", "cuda_available": False}
+
     dev = torch.cuda.current_device()
     free, total = torch.cuda.mem_get_info()  # device-level (driver) view
     stats = torch.cuda.memory_stats(dev)  # allocator internals
     return {
-        "rank": dist.get_rank() if dist.is_initialized() else 0,
+        "rank": rank,
         "device": dev,
+        "cuda_available": True,
         "allocated": torch.cuda.memory_allocated(
             dev
         ),  # bytes currently used by tensors
@@ -134,6 +146,15 @@ def mem_stats():
 
 def gather_and_print_mem(log, tag=""):
     if log.getEffectiveLevel() > 10:  # 10 -> DEBUG
+        return
+    if not torch.cuda.is_available():
+        # Uniform across ranks, so returning here skips the all_gather on every
+        # rank rather than desynchronizing them.
+        log.debug(
+            "=== %s === no CUDA device visible on this rank; "
+            "GPU memory statistics unavailable",
+            tag,
+        )
         return
     stats = mem_stats()
     if dist.is_initialized():

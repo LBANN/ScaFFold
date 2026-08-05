@@ -37,6 +37,7 @@ import numpy as np
 import pytest
 
 from ScaFFold.datagen import instance as inst
+from ScaFFold.datagen import layout
 from ScaFFold.datagen import mask_detection as md
 from ScaFFold.datagen.volumegen import (
     load_np_ptcloud,
@@ -74,13 +75,15 @@ def _seed_category(fract_base: Path, *, point_num: int, keep: range) -> Path:
 
     Pre-seeding all but instance 0 means a ``main`` run only has to generate the
     single missing instance, keeping the test fast. Returns the instance dir.
+    The library lives under the seed-keyed layout, so the paths are derived from
+    the same config the run under test uses.
     """
-    vt = 0.15
-    param_dir = fract_base / f"var{vt}" / "3DIFS_param"
+    config = _make_config(fract_base, point_num=point_num)
+    param_dir = Path(layout.category_param_dir(config))
     param_dir.mkdir(parents=True)
     np.savetxt(param_dir / "000000.csv", _contractive_params(), delimiter=",")
 
-    inst_dir = fract_base / f"var{vt}" / "instances" / f"np{point_num}" / "000000"
+    inst_dir = Path(layout.instance_dir(config)) / "000000"
     inst_dir.mkdir(parents=True)
     rng = np.random.default_rng(0)
     for i in keep:
@@ -89,7 +92,7 @@ def _seed_category(fract_base: Path, *, point_num: int, keep: range) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# F09: non-finite weighted instances are retried / fall back, never saved
+# Non-finite weighted instances are retried / fall back, never saved
 # ---------------------------------------------------------------------------
 
 
@@ -139,7 +142,7 @@ def test_nonfinite_instance_saved_finite(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# F09 defense: points_to_voxelgrid rejects non-finite input
+# Defense in depth: points_to_voxelgrid rejects non-finite input
 # ---------------------------------------------------------------------------
 
 
@@ -154,7 +157,7 @@ def test_voxelgrid_rejects_nonfinite(bad):
 
 
 # ---------------------------------------------------------------------------
-# F32: instance save is atomic and resume handles temp / truncated files
+# Instance save is atomic and resume handles temp / truncated files
 # ---------------------------------------------------------------------------
 
 
@@ -232,7 +235,64 @@ def test_resume_rejects_truncated(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# F62: mask scanner requires exactly one file per id
+# A category's IFS parameters are parsed once, not once per instance
+# ---------------------------------------------------------------------------
+
+
+def test_category_params_parsed_once_per_category(tmp_path, monkeypatch):
+    """``main`` parses each category CSV once per rank, not once per work item.
+
+    The parse used to sit inside the per-item loop, so a full generation read
+    and re-parsed the same small CSV 145 times per category off the shared
+    filesystem. Work items for a category are contiguous in the block
+    partition, so a one-entry cache collapses that to one parse per category.
+    """
+    fract_base = tmp_path / "fractals"
+    point_num = 60
+    n_categories = 2
+    missing_per_category = 3
+
+    config = _make_config(fract_base, point_num=point_num)
+    config.n_categories = n_categories
+
+    param_dir = Path(layout.category_param_dir(config))
+    param_dir.mkdir(parents=True)
+    instance_root = Path(layout.instance_dir(config))
+    rng = np.random.default_rng(0)
+    for category in range(n_categories):
+        np.savetxt(
+            param_dir / f"{category:06d}.csv", _contractive_params(), delimiter=","
+        )
+        # Pre-seed all but a few instances so the run stays fast; the ones left
+        # missing are what the loop (and the parse) actually iterates over.
+        inst_dir = instance_root / f"{category:06d}"
+        inst_dir.mkdir(parents=True)
+        for i in range(missing_per_category, 145):
+            np.save(inst_dir / f"{category:06d}_{i:04d}.npy", rng.random((10, 3)))
+
+    parses = []
+    real_genfromtxt = np.genfromtxt
+
+    def counting_genfromtxt(fname, *args, **kwargs):
+        parses.append(Path(str(fname)).name)
+        return real_genfromtxt(fname, *args, **kwargs)
+
+    monkeypatch.setattr(inst.np, "genfromtxt", counting_genfromtxt)
+    inst.main(config)
+
+    category_parses = [name for name in parses if name[0].isdigit()]
+    # Every missing instance was generated ...
+    for category in range(n_categories):
+        for i in range(missing_per_category):
+            assert (
+                instance_root / f"{category:06d}" / f"{category:06d}_{i:04d}.npy"
+            ).exists()
+    # ... from n_categories parses, not one per (category, instance) item.
+    assert sorted(category_parses) == ["000000.csv", "000001.csv"]
+
+
+# ---------------------------------------------------------------------------
+# Mask scanner requires exactly one file per id
 # ---------------------------------------------------------------------------
 
 
@@ -262,7 +322,7 @@ def test_mask_stem_index_rejects_ambiguous(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# F64: isotropic + centered normalization; the scale knob is rejected
+# Isotropic + centered normalization; the scale knob is rejected
 # ---------------------------------------------------------------------------
 
 
@@ -305,24 +365,26 @@ def test_scale_config_rejected():
 
 
 # ---------------------------------------------------------------------------
-# F34: rasterization scatters point indices instead of traversing a dense grid
+# Rasterization scatters point indices instead of traversing a dense grid
 # ---------------------------------------------------------------------------
 
 
-def _dense_reference_indices(points: np.ndarray, grid_size: int, eps=1e-6):
-    """The pre-refactor index computation, kept verbatim as a reference.
+def _reference_indices(points: np.ndarray, grid_size: int, eps=1e-6, *, clip=True):
+    """The index computation of ``points_to_voxel_indices``, spelled out.
 
-    This is the exact math the old dense ``points_to_voxelgrid`` ran before
-    scattering ``True`` into a full ``grid_size**3`` boolean array; the scatter
-    API must reproduce the identical occupied-voxel set and painted values.
+    Two tests need to see inside the function: the scatter-vs-dense equivalence
+    check (which needs the per-point indices the dense grid was built from) and
+    the centering check (which needs the indices *before* ``np.clip`` hides
+    out-of-range bins). Every test using this asserts the replica reproduces the
+    real function's output, so it cannot silently drift from it.
     """
     mins = points.min(axis=0)
     maxs = points.max(axis=0)
     voxel_size = (float((maxs - mins).max()) + eps) / grid_size
     scaled = (points - mins) / voxel_size
-    offset = (grid_size - 1 - scaled.max(axis=0)) / 2.0
+    offset = (grid_size - scaled.max(axis=0)) / 2.0
     idx = np.floor(scaled + offset).astype(int)
-    return np.clip(idx, 0, grid_size - 1)
+    return np.clip(idx, 0, grid_size - 1) if clip else idx
 
 
 def test_voxel_indices_match_dense_grid():
@@ -334,7 +396,7 @@ def test_voxel_indices_match_dense_grid():
     idx = points_to_voxel_indices(points, grid_size)
 
     # Reference dense grid built the old way, from the reference index math.
-    ref_idx = _dense_reference_indices(points, grid_size)
+    ref_idx = _reference_indices(points, grid_size)
     reference = np.zeros((grid_size,) * 3, dtype=bool)
     reference[ref_idx[:, 0], ref_idx[:, 1], ref_idx[:, 2]] = True
 
@@ -380,7 +442,7 @@ def test_scatter_paint_matches_boolean_mask():
 
 
 # ---------------------------------------------------------------------------
-# F66: instance point clouds are stored and loaded as float32
+# Instance point clouds are stored and loaded as float32
 # ---------------------------------------------------------------------------
 
 
@@ -418,3 +480,80 @@ def test_dataset_version_bumped_past_float64_era():
     from ScaFFold.datagen import get_dataset as gd
 
     assert gd.DATASET_FORMAT_VERSION > 2
+
+
+# ---------------------------------------------------------------------------
+# Voxel centering is a whole voxel, not half of one
+# ---------------------------------------------------------------------------
+
+
+def _assert_replica_tracks_real(grid_size: int = 16) -> None:
+    """Pin ``_reference_indices`` to the real function on a sparse cloud.
+
+    A sparse cloud is essential here: a dense one occupies every voxel under
+    any offset, so the comparison would pass vacuously.
+    """
+    sparse = np.random.default_rng(7).random((300, 3)).astype(np.float32)
+    assert np.array_equal(
+        np.unique(_reference_indices(sparse, grid_size), axis=0),
+        points_to_voxel_indices(sparse, grid_size),
+    ), "the replicated index arithmetic no longer matches points_to_voxel_indices"
+
+
+def test_voxelization_never_bins_outside_the_grid():
+    """No point lands outside ``[0, grid_size)`` before the safety clip.
+
+    The centering offset positions a span of ``span`` voxels inside a grid of
+    ``grid_size`` voxels, so the free space to split between the two margins is
+    ``grid_size - span``. Using ``grid_size - 1 - span`` shifted every cloud
+    half a voxel toward the origin: points in the first half-voxel of each
+    filled axis floored to -1, and ``np.clip`` quietly folded them into bin 0.
+    """
+    grid_size = 16
+    _assert_replica_tracks_real(grid_size)
+    rng = np.random.default_rng(1234)
+    points = rng.random((200_000, 3)).astype(np.float32)
+
+    pre_clip = _reference_indices(points, grid_size, clip=False)
+    assert pre_clip.min() >= 0, (
+        f"{int((pre_clip < 0).any(axis=1).sum())} of {len(points)} points floored "
+        "below bin 0 and were clipped back in"
+    )
+    assert pre_clip.max() <= grid_size - 1
+
+
+def test_voxelization_density_is_uniform_at_the_boundaries():
+    """A uniform cloud fills the boundary planes like the interior ones.
+
+    The half-voxel shift piled the clipped points onto plane 0 (1.5x the
+    interior density) and starved the far plane (0.5x), a systematic
+    misregistration in every generated volume and mask.
+    """
+    grid_size = 16
+    _assert_replica_tracks_real(grid_size)
+    rng = np.random.default_rng(1234)
+    points = rng.random((200_000, 3)).astype(np.float32)
+
+    idx = _reference_indices(points, grid_size)
+    counts = np.bincount(idx[:, 0], minlength=grid_size)
+    interior = counts[2:-2].mean()
+    assert 0.9 <= counts[0] / interior <= 1.1, (
+        f"boundary plane 0 holds {counts[0] / interior:.2f}x the interior density"
+    )
+    assert 0.9 <= counts[-1] / interior <= 1.1, (
+        f"boundary plane {grid_size - 1} holds {counts[-1] / interior:.2f}x the "
+        "interior density"
+    )
+
+
+def test_dataset_version_bumped_past_half_voxel_era():
+    """The reuse marker advanced past 3: pre-fix datasets are misregistered.
+
+    Correcting the offset changes the voxel contents of every generated volume
+    and mask, so a dataset built before the fix must not be handed to a run
+    after it. Bumping the version both stops the reuse scan from matching those
+    directories and changes the config_id they hash to.
+    """
+    from ScaFFold.datagen import get_dataset as gd
+
+    assert gd.DATASET_FORMAT_VERSION > 3

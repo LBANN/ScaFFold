@@ -45,7 +45,7 @@ import numpy as np
 from mpi4py import MPI
 
 import ScaFFold.datagen.get_dataset as gd
-from ScaFFold.datagen import volumegen
+from ScaFFold.datagen import layout, volumegen
 
 VT = 0.15
 PN = 64
@@ -71,14 +71,10 @@ def _config(dataset_dir: Path, fract_base: Path) -> Namespace:
 
 
 def _instance_path(fract_base: Path, cat: int, inst: int) -> Path:
-    return (
-        fract_base
-        / f"var{VT}"
-        / "instances"
-        / f"np{PN}"
-        / f"{cat:06d}"
-        / f"{cat:06d}_{inst:04d}.npy"
-    )
+    # The instance library is keyed by seed; derive the path from the same
+    # config the run under test uses.
+    inst_root = Path(layout.instance_dir(_config(Path("unused"), fract_base)))
+    return inst_root / f"{cat:06d}" / f"{cat:06d}_{inst:04d}.npy"
 
 
 def _seed_instances(fract_base: Path) -> None:

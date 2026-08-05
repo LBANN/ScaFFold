@@ -15,6 +15,7 @@
 # restart_script.py
 from __future__ import annotations
 
+import math
 import os
 import shlex
 import stat
@@ -23,9 +24,26 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import List, Union
 
+from ScaFFold.utils.distributed import get_local_size
+
 # Profiling toggles that must be reproduced on restart -- but only when they
 # were active in the generating run. Names mirror ScaFFold.utils.perf_measure.
 _PROFILING_ENV_VARS = ("PROFILE_TORCH", "CALI_CONFIG")
+
+# Launcher variables carrying the total rank count, in the same priority order
+# as ScaFFold.utils.distributed.get_world_size. The rank side and the restart
+# generator must recognize the same set, or a job launched under a launcher
+# only one of them knows about (e.g. Cray PALS) gets a restart script for the
+# wrong number of ranks.
+_WORLD_SIZE_ENV_VARS = (
+    "WORLD_SIZE",
+    "MV2_COMM_WORLD_SIZE",
+    "OMPI_COMM_WORLD_SIZE",
+    "PMI_SIZE",
+    "PALS_NRANKS",
+    "SLURM_NTASKS",
+    "FLUX_JOB_SIZE",
+)
 
 
 def _rewrite_config_and_add_restart(cli_args: List[str]) -> List[str]:
@@ -78,14 +96,26 @@ def _rewrite_config_and_add_restart(cli_args: List[str]) -> List[str]:
     return new_args
 
 
+def _substitute_placeholder(tok: str, var_subs: dict[str, str]) -> str:
+    """Return ``tok`` with a placeholder replaced by its Bash expansion.
+
+    A placeholder may be a whole token (``--config __CFG__``) or the value half
+    of a combined token (``--config=__CFG__``); argparse accepts both spellings
+    on the command line, so the rewriter can emit either. Anything else is
+    shell-quoted verbatim.
+    """
+    if tok in var_subs:
+        return var_subs[tok]  # e.g., "$RUN_DIR/config.yaml"
+    flag, sep, value = tok.partition("=")
+    if sep and value in var_subs:
+        # --config=__CFG__ -> --config="$RUN_DIR/config.yaml"
+        return shlex.quote(flag + sep) + var_subs[value]
+    return shlex.quote(tok)
+
+
 def _bash_array(var_name: str, argv: List[str], var_subs: dict[str, str]) -> str:
     """Render a Bash array declaration VAR=( ... ), safely quoted, with simple placeholder substitution."""
-    parts = []
-    for tok in argv:
-        if tok in var_subs:
-            parts.append(var_subs[tok])  # e.g., "$RUN_DIR/config.yaml"
-        else:
-            parts.append(shlex.quote(tok))
+    parts = [_substitute_placeholder(tok, var_subs) for tok in argv]
     return f"{var_name}=( " + " ".join(parts) + " )"
 
 
@@ -231,8 +261,11 @@ def _sniff_launch_shape(env: Mapping[str, str]) -> tuple[int | None, int, int]:
     Reads, in priority order:
       1. Flux (FLUX_JOB_SIZE is total tasks, FLUX_JOB_NNODES is node count),
       2. Slurm (SLURM_NTASKS / SLURM_NPROCS total tasks, SLURM_*NODES nodes),
-      3. generic launcher hints for total rank count: torchrun's WORLD_SIZE,
-         Open MPI's OMPI_COMM_WORLD_SIZE, and PMI's PMI_SIZE.
+      3. generic launcher hints for the total rank count, in the same order
+         and covering the same variables as
+         ``ScaFFold.utils.distributed.get_world_size``: keeping the two in
+         sync is what stops a restart script from relaunching the job at the
+         wrong scale.
 
     ``nodes`` is None when the environment does not report a node count.
     ``world_size`` is the best available total-rank estimate (>= 1).
@@ -248,7 +281,7 @@ def _sniff_launch_shape(env: Mapping[str, str]) -> tuple[int | None, int, int]:
         total_tasks = int(env.get("SLURM_NTASKS") or env.get("SLURM_NPROCS") or 1)
     else:
         # No scheduler: fall back to generic launcher hints for the rank count.
-        for key in ("WORLD_SIZE", "OMPI_COMM_WORLD_SIZE", "PMI_SIZE"):
+        for key in _WORLD_SIZE_ENV_VARS:
             val = env.get(key)
             if val:
                 total_tasks = int(val)
@@ -269,6 +302,11 @@ def create_restart_script(run_dir: str | Path, world_size: int | None = None) ->
     torchrun, Open MPI, PMI). The multi-rank torchrun-hpc template is emitted
     whenever the resulting world size is greater than one; the local
     single-process template is used only for a world size of one.
+
+    The node count comes from the scheduler when it reports one (Flux, Slurm);
+    otherwise it is derived from the per-node rank count
+    ``ScaFFold.utils.distributed.get_local_size`` reads, so a PALS or torchrun
+    job is not relaunched with every rank crammed onto one node.
     """
     run_dir = Path(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -309,8 +347,24 @@ def create_restart_script(run_dir: str | Path, world_size: int | None = None) ->
     if use_torchrun:
         # Calculate tasks per node for torchrun (-n arg).
         if nodes is None:
-            nodes = 1
-        tasks_per_node = max(1, total_tasks // nodes)
+            # No scheduler reported a node count: this is a PALS or plain
+            # torchrun launch. Assuming one node put the job's whole rank count
+            # on a single node (an 8-rank job across 2 nodes came back as
+            # NODES=1 TASKS_PER_NODE=8), which either oversubscribes one node or
+            # is rejected outright. The rank side's ``get_local_size`` reads the
+            # same launchers' per-node variables, so ask it how many ranks share
+            # this node and derive the node count from that. ``required=True``
+            # distinguishes "one rank per node" from "nothing reported a
+            # per-node count", where the historical single-node assumption is
+            # still the best guess available.
+            try:
+                local_size = get_local_size(required=True)
+            except RuntimeError:
+                local_size = total_tasks
+            tasks_per_node = max(1, min(local_size, total_tasks))
+            nodes = math.ceil(total_tasks / tasks_per_node)
+        else:
+            tasks_per_node = max(1, total_tasks // nodes)
 
         script = _render_torchrun_hpc_restart(
             py_array_decl, nodes, tasks_per_node, env_setup

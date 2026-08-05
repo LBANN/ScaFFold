@@ -20,6 +20,8 @@ import torch.nn.functional as F
 
 from ScaFFold.utils.perf_measure import annotate
 
+from .group_norm import FastGroupNorm
+
 _doubleconv_annotate = annotate(fmt="DoubleConv.{}")
 _down_annotate = annotate(fmt="Down.{}")
 _up_annotate = annotate(fmt="Up.{}")
@@ -31,7 +33,9 @@ def _group_norm(num_groups, num_channels):
         raise ValueError(
             f"group_norm_groups={num_groups} must evenly divide num_channels={num_channels}"
         )
-    return nn.GroupNorm(num_groups, num_channels)
+    # FastGroupNorm is nn.GroupNorm plus a compiled GPU kernel; it holds the
+    # same parameters under the same names, so checkpoints are unaffected.
+    return FastGroupNorm(num_groups, num_channels)
 
 
 class DoubleConv(nn.Module):

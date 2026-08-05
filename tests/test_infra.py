@@ -22,13 +22,16 @@ inline).
 
 from __future__ import annotations
 
+import logging
 import os
 
 import numpy as np
+import pytest
 import torch
 
 from ScaFFold.utils.data_loading import FractalDataset
 from ScaFFold.utils.data_types import MASK_DTYPE, VOLUME_DTYPE
+from ScaFFold.utils.utils import gather_and_print_mem, mem_stats
 from tests.helpers import mpi_runner
 
 # ---------------------------------------------------------------------------
@@ -230,3 +233,54 @@ def test_torchrun_gloo_two_ranks(tmp_path):
     # Both ranks reported; all_reduce of ranks {0,1} sums to 1.
     assert "RANK 0/2 sum=1.0" in out
     assert "RANK 1/2 sum=1.0" in out
+
+
+# ---------------------------------------------------------------------------
+# Memory diagnostics on a CPU-only run
+# ---------------------------------------------------------------------------
+
+
+def _debug_logger(name):
+    log = logging.getLogger(name)
+    log.setLevel(logging.DEBUG)
+    return log
+
+
+# The bug was a CUDA-free host taking the CUDA path, so these only mean
+# something where CUDA is genuinely unavailable.
+_requires_no_cuda = pytest.mark.skipif(
+    torch.cuda.is_available(), reason="covers the CPU-only path"
+)
+
+
+@_requires_no_cuda
+def test_mem_stats_without_cuda(caplog):
+    """``mem_stats`` reports "no GPU" instead of raising on a CPU-only host."""
+    stats = mem_stats()
+
+    assert stats["cuda_available"] is False
+    assert "rank" in stats
+
+
+@_requires_no_cuda
+def test_gather_and_print_mem_without_cuda(caplog):
+    """A DEBUG-level CPU run logs a fallback instead of crashing.
+
+    ``BaseTrainer.__init__`` calls this unconditionally, so a CPU/gloo run with
+    ``-v`` used to die in trainer construction with "No CUDA GPUs are
+    available".
+    """
+    log = _debug_logger("test_gather_and_print_mem_without_cuda")
+    with caplog.at_level(logging.DEBUG, logger=log.name):
+        gather_and_print_mem(log, "after_trainer_setup")
+
+    messages = " ".join(record.getMessage() for record in caplog.records)
+    assert "after_trainer_setup" in messages
+    assert "cuda" in messages.lower() or "gpu" in messages.lower()
+
+
+def test_trainer_constructs_with_debug_logging(tiny_trainer):
+    """The real call site survives: a trainer builds with a DEBUG logger."""
+    trainer = tiny_trainer(log_level=logging.DEBUG)
+
+    assert trainer.log.getEffectiveLevel() == logging.DEBUG

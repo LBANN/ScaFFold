@@ -44,6 +44,7 @@ import numpy as np
 from mpi4py import MPI
 
 import ScaFFold.datagen.instance as inst
+from ScaFFold.datagen import layout
 
 VT = 0.15
 PN = 64
@@ -62,7 +63,7 @@ def _config(fract_base: Path) -> Namespace:
 
 
 def _seed_ifs_params(fract_base: Path) -> None:
-    param_dir = fract_base / f"var{VT}" / "3DIFS_param"
+    param_dir = Path(layout.category_param_dir(_config(fract_base)))
     param_dir.mkdir(parents=True, exist_ok=True)
     params = np.zeros((2, 13), dtype=np.float64)
     params[:, 0] = params[:, 4] = params[:, 8] = 0.5
@@ -82,7 +83,7 @@ def main() -> None:
         _seed_ifs_params(fract_base)
     comm.Barrier()
 
-    inst_root = fract_base / f"var{VT}" / "instances" / f"np{PN}"
+    inst_root = Path(layout.instance_dir(_config(fract_base)))
 
     # Give each rank a divergent view of pre-existing instances. Only rank 0's
     # view should matter after the fix (its list is broadcast); rank 1's phantom

@@ -326,7 +326,8 @@ def tiny_v1_dataset(tmp_path):
     Same shape as ``tiny_dataset`` but: no ``meta.yaml`` (so the loader falls
     back to the legacy path), channels-last volumes ``(N, N, N, 3)``, and masks
     holding raw values that get remapped through the per-split ``mask_values``
-    pickle. Needed by the F42 dataset-loading tests.
+    pickle. Needed by the dataset-loading tests that cover legacy label
+    remapping.
     """
 
     def make(
@@ -467,6 +468,7 @@ def tiny_trainer(tiny_config, tiny_dataset, tmp_path, gloo_group_1rank):
         n_train: int = 4,
         n_val: int = 2,
         n: int = 16,
+        log_level: int = logging.INFO,
         config_overrides: Optional[dict] = None,
     ) -> "PyTorchTrainer":
         dataset_root = tiny_dataset(
@@ -495,9 +497,10 @@ def tiny_trainer(tiny_config, tiny_dataset, tmp_path, gloo_group_1rank):
         device = torch.device("cpu")
 
         log = logging.getLogger(f"tiny_trainer.{id(config)}")
-        # INFO (20) > DEBUG (10) => gather_and_print_mem short-circuits and
-        # never touches CUDA / torch.distributed.
-        log.setLevel(logging.INFO)
+        # At the INFO default (20 > DEBUG's 10) gather_and_print_mem
+        # short-circuits and never touches CUDA / torch.distributed; pass
+        # log_level=logging.DEBUG to exercise the memory diagnostics.
+        log.setLevel(log_level)
 
         return PyTorchTrainer(model, config, device, log)
 

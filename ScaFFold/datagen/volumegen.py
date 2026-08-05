@@ -22,9 +22,59 @@ from typing import Dict
 import numpy as np
 from mpi4py import MPI
 
+from ScaFFold.datagen import layout
 from ScaFFold.utils.config_utils import Config
 from ScaFFold.utils.data_types import MASK_DTYPE, VOLUME_DTYPE
 from ScaFFold.utils.utils import setup_mpi_logger
+
+# Liveness marker for the directory being generated into. Volume writing is the
+# long phase of a generation and it happens deep inside the tree
+# (``volumes/<split>/N.npy``), so the top of the staging directory can look
+# untouched for many hours while the job is perfectly healthy. Every writing
+# rank therefore refreshes this file periodically, and
+# ``get_dataset._staging_dir_is_live`` reads it instead of trying to infer
+# liveness from mtimes it cannot cheaply see. The name is owned here, next to
+# the writer; ``get_dataset`` (which already imports this module) reads it from
+# here so the two sides cannot drift.
+STAGING_HEARTBEAT_NAME = ".heartbeat"
+# Refresh interval. Small enough to be negligible against the staleness
+# threshold (a day), large enough that it is one utime per rank per few minutes
+# no matter how fast volumes are written.
+STAGING_HEARTBEAT_INTERVAL_SECONDS = 5 * 60
+
+
+class StagingHeartbeat:
+    """Periodically touch a staging directory's heartbeat file.
+
+    ``beat()`` is called from the volume loop and is a no-op until the interval
+    has elapsed, so it costs one comparison per volume. Every rank writing into
+    the directory beats the same file: the marker means "somebody is still
+    working here", and a last-writer-wins utime is exactly the semantics wanted.
+    Failures are swallowed -- a heartbeat that cannot be written must never take
+    down a generation that is otherwise fine (the cleanup's second signal, the
+    bounded mtime probe, still applies).
+    """
+
+    def __init__(
+        self, staging_dir, interval: float = STAGING_HEARTBEAT_INTERVAL_SECONDS
+    ) -> None:
+        self.path = os.path.join(str(staging_dir), STAGING_HEARTBEAT_NAME)
+        self.interval = interval
+        self._last_beat = float("-inf")
+
+    def beat(self, now: float | None = None) -> bool:
+        """Touch the marker if the interval has elapsed; return whether it did."""
+        now = time.time() if now is None else now
+        if now - self._last_beat < self.interval:
+            return False
+        self._last_beat = now
+        try:
+            with open(self.path, "a"):
+                pass
+            os.utime(self.path, (now, now))
+        except OSError:
+            return False
+        return True
 
 
 def load_np_ptcloud(path: str) -> np.ndarray:
@@ -81,9 +131,15 @@ def points_to_voxel_indices(
     scaled = (points - mins) / voxel_size
 
     # 4) Center the occupied region: the largest axis fills the grid while the
-    #    shorter axes are offset so their span sits in the middle.
+    #    shorter axes are offset so their span sits in the middle. The free
+    #    space to split between the two margins is (grid_size - span) voxels,
+    #    measured in the same voxel units as ``scaled``; subtracting an extra 1
+    #    (as if the offset were an index rather than a length) shifted every
+    #    cloud half a voxel toward the origin, floored the first half-voxel of
+    #    each filled axis to -1, and let the clip below fold those points onto
+    #    plane 0.
     span = scaled.max(axis=0)
-    offset = (grid_size - 1 - span) / 2.0
+    offset = (grid_size - span) / 2.0
     idx = np.floor(scaled + offset).astype(int)
 
     # 5) Clip to valid range (guards float rounding at the boundaries).
@@ -222,6 +278,7 @@ def main(config: Dict):
     # the failure is then propagated to all ranks via an allreduce.
     ok = True
     err = ""
+    interrupt = None
 
     try:
         if start_idx >= end_idx:
@@ -240,11 +297,21 @@ def main(config: Dict):
             fractal_colors = np.random.rand(config.n_categories, 3)
 
             grid_size = resolve_grid_size(config)
-            fract_base_dir = str(config.fract_base_dir)
+            # The instance library is keyed by seed (see ScaFFold.datagen
+            # .layout), so a volume can only ever be built from point clouds
+            # this run's seed produced. Resolved once, outside the loop.
+            instances_dir = layout.instance_dir(config)
 
-            # Generation loop
+            # Generation loop. Every rank reports that this staging directory
+            # is still being written to, so a concurrent job's orphan cleanup
+            # can tell a live multi-hour generation from one killed a day ago
+            # (the volumes themselves land two levels down, where a cheap
+            # top-level mtime probe cannot see them).
+            heartbeat = StagingHeartbeat(dataset_dir)
+            heartbeat.beat()
             start_time = time.time()
             for i, curr_vol in enumerate(volumes_contents_subset):
+                heartbeat.beat()
                 if i % 10 == 0:
                     log.debug("Rank %s processing local volume %s", rank, i)
 
@@ -269,12 +336,7 @@ def main(config: Dict):
                     curr_instance = curr_vol[1 + 2 * curr_fract + 1]
                     fractal_color = fractal_colors[curr_category]
 
-                    instances_dir = (
-                        f"var{config.variance_threshold}/instances/np{config.point_num}"
-                    )
-
                     point_cloud_path = os.path.join(
-                        fract_base_dir,
                         instances_dir,
                         f"{curr_category:06d}",
                         f"{curr_category:06d}_{curr_instance:04d}.npy",
@@ -332,11 +394,14 @@ def main(config: Dict):
                     total_time,
                     len(volumes_contents_subset) / total_time,
                 )
-    except (Exception, SystemExit) as e:
+    except BaseException as e:
         # Capture the failure locally instead of letting it unwind past the
-        # collective below, which would desynchronize the ranks.
+        # collective below, which would desynchronize the ranks. BaseException,
+        # not (Exception, SystemExit): a KeyboardInterrupt delivered to one rank
+        # would otherwise skip the consensus and hang the others.
         ok = False
         err = f"rank {rank}: {type(e).__name__}: {e}"
+        interrupt = e if isinstance(e, KeyboardInterrupt) else None
 
     # Consensus on the generation status. This replaces a bare Barrier: every
     # rank always executes exactly this collective (regardless of success or
@@ -345,6 +410,10 @@ def main(config: Dict):
     all_ok = comm.allreduce(1 if ok else 0, op=MPI.MIN) == 1
     errs = comm.allgather(err)
     if not all_ok:
+        # The interrupted rank re-raises the operator's abort verbatim; the
+        # others report the gathered failure.
+        if interrupt is not None:
+            raise interrupt
         msgs = "; ".join(e for e in errs if e)
         raise RuntimeError(f"volume generation failed: {msgs or 'unknown error'}")
 

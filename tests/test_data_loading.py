@@ -112,7 +112,7 @@ def _build_v1_split_dataset(
 
 
 # ---------------------------------------------------------------------------
-# F11: index -> file mapping must not depend on os.listdir order
+# Index -> file mapping must not depend on os.listdir order
 # ---------------------------------------------------------------------------
 
 
@@ -256,7 +256,7 @@ def test_ids_guard_digest_device_follows_backend(
 
 
 # ---------------------------------------------------------------------------
-# F42: legacy label remapping must use one global (union) table
+# Legacy label remapping must use one global (union) table
 # ---------------------------------------------------------------------------
 
 
@@ -394,7 +394,7 @@ def test_v2_datasets_unaffected(tiny_dataset):
 
 
 # ---------------------------------------------------------------------------
-# F43: id -> path resolved once at init; no per-item directory scans
+# id -> path resolved once at init; no per-item directory scans
 # ---------------------------------------------------------------------------
 
 
@@ -446,7 +446,7 @@ def test_duplicate_stem_raises(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# F13: narrow (int16) mask carrier, widened to long on the compute device
+# Narrow (int16) mask carrier, widened to long on the compute device
 # ---------------------------------------------------------------------------
 
 
@@ -475,7 +475,7 @@ def test_mask_carrier_is_narrow_int16(tiny_dataset):
 
 
 # ---------------------------------------------------------------------------
-# F21: non-sharded volume prep is zero-copy (no redundant full-volume copy)
+# Non-sharded volume prep is zero-copy (no redundant full-volume copy)
 # ---------------------------------------------------------------------------
 
 
@@ -525,7 +525,7 @@ def test_nonsharded_getitem_tensors_bit_identical(tiny_dataset):
 
 
 # ---------------------------------------------------------------------------
-# F24: mask-only accessor loads the mask without touching the image volume
+# Mask-only accessor loads the mask without touching the image volume
 # ---------------------------------------------------------------------------
 
 
@@ -594,3 +594,223 @@ def test_load_mask_only_v1_legacy(tiny_v1_dataset, monkeypatch):
     assert loaded["image"] == 0
     assert mask_only.dtype == torch.int16
     assert torch.equal(mask_only, expected)
+
+
+# ---------------------------------------------------------------------------
+# A *present but broken* meta.yaml must not be mistaken for a v1 dataset
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "broken_meta",
+    [
+        pytest.param("", id="zero-byte"),
+        pytest.param("{[not: valid: yaml", id="unparseable"),
+        pytest.param("- just\n- a\n- list\n", id="not-a-mapping"),
+        pytest.param("config_id: abc123\n", id="version-key-missing"),
+        pytest.param("dataset_format_version: two\n", id="version-not-an-int"),
+    ],
+)
+def test_broken_meta_raises_instead_of_silent_legacy(tmp_path, broken_meta):
+    """A corrupt ``meta.yaml`` is an error, never a silent legacy downgrade.
+
+    Treating a broken meta as "no meta" reclassifies a modern dataset as legacy
+    v1: the loader then transposes channels-first volumes (a (3,N,N,N) sample
+    comes back (N,3,N,N)) and remaps already-dense labels. Training proceeds on
+    silently corrupted data. The dataset directory itself is intact here -- only
+    the metadata is damaged -- so the failure must be loud and actionable.
+    """
+    root = _build_v2_constant_dataset(tmp_path / "ds", n_volumes=2)
+    (root / "meta.yaml").write_text(broken_meta)
+
+    with pytest.raises(ValueError) as excinfo:
+        FractalDataset(
+            root / "volumes" / "training",
+            root / "masks" / "training",
+            data_dir=root / "train_unique_mask_vals",
+        )
+
+    message = str(excinfo.value)
+    assert "meta.yaml" in message
+    # The message must point at the offending file so it can be repaired.
+    assert str(root) in message
+
+
+# ---------------------------------------------------------------------------
+# Uneven spatial shards are accepted but computed wrong (known, unfixed)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.xfail(
+    reason="uneven spatial shards mishandled; to be fixed upstream in DistConv",
+    strict=True,
+)
+def test_uneven_spatial_shards_pool_like_the_unsharded_volume():
+    """Per-shard pooling must agree with pooling the whole volume.
+
+    ``SpatialShardSpec`` slices with ``torch.chunk`` semantics and only rejects
+    an *empty* shard, so ``vol_size=16`` over 3 shards is accepted as 6/6/4 --
+    nothing anywhere validates ``vol_size % num_shards`` or the per-U-Net-level
+    evenness that pooling needs. DistConv's ``DCTensor`` intercepts only
+    ``aten.convolution``, so ``max_pool3d`` runs independently on each local
+    shard; with unequal (or odd) shards the local pooling windows stop lining up
+    with the global ones, and by the second level whole planes are dropped and
+    values appear that are the max of no global window at all. The same happens
+    for equal-but-odd shards (``vol_size=10`` over 2 shards -> 5/5), and an odd
+    local shard entering a strided conv trips DistConv's own divisibility check
+    with a cryptic error deep in the first forward.
+
+    A volume ramp is used so a pooled value names the plane it came from.
+
+    XFAIL: the fix belongs in DistConv (its sharded ops must handle uneven
+    spatial decompositions), not in the loader, which is why this documents the
+    hazard instead of asserting a workaround. ``strict=True``: the comparison is
+    plain deterministic CPU pooling, so it cannot pass by chance -- if it ever
+    passes, DistConv/ScaFFold has changed and this test must be revisited.
+    """
+    vol_size, num_shards = 16, 3
+    ramp = torch.zeros(1, 1, vol_size, vol_size, vol_size)
+    for plane in range(vol_size):
+        ramp[0, 0, plane] = plane
+
+    # What the dataset hands each rank: uneven shards, accepted without a word.
+    volume = np.arange(vol_size**3, dtype=np.float32).reshape((vol_size,) * 3)
+    shard_sizes = [
+        dl.SpatialShardSpec(
+            shard_dims=(2,), num_shards=(num_shards,), shard_indices=(index,)
+        )
+        .slice_array(volume, {2: 0, 3: 1, 4: 2}, "mask")
+        .shape[0]
+        for index in range(num_shards)
+    ]
+    assert shard_sizes == [6, 6, 4]
+
+    # Two U-Net levels of pooling, globally versus per local shard.
+    pool = torch.nn.MaxPool3d(2)
+    global_pooled = pool(pool(ramp))
+    shards = list(torch.split(ramp, shard_sizes, dim=2))
+    shards = [pool(pool(shard)) for shard in shards]
+    sharded_pooled = torch.cat(shards, dim=2)
+
+    assert sharded_pooled.shape == global_pooled.shape, (
+        f"sharded pooling produced {list(sharded_pooled.shape[2:])} planes vs "
+        f"{list(global_pooled.shape[2:])} globally"
+    )
+    assert torch.equal(sharded_pooled, global_pooled), (
+        f"per-shard planes {sharded_pooled[0, 0, :, 0, 0].tolist()} vs global "
+        f"{global_pooled[0, 0, :, 0, 0].tolist()}"
+    )
+
+
+def _build_v2_sparse_label_dataset(root: Path, label: int) -> Path:
+    """A v2 dataset whose only foreground label is the (large) ``label``.
+
+    v2 masks store raw ``category + 1`` ids and the per-split pickle lists only
+    the categories actually present in that split, so a sparse split can hold a
+    handful of very large ids.
+    """
+    vol_dir = root / "volumes" / "training"
+    mask_dir = root / "masks" / "training"
+    vol_dir.mkdir(parents=True)
+    mask_dir.mkdir(parents=True)
+    np.save(vol_dir / "0.npy", np.zeros((3, 4, 4, 4), dtype=VOLUME_DTYPE))
+    mask = np.zeros((4, 4, 4), dtype=MASK_DTYPE)
+    mask[0, 0, 0] = label
+    np.save(mask_dir / "0_mask.npy", mask)
+    with open(root / "train_unique_mask_vals", "wb") as handle:
+        pickle.dump({"mask_values": [0, label]}, handle)
+    (root / "meta.yaml").write_text("dataset_format_version: 2\n")
+    return root
+
+
+# ---------------------------------------------------------------------------
+# The int16 carrier guard must bound the largest class *id*, not the count
+# ---------------------------------------------------------------------------
+
+
+def test_int16_guard_checks_the_largest_class_id(tmp_path):
+    """A v2 split holding an id above the int16 range is rejected.
+
+    The guard compared ``len(mask_values) - 1`` -- the class *count* -- against
+    the carrier limit, but v2 masks ship raw ids. A split listing only
+    ``[0, 40000]`` passed a two-class check and then wrapped 40000 to -25536 in
+    the int16 carrier, which survives the downstream ``.long()`` cast as a
+    negative label.
+    """
+    root = _build_v2_sparse_label_dataset(tmp_path / "sparse", label=40000)
+
+    with pytest.raises(ValueError) as excinfo:
+        FractalDataset(
+            root / "volumes" / "training",
+            root / "masks" / "training",
+            data_dir=root / "train_unique_mask_vals",
+        )
+
+    message = str(excinfo.value)
+    # The message names the offending id and how many classes the split has.
+    assert "40000" in message
+    assert "2" in message
+    assert str(np.iinfo(np.int16).max) in message
+
+
+def test_int16_guard_accepts_ids_inside_the_range(tmp_path):
+    """A large-but-representable id still loads, and does not wrap negative."""
+    label = int(np.iinfo(np.int16).max)
+    root = _build_v2_sparse_label_dataset(tmp_path / "edge", label=label)
+
+    ds = FractalDataset(
+        root / "volumes" / "training",
+        root / "masks" / "training",
+        data_dir=root / "train_unique_mask_vals",
+    )
+    carrier = ds[0]["mask"]
+    assert carrier.dtype == torch.int16
+    assert int(carrier.min()) >= 0
+    assert int(carrier.max()) == label
+
+
+def test_int16_guard_uses_remapped_ids_for_legacy_datasets(tmp_path):
+    """v1 raw values are remapped to 0..n-1, so huge raw values are fine.
+
+    Guarding on ``max(mask_values)`` alone would reject a legacy dataset that
+    the loader handles perfectly well: its carrier only ever holds the remapped
+    index, not the raw voxel value.
+    """
+    raw_mask = np.zeros((4, 4, 4), dtype=MASK_DTYPE)
+    raw_mask[0, 0, 0] = 40000
+    volume = np.zeros((4, 4, 4, 3), dtype=VOLUME_DTYPE)
+    root = _build_v1_split_dataset(
+        tmp_path / "legacy",
+        raw_mask,
+        volume,
+        train_vals=[0, 40000],
+        val_vals=[0, 40000],
+    )
+
+    ds = FractalDataset(
+        root / "volumes" / "training",
+        root / "masks" / "training",
+        data_dir=root / "train_unique_mask_vals",
+    )
+    assert ds.dataset_format_version == 1
+    carrier = ds[0]["mask"]
+    # 40000 was remapped to class index 1; nothing wrapped.
+    assert int(carrier.max()) == 1
+    assert int(carrier.min()) == 0
+
+
+def test_absent_meta_is_still_legacy_v1(tiny_v1_dataset):
+    """The genuine legacy case (no ``meta.yaml`` at all) is unchanged.
+
+    Control for the test above: v1 datasets predate the metadata file, so a
+    *missing* meta must keep selecting the legacy loader rather than raising.
+    """
+    root = tiny_v1_dataset(n_categories=2, n_train=2, n_val=1, n=8)
+    assert not (root / "meta.yaml").exists()
+
+    ds = FractalDataset(
+        root / "volumes" / "training",
+        root / "masks" / "training",
+        data_dir=root / "train_unique_mask_vals",
+    )
+    assert ds.dataset_format_version == 1

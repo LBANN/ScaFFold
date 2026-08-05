@@ -38,7 +38,10 @@ Two tiers of tests guard the invariant:
 
 from __future__ import annotations
 
+import logging
+import os
 import re
+import time
 from argparse import Namespace
 from math import ceil
 from pathlib import Path
@@ -50,7 +53,7 @@ from mpi4py import MPI
 
 from ScaFFold.datagen import get_dataset as gd
 from ScaFFold.datagen import instance as inst
-from ScaFFold.datagen import volumegen
+from ScaFFold.datagen import layout, volumegen
 
 RANK_SCRIPTS = Path(__file__).resolve().parents[1] / "helpers" / "rank_scripts"
 
@@ -341,6 +344,482 @@ def test_generation_success_finalizes_and_returns(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Rank 0 must never die between the collectives its peers have entered.
+# Every rank-0-only step of the consensus (the reuse/generate decision and the
+# final meta-write + rename) is wrapped so a failure travels to the peers as a
+# broadcast sentinel instead of stranding them in ``bcast``/``Barrier``.
+# ---------------------------------------------------------------------------
+
+
+def _base_dir_for(config: Namespace) -> Path:
+    """The ``<dataset_dir>/<config_id>`` directory ``get_dataset`` scans."""
+    config_dict = vars(config).copy()
+    config_dict["dataset_format_version"] = gd.DATASET_FORMAT_VERSION
+    volume_config = gd._get_required_keys_dict(config_dict, gd.INCLUDE_KEYS)
+    return Path(config.dataset_dir) / gd._hash_volume_config(volume_config)
+
+
+def test_decision_failure_is_broadcast_not_raised_before_bcast(tmp_path, monkeypatch):
+    """A rank-0 decision failure reaches peers through the broadcast.
+
+    Any exception inside the rank-0-only decision (an unreadable base dir, a
+    staging ``mkdir`` hitting ENOSPC, ...) must be converted into an error
+    sentinel that is broadcast, so peers already waiting in ``bcast`` learn
+    about it and raise the same error. Before the fix rank 0 raised *before*
+    reaching the broadcast, leaving every peer blocked forever.
+    """
+    config = _reuse_config(tmp_path / "datasets")
+    comm = FakeComm(rank=0, size=2)
+    monkeypatch.setattr(gd, "MPI", FakeMPI(comm))
+    monkeypatch.setattr(gd, "_git_commit_short", lambda log: "abc123")
+
+    def explode(*_args, **_kwargs):
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(gd, "_decide_reuse_or_generate", explode)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        gd.get_dataset(config)
+
+    # Rank 0 reached the broadcast before raising, and the payload is the
+    # error sentinel every peer will see.
+    assert comm.calls == ["bcast"]
+    assert comm.bcast_payloads[0][0] == "error"
+    assert "No space left on device" in str(excinfo.value)
+
+
+def test_non_root_raises_on_broadcast_decision_error(tmp_path, monkeypatch):
+    """A peer receiving the error sentinel raises instead of generating."""
+    config = _reuse_config(tmp_path / "datasets")
+    sentinel = ("error", "rank 0: OSError: No space left on device")
+    comm = FakeComm(rank=1, size=2, bcast_returns=[sentinel])
+    monkeypatch.setattr(gd, "MPI", FakeMPI(comm))
+    monkeypatch.setattr(gd, "_git_commit_short", lambda log: "abc123")
+
+    with pytest.raises(RuntimeError) as excinfo:
+        gd.get_dataset(config)
+
+    assert "No space left on device" in str(excinfo.value)
+    # The peer stopped at the decision broadcast: no generation collectives.
+    assert comm.calls == ["bcast"]
+
+
+def test_reuse_scan_skips_staging_dirs(tmp_path, monkeypatch):
+    """A complete ``meta.yaml`` stranded in a ``.tmp_*`` dir is never reused.
+
+    A job killed between the meta write and the rename leaves a fully valid
+    meta inside its staging dir. Treating that as a publishable dataset hands
+    back a half-generated directory (and one that cleanup may delete).
+    """
+    config = _reuse_config(tmp_path / "datasets")
+    base = _base_dir_for(config)
+    config_id = base.name
+    stranded = base / ".tmp_20260101-000000_1234"
+    stranded.mkdir(parents=True)
+    (stranded / gd.META_FILENAME).write_text(
+        yaml.safe_dump(
+            {
+                "config_id": config_id,
+                "dataset_format_version": gd.DATASET_FORMAT_VERSION,
+            }
+        )
+    )
+
+    comm = FakeComm(rank=0, size=1)
+    monkeypatch.setattr(gd, "MPI", FakeMPI(comm))
+    monkeypatch.setattr(gd, "_git_commit_short", lambda log: "abc123")
+    log = logging.getLogger("test_reuse_scan_skips_staging_dirs")
+
+    decision = gd._decide_reuse_or_generate(base, config_id, "abc123", False, log)
+
+    assert decision[0] == "generate", f"staging dir was reused: {decision}"
+
+
+def test_reuse_scan_tolerates_corrupt_meta(tmp_path, monkeypatch):
+    """A corrupt/unreadable candidate meta is skipped, not fatal.
+
+    A 0-byte ``meta.yaml`` (``yaml.safe_load`` -> ``None``) or an unparseable
+    one used to raise inside the rank-0-only scan. The scan must warn, skip the
+    directory, and keep looking -- here finding the good dataset next to it.
+    """
+    config = _reuse_config(tmp_path / "datasets")
+    base = _base_dir_for(config)
+    config_id = base.name
+    base.mkdir(parents=True)
+
+    # Sorted-descending scan order visits these two poison dirs first.
+    (base / "20260301-000000__zzz").mkdir()
+    (base / "20260301-000000__zzz" / gd.META_FILENAME).write_text("")
+    (base / "20260201-000000__yyy").mkdir()
+    (base / "20260201-000000__yyy" / gd.META_FILENAME).write_text("{[not yaml")
+
+    good = _write_reusable_dataset(base, config_id)
+    log = logging.getLogger("test_reuse_scan_tolerates_corrupt_meta")
+
+    decision = gd._decide_reuse_or_generate(base, config_id, "abc123", False, log)
+
+    assert decision[0] == "reuse"
+    assert Path(decision[1]) == good
+
+
+def test_staging_dir_names_are_collision_proof(tmp_path, monkeypatch):
+    """Two decisions in the same second stage into different directories.
+
+    The old name was ``.tmp_%Y%m%d-%H%M%S`` with ``mkdir(exist_ok=False)``, so
+    two same-config jobs starting in the same second raced to a
+    ``FileExistsError`` on one of them -- inside the unguarded rank-0 window.
+    """
+    config = _reuse_config(tmp_path / "datasets")
+    base = _base_dir_for(config)
+    base.mkdir(parents=True)
+    log = logging.getLogger("test_staging_dir_names_are_collision_proof")
+
+    # Pin the clock so both decisions share a timestamp: only a non-time
+    # component can keep the names apart.
+    monkeypatch.setattr(gd.time, "strftime", lambda *_args: "20260101-000000")
+
+    first = gd._decide_reuse_or_generate(base, base.name, "abc123", False, log)
+    second = gd._decide_reuse_or_generate(base, base.name, "abc123", False, log)
+
+    assert first[0] == "generate" and second[0] == "generate"
+    assert first[1] != second[1], "same-second staging dirs collided"
+    assert Path(first[1]).is_dir() and Path(second[1]).is_dir()
+
+
+def test_finalize_failure_is_broadcast_not_left_to_barrier(tmp_path, monkeypatch):
+    """A rank-0 rename failure is broadcast; peers raise instead of hanging.
+
+    The rename happens *after* the generation consensus, so a failure there
+    (e.g. a racing job already created the destination) used to kill rank 0
+    while every peer sat in the final ``Barrier``. The fix carries the failure
+    through one more collective and raises everywhere.
+    """
+    config = _reuse_config(tmp_path / "datasets")
+    comm = FakeComm(rank=0, size=2, allreduce_result=1)
+    monkeypatch.setattr(gd, "MPI", FakeMPI(comm))
+    monkeypatch.setattr(gd, "_git_commit_short", lambda log: "abc123")
+    monkeypatch.setattr(volumegen, "main", lambda _config: None)
+
+    # Pin the clock so the destination name is predictable, then have a
+    # "racing job" occupy it with a non-empty directory: the rename fails with
+    # ENOTEMPTY exactly as it did in the field.
+    monkeypatch.setattr(gd.time, "strftime", lambda *_args: "20260101-000000")
+    base = _base_dir_for(config)
+    dest = base / "20260101-000000__abc123"
+    dest.mkdir(parents=True)
+    (dest / "placeholder").write_text("created by a racing job")
+
+    with pytest.raises(RuntimeError) as excinfo:
+        gd.get_dataset(config)
+
+    message = str(excinfo.value)
+    assert "20260101-000000__abc123" in message
+    # The failure travelled through a collective *after* the generation
+    # consensus, so peers learn about it rather than waiting in the barrier.
+    assert "allgather" in comm.calls
+    assert comm.calls.index("allgather") < len(comm.calls) - 1
+
+
+def test_non_root_raises_on_broadcast_finalize_error(tmp_path, monkeypatch):
+    """A peer receiving the finalize error raises rather than returning dest."""
+    config = _reuse_config(tmp_path / "datasets")
+    dest = tmp_path / "datasets" / "cid" / "20260101-000000__abc123"
+    comm, _tmp, _dest = _generate_decision_comm(
+        rank=1, size=2, dest=dest, allreduce_result=1
+    )
+    # Second bcast: root's finalize verdict (a failure message).
+    comm._bcast_returns.append("rank 0 failed to finalize: OSError: boom")
+    monkeypatch.setattr(gd, "MPI", FakeMPI(comm))
+    monkeypatch.setattr(gd, "_git_commit_short", lambda log: "abc123")
+    monkeypatch.setattr(volumegen, "main", lambda _config: None)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        gd.get_dataset(config)
+
+    assert "boom" in str(excinfo.value)
+    assert not dest.exists()
+
+
+# ---------------------------------------------------------------------------
+# VB-3: the consensus guards catch BaseException, not (Exception, SystemExit).
+#
+# ``KeyboardInterrupt`` is neither, so an interrupt delivered to rank 0 alone
+# (Ctrl-C on the launching terminal, a site watchdog's SIGINT) unwound straight
+# past the broadcast and hung every peer -- the failure mode the guard exists to
+# prevent, arriving through the one exception class it did not cover.
+# ---------------------------------------------------------------------------
+
+
+def test_rank0_interrupt_still_posts_the_decision_sentinel(tmp_path, monkeypatch):
+    """A KeyboardInterrupt on rank 0 reaches the peers as an error sentinel."""
+    config = _reuse_config(tmp_path / "datasets")
+    comm = FakeComm(rank=0, size=2)
+    monkeypatch.setattr(gd, "MPI", FakeMPI(comm))
+    monkeypatch.setattr(gd, "_git_commit_short", lambda log: "abc123")
+
+    def interrupted(*_args, **_kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(gd, "_decide_reuse_or_generate", interrupted)
+
+    # Rank 0 keeps the operator's abort ...
+    with pytest.raises(KeyboardInterrupt):
+        gd.get_dataset(config)
+
+    # ... but only after telling the peers to stop.
+    assert comm.calls == ["bcast"]
+    assert comm.bcast_payloads[0][0] == "error"
+    assert "KeyboardInterrupt" in comm.bcast_payloads[0][1]
+
+
+def test_interrupt_during_generation_reaches_the_consensus(tmp_path, monkeypatch):
+    """An interrupt inside volumegen still drives the allreduce and allgather."""
+    config = _reuse_config(tmp_path / "datasets")
+    comm = FakeComm(rank=0, size=2, allreduce_result=0, allgather_peers=[""])
+    monkeypatch.setattr(gd, "MPI", FakeMPI(comm))
+    monkeypatch.setattr(gd, "_git_commit_short", lambda log: "abc123")
+
+    def interrupted(_config):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(volumegen, "main", interrupted)
+
+    with pytest.raises(KeyboardInterrupt):
+        gd.get_dataset(config)
+
+    assert "allreduce" in comm.calls and "allgather" in comm.calls
+    assert "KeyboardInterrupt" in comm.allgather_payloads[0]
+
+
+# ---------------------------------------------------------------------------
+# Orphaned staging dirs are reclaimed instead of accumulating forever.
+# ---------------------------------------------------------------------------
+
+
+def _age_tree(path: Path, seconds: float) -> None:
+    """Backdate ``path`` and everything under it by ``seconds``."""
+    stamp = time.time() - seconds
+    for entry in sorted(path.rglob("*"), reverse=True):
+        os.utime(entry, (stamp, stamp))
+    os.utime(path, (stamp, stamp))
+
+
+def test_stale_staging_dirs_are_cleaned(tmp_path, monkeypatch):
+    """A long-orphaned ``.tmp_*`` dir is reclaimed; a live one is not.
+
+    Every killed generation leaves a full staging tree behind (potentially
+    terabytes) that nothing ever reclaims. Cleanup is age-gated so a *running*
+    job's staging dir -- which by construction is far younger than the
+    threshold -- is never deleted out from under it.
+    """
+    config = _reuse_config(tmp_path / "datasets")
+    base = _base_dir_for(config)
+    base.mkdir(parents=True)
+
+    orphan = base / f"{gd.TMP_PREFIX}20200101-000000_111_deadbeef"
+    (orphan / "volumes" / "training").mkdir(parents=True)
+    (orphan / "volumes" / "training" / "0.npy").write_bytes(b"stale payload")
+    _age_tree(orphan, 10 * gd.STALE_STAGING_AGE_SECONDS)
+
+    live = base / f"{gd.TMP_PREFIX}20260101-000000_222_cafebabe"
+    (live / "volumes").mkdir(parents=True)
+
+    log = logging.getLogger("test_stale_staging_dirs_are_cleaned")
+    gd._decide_reuse_or_generate(base, base.name, "abc123", False, log)
+
+    assert not orphan.exists(), "orphaned staging dir was not reclaimed"
+    assert live.exists(), "a concurrent job's staging dir was deleted"
+
+
+def test_cleanup_never_touches_published_datasets(tmp_path):
+    """Only ``.tmp_*`` dirs under this config_id base are ever removed.
+
+    An old published dataset is precisely what reuse is for, and other configs'
+    (or other users') directories are none of this job's business.
+    """
+    config = _reuse_config(tmp_path / "datasets")
+    base = _base_dir_for(config)
+    base.mkdir(parents=True)
+
+    published = _write_reusable_dataset(base, "some-other-config")
+    _age_tree(published, 10 * gd.STALE_STAGING_AGE_SECONDS)
+
+    # A staging dir belonging to a different config_id base entirely.
+    other_base = base.parent / "0123456789ab"
+    other_orphan = other_base / f"{gd.TMP_PREFIX}20200101-000000_333_f00d"
+    other_orphan.mkdir(parents=True)
+    _age_tree(other_orphan, 10 * gd.STALE_STAGING_AGE_SECONDS)
+
+    log = logging.getLogger("test_cleanup_never_touches_published_datasets")
+    gd._decide_reuse_or_generate(base, base.name, "abc123", False, log)
+
+    assert published.exists(), "an old published dataset was deleted"
+    assert other_orphan.exists(), "cleanup escaped this job's config_id base"
+
+
+# ---------------------------------------------------------------------------
+# VB-1: a staging dir is aged by its DEEPEST recent write, not its top level.
+#
+# Generation is not bounded by the staleness threshold -- at the larger scales
+# it runs for days -- and after the first minutes it writes only at depth >= 2
+# (``volumes/<split>/N.npy``). Judging liveness from the staging dir and its
+# immediate children alone therefore reported a healthy multi-day generation as
+# "untouched for 48 hours", and a concurrent same-config start rmtree'd it out
+# from under its peers (which then died on FileNotFoundError).
+# ---------------------------------------------------------------------------
+
+
+def _cleanup(base: Path, name: str) -> None:
+    gd._cleanup_stale_staging_dirs(base, logging.getLogger(name))
+
+
+def test_live_generation_survives_a_deep_write(tmp_path):
+    """A >24h-old staging dir with a fresh deep write is NOT reclaimed."""
+    base = tmp_path / "cid"
+    base.mkdir(parents=True)
+
+    live = base / f"{gd.TMP_PREFIX}20260101-000000_222_cafebabe"
+    split = live / "volumes" / "training"
+    split.mkdir(parents=True)
+    _age_tree(live, 2 * gd.STALE_STAGING_AGE_SECONDS)
+
+    # The job is alive and still laying down volumes: the write lands two levels
+    # down, so only that directory's mtime is current.
+    (split / "0.npy").write_bytes(b"payload from a running job")
+
+    _cleanup(base, "test_live_generation_survives_a_deep_write")
+
+    assert live.exists(), "a live generation's staging dir was reclaimed"
+
+
+def test_live_generation_survives_on_its_heartbeat_alone(tmp_path):
+    """A fresh heartbeat keeps a staging dir whose whole tree looks ancient.
+
+    The mtime probe is bounded, so a generation writing deeper than it looks
+    (or on a filesystem with coarse directory mtimes) still has to be safe. The
+    heartbeat is the signal that does not depend on the shape of the tree.
+    """
+    base = tmp_path / "cid"
+    base.mkdir(parents=True)
+
+    live = base / f"{gd.TMP_PREFIX}20260101-000000_333_f00d"
+    (live / "volumes" / "training" / "deep" / "deeper").mkdir(parents=True)
+    heartbeat = live / volumegen.STAGING_HEARTBEAT_NAME
+    heartbeat.write_text("")
+    _age_tree(live, 2 * gd.STALE_STAGING_AGE_SECONDS)
+    now = time.time()
+    os.utime(heartbeat, (now, now))
+
+    _cleanup(base, "test_live_generation_survives_on_its_heartbeat_alone")
+
+    assert live.exists(), "a heartbeating generation's staging dir was reclaimed"
+
+
+def test_dead_staging_dir_with_stale_heartbeat_is_reclaimed(tmp_path):
+    """The heartbeat must not stop orphaned staging dirs being reclaimed."""
+    base = tmp_path / "cid"
+    base.mkdir(parents=True)
+
+    orphan = base / f"{gd.TMP_PREFIX}20200101-000000_111_deadbeef"
+    split = orphan / "volumes" / "training"
+    split.mkdir(parents=True)
+    (split / "0.npy").write_bytes(b"stale payload")
+    (orphan / volumegen.STAGING_HEARTBEAT_NAME).write_text("")
+    _age_tree(orphan, 2 * gd.STALE_STAGING_AGE_SECONDS)
+
+    _cleanup(base, "test_dead_staging_dir_with_stale_heartbeat_is_reclaimed")
+
+    assert not orphan.exists(), "an orphaned staging dir was not reclaimed"
+
+
+def test_generation_writes_and_then_drops_the_heartbeat(tmp_path, monkeypatch):
+    """volumegen marks the staging dir live; publishing removes the marker."""
+    config = _reuse_config(tmp_path / "datasets")
+    comm = FakeComm(rank=0, size=1, allreduce_result=1)
+    monkeypatch.setattr(gd, "MPI", FakeMPI(comm))
+    monkeypatch.setattr(gd, "_git_commit_short", lambda log: "abc123")
+
+    beating = {}
+
+    def fake_volumegen(cfg):
+        # Stand in for the write loop: report the staging dir as live.
+        volumegen.StagingHeartbeat(cfg.dataset_dir).beat()
+        beating["path"] = Path(cfg.dataset_dir) / volumegen.STAGING_HEARTBEAT_NAME
+        beating["existed_during_generation"] = beating["path"].exists()
+
+    monkeypatch.setattr(volumegen, "main", fake_volumegen)
+
+    published = Path(gd.get_dataset(config))
+
+    assert beating["existed_during_generation"], "no heartbeat during generation"
+    assert not (published / volumegen.STAGING_HEARTBEAT_NAME).exists(), (
+        "the staging heartbeat was published with the dataset"
+    )
+
+
+def test_heartbeat_respects_its_interval(tmp_path):
+    """``beat`` is a no-op until the interval elapses, then refreshes."""
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    heartbeat = volumegen.StagingHeartbeat(staging, interval=60)
+
+    assert heartbeat.beat(now=1000.0) is True
+    first = Path(heartbeat.path).stat().st_mtime
+    assert heartbeat.beat(now=1030.0) is False  # inside the interval
+    assert Path(heartbeat.path).stat().st_mtime == first
+    assert heartbeat.beat(now=1090.0) is True
+    assert Path(heartbeat.path).stat().st_mtime > first
+
+
+# ---------------------------------------------------------------------------
+# meta.yaml is published atomically, so no reader ever sees a partial one.
+# ---------------------------------------------------------------------------
+
+
+def test_meta_write_is_atomic(tmp_path, monkeypatch):
+    """An interrupted meta write leaves the previous file intact and no temp.
+
+    ``meta.yaml`` is the file that decides how every sample is interpreted (a
+    truncated one reclassifies the dataset as legacy v1), so it must appear at
+    its final name complete or not at all.
+    """
+    target = tmp_path / gd.META_FILENAME
+    gd._write_meta_atomic(target, {"dataset_format_version": gd.DATASET_FORMAT_VERSION})
+    good_bytes = target.read_bytes()
+
+    # Interrupt the write after bytes have reached the temp file but before the
+    # rename -- the shape of a kill mid-write.
+    def boom(_fd):
+        raise OSError("simulated SIGKILL mid-write")
+
+    monkeypatch.setattr(gd.os, "fsync", boom)
+
+    with pytest.raises(OSError):
+        gd._write_meta_atomic(target, {"dataset_format_version": 99})
+
+    # The final name still holds the complete previous file, byte-for-byte, and
+    # no temp file is left behind for the reuse scan to trip over.
+    assert target.read_bytes() == good_bytes
+    assert [p.name for p in tmp_path.iterdir()] == [gd.META_FILENAME]
+
+
+def test_published_dataset_has_no_partial_meta(tmp_path, monkeypatch):
+    """A successful generation publishes a parseable meta and no temp files."""
+    config = _reuse_config(tmp_path / "datasets")
+    comm = FakeComm(rank=0, size=1, allreduce_result=1)
+    monkeypatch.setattr(gd, "MPI", FakeMPI(comm))
+    monkeypatch.setattr(gd, "_git_commit_short", lambda log: "abc123")
+    monkeypatch.setattr(volumegen, "main", lambda _config: None)
+
+    result = Path(gd.get_dataset(config))
+
+    meta = yaml.safe_load((result / gd.META_FILENAME).read_text())
+    assert meta["dataset_format_version"] == gd.DATASET_FORMAT_VERSION
+    # Nothing hidden alongside it (a temp meta would be a dotted sibling).
+    assert [p.name for p in result.iterdir() if p.name.startswith(".")] == []
+
+
+# ---------------------------------------------------------------------------
 # A missing instance file raises FileNotFoundError (a catchable Exception)
 # rather than calling sys.exit(1) (a BaseException that bypasses consensus), and
 # volumegen's generation loop catches worker failures locally so it reaches the
@@ -370,15 +849,10 @@ def _seed_one_instance(fract_base: Path, config: Namespace, *, present: bool) ->
 
     volumegen selects instance indices with ``random.sample(range(145), ...)``
     seeded by ``config.seed``; to be robust we populate every one of the 145
-    instance slots for category 0 when ``present`` is True.
+    instance slots for category 0 when ``present`` is True. The library path is
+    seed-keyed, so it is derived from the same config the run under test uses.
     """
-    inst_dir = (
-        fract_base
-        / f"var{config.variance_threshold}"
-        / "instances"
-        / f"np{config.point_num}"
-        / "000000"
-    )
+    inst_dir = Path(layout.instance_dir(config)) / "000000"
     inst_dir.mkdir(parents=True, exist_ok=True)
     if present:
         rng = np.random.default_rng(0)
@@ -489,7 +963,7 @@ def _instance_config(fract_base: Path) -> Namespace:
 
 def _seed_ifs_params(fract_base: Path, config: Namespace, n_categories: int) -> None:
     """Write a contractive IFS param CSV per category so generation stays fast."""
-    param_dir = fract_base / f"var{config.variance_threshold}" / "3DIFS_param"
+    param_dir = Path(layout.category_param_dir(config))
     param_dir.mkdir(parents=True, exist_ok=True)
     params = np.zeros((2, 13), dtype=np.float64)
     params[:, 0] = params[:, 4] = params[:, 8] = 0.5
@@ -555,14 +1029,7 @@ def test_instance_non_root_uses_broadcast_list_not_local_glob(tmp_path, monkeypa
     assert rc == 0
 
     # Rank 1 received the broadcast list and generated its share (pair [1, 0]).
-    generated = (
-        fract_base
-        / f"var{config.variance_threshold}"
-        / "instances"
-        / f"np{config.point_num}"
-        / "000001"
-        / "000001_0000.npy"
-    )
+    generated = Path(layout.instance_dir(config)) / "000001" / "000001_0000.npy"
     assert generated.exists()
 
 

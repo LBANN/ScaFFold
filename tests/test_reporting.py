@@ -13,11 +13,13 @@
 # SPDX-License-Identifier: (Apache-2.0)
 
 import csv
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 
 import matplotlib
 import numpy as np
+import pytest
 
 matplotlib.use("Agg")
 
@@ -28,7 +30,7 @@ from ScaFFold.viz import standard_viz
 
 
 class TestFiguresDir:
-    """F45: standard_viz.main() creates figures_path with idempotence."""
+    """standard_viz.main() creates figures_path with idempotence."""
 
     def test_figures_dir_idempotent(self, tmp_path):
         """Generate figures twice into same run_dir; second call should succeed."""
@@ -55,8 +57,52 @@ class TestFiguresDir:
         assert (run_dir / "figures" / "train_loss.png").exists()
 
 
+class TestFigureLifetime:
+    """standard_viz closes every figure it opens.
+
+    ``worker.main`` calls ``standard_viz.main`` in-process once per sweep
+    combination, and pyplot keeps a strong reference to every unclosed figure,
+    so the canvases (and their Figure/Axes/Line objects) accumulate for the
+    whole sweep -- 36 live figures / 42 MiB after 12 combinations, plus
+    matplotlib's max_open_warning from the seventh on.
+    """
+
+    def _config(self, tmp_path, name):
+        run_dir = tmp_path / name
+        run_dir.mkdir()
+        (run_dir / "train_stats.csv").write_text(
+            "epoch,overall_loss,val_dice,val_loss_avg\n1,0.9,0.40,0.8\n2,0.5,0.70,0.4\n"
+        )
+        return SimpleNamespace(
+            run_dir=str(run_dir), vol_size=32, n_categories=5, unet_layers=2
+        )
+
+    def test_no_figures_left_open(self, tmp_path):
+        """Repeated calls (a sweep) leave no figure behind."""
+        plt.close("all")
+        for i in range(3):
+            standard_viz.main(self._config(tmp_path, f"run{i}"))
+            assert plt.get_fignums() == [], f"figures leaked after call {i}"
+
+    def test_no_figures_left_open_when_plotting_fails(self, tmp_path, monkeypatch):
+        """A failure between figure() and savefig() does not strand a figure.
+
+        ``main`` logs and swallows plotting errors, so without an unconditional
+        close the leak survives exactly the case it is hardest to notice.
+        """
+        plt.close("all")
+
+        def boom(*args, **kwargs):
+            raise OSError("[Errno 28] No space left on device")
+
+        monkeypatch.setattr(plt, "savefig", boom)
+        standard_viz.main(self._config(tmp_path, "failing_run"))
+
+        assert plt.get_fignums() == []
+
+
 class TestDiceFigure:
-    """F70: Validation Dice figure saved as val_dice.png, not val_loss.png."""
+    """Validation Dice figure saved as val_dice.png, not val_loss.png."""
 
     def test_dice_figure_filename(self, tmp_path):
         """Save Dice figure as val_dice.png; val_loss.png (if present) contains loss series."""
@@ -133,7 +179,7 @@ class TestDiceFigure:
 
 
 class TestMaskPanelLabels:
-    """F69: plot_img_and_mask labels panels with correct class index, not off-by-one."""
+    """plot_img_and_mask labels panels with correct class index, not off-by-one."""
 
     def test_mask_panel_labels(self):
         """Render a 3-class mask; check that each panel title matches the class shown."""
@@ -168,7 +214,7 @@ class TestMaskPanelLabels:
 
 
 class TestVisualizerVolume:
-    """F65: data_visualizer renders 4D channels-first volumes from volumegen."""
+    """data_visualizer renders 4D channels-first volumes from volumegen."""
 
     def test_visualizer_accepts_4d_volume(self, tmp_path):
         """4D float volume (3, N, N, N) renders without exception."""
@@ -222,7 +268,7 @@ class TestVisualizerVolume:
 
 
 class TestTorchProfiler:
-    """F68: Torch profiler enabled independently of Caliper even when CALI_CONFIG set."""
+    """Torch profiler enabled independently of Caliper even when CALI_CONFIG set."""
 
     def test_torch_profiler_independent_of_caliper(self, monkeypatch):
         """Both profilers come up together when both are requested.
@@ -268,5 +314,276 @@ class TestTorchProfiler:
                 assert perf_measure.TORCH_PERF_ENABLED, (
                     "torch profiler must enable independently of Caliper"
                 )
+        finally:
+            importlib.reload(perf_measure)
+
+
+class TestProfilerTraceExport:
+    """A failed trace export must not strand the other ranks."""
+
+    @staticmethod
+    def _unstepped_profiler():
+        """A profiler whose window never opened (a run with zero batches)."""
+        from torch.profiler import ProfilerActivity, profile, schedule
+
+        prof = profile(
+            activities=[ProfilerActivity.CPU],
+            schedule=schedule(wait=1, warmup=1, active=3, repeat=1),
+        )
+        with prof:
+            pass  # no prof.step(): the schedule never leaves its wait phase
+        return prof
+
+    @staticmethod
+    def _stepped_profiler():
+        """A profiler with a completed capture window."""
+        from torch.profiler import ProfilerActivity, profile, schedule
+
+        prof = profile(
+            activities=[ProfilerActivity.CPU],
+            schedule=schedule(wait=1, warmup=1, active=1, repeat=1),
+        )
+        with prof:
+            for _ in range(4):
+                prof.step()
+        return prof
+
+    @staticmethod
+    def _config(run_dir):
+        return SimpleNamespace(
+            problem_scale=4,
+            epochs=1,
+            n_instances_used_per_fractal=2,
+            run_dir=str(run_dir),
+        )
+
+    def test_zero_step_export_is_reported_not_raised(self, tmp_path, caplog):
+        """Exporting an unstepped profiler logs an error instead of raising.
+
+        The export runs before the ``dist.barrier()`` that precedes rank-0
+        post-processing, so a raise here kills the profiling rank and leaves
+        every other rank blocked in that barrier until the collective timeout.
+        """
+        import ScaFFold.worker as worker
+
+        log = logging.getLogger("test_zero_step_export")
+        with caplog.at_level(logging.DEBUG, logger=log.name):
+            result = worker.export_profiler_trace(
+                self._unstepped_profiler(),
+                self._config(tmp_path),
+                log,
+                rank=0,
+                world_size=1,
+                ranks_per_node=1,
+            )
+
+        assert result is None
+        messages = " ".join(record.getMessage() for record in caplog.records)
+        assert "trace" in messages.lower()
+
+    def test_successful_export_writes_a_trace(self, tmp_path, caplog):
+        """A profiler with a completed window still writes its trace (control)."""
+        from torch.profiler import ProfilerActivity, profile, schedule
+
+        import ScaFFold.worker as worker
+
+        prof = profile(
+            activities=[ProfilerActivity.CPU],
+            schedule=schedule(wait=1, warmup=1, active=1, repeat=1),
+        )
+        with prof:
+            for _ in range(4):
+                prof.step()
+
+        log = logging.getLogger("test_successful_export")
+        path = worker.export_profiler_trace(
+            prof, self._config(tmp_path), log, rank=0, world_size=1, ranks_per_node=1
+        )
+
+        assert path is not None
+        assert Path(path).exists()
+
+    def test_trace_lands_in_the_run_dir(self, tmp_path, caplog):
+        """The trace goes to the run dir, not whatever CWD happens to be."""
+        import ScaFFold.worker as worker
+
+        prof = self._stepped_profiler()
+        log = logging.getLogger("test_trace_lands_in_the_run_dir")
+
+        path = worker.export_profiler_trace(
+            prof, self._config(tmp_path), log, rank=0, world_size=1, ranks_per_node=1
+        )
+
+        assert Path(path).parent == tmp_path
+        assert list(tmp_path.glob("torch-*.json")) == [Path(path)]
+
+    @pytest.mark.parametrize(
+        "world_size, ranks_per_node, expected",
+        [(8, 4, "-N2-n8-"), (6, 4, "-N2-n6-"), (1, 1, "-N1-n1-")],
+        ids=["even", "ragged-last-node", "singleton"],
+    )
+    def test_trace_name_counts_nodes_not_ranks(
+        self, tmp_path, world_size, ranks_per_node, expected
+    ):
+        """The N field is a node count, and never rounds a node away."""
+        import ScaFFold.worker as worker
+
+        prof = self._stepped_profiler()
+        log = logging.getLogger("test_trace_name_counts_nodes")
+
+        path = worker.export_profiler_trace(
+            prof,
+            self._config(tmp_path),
+            log,
+            rank=0,
+            world_size=world_size,
+            ranks_per_node=ranks_per_node,
+        )
+
+        assert expected in Path(path).name
+
+
+class TestProfileTorchGate:
+    """PROFILE_TORCH is parsed like every other profiler flag."""
+
+    @staticmethod
+    def _reload_with(monkeypatch_context, value):
+        import importlib
+
+        import ScaFFold.utils.perf_measure as perf_measure
+
+        if value is None:
+            monkeypatch_context.delenv("PROFILE_TORCH", raising=False)
+        else:
+            monkeypatch_context.setenv("PROFILE_TORCH", value)
+        monkeypatch_context.delenv("CALI_CONFIG", raising=False)
+        importlib.reload(perf_measure)
+        return perf_measure
+
+    @pytest.mark.parametrize("value", [None, "", "0", "false", "no", "off", "OFF"])
+    def test_disabled_values(self, monkeypatch, value):
+        """Anything that is not an affirmative value leaves profiling off.
+
+        ``PROFILE_TORCH=0`` used to *enable* the profiler: the gate only
+        rejected the literal "off", so every conventional way of saying "no"
+        silently turned profiling on.
+        """
+        import importlib
+
+        import ScaFFold.utils.perf_measure as perf_measure
+
+        try:
+            with monkeypatch.context() as m:
+                assert not self._reload_with(m, value).TORCH_PERF_ENABLED
+        finally:
+            importlib.reload(perf_measure)
+
+    @pytest.mark.parametrize("value", ["1", "true", "on", "ON", "yes", "TRUE"])
+    def test_enabled_values(self, monkeypatch, value):
+        """The affirmative spellings still enable the profiler."""
+        import importlib
+
+        import ScaFFold.utils.perf_measure as perf_measure
+
+        try:
+            with monkeypatch.context() as m:
+                assert self._reload_with(m, value).TORCH_PERF_ENABLED
+        finally:
+            importlib.reload(perf_measure)
+
+    def test_gate_matches_the_sub_option_parser(self, monkeypatch):
+        """The master switch and the sub-option flags agree on every spelling."""
+        import importlib
+
+        import ScaFFold.utils.perf_measure as perf_measure
+
+        try:
+            for value in ("1", "true", "on", "yes", "0", "false", "no", "off", ""):
+                with monkeypatch.context() as m:
+                    module = self._reload_with(m, value)
+                    assert module.TORCH_PERF_ENABLED == module._profiler_env_flag(
+                        "PROFILE_TORCH"
+                    ), value
+        finally:
+            importlib.reload(perf_measure)
+
+
+class TestProfilerSchedule:
+    """The schedule must not record everything before the first step."""
+
+    @staticmethod
+    def _context_with(monkeypatch_context, env):
+        """Reload perf_measure with ``env`` applied and build a profiler context."""
+        import importlib
+
+        import ScaFFold.utils.perf_measure as perf_measure
+
+        monkeypatch_context.setenv("PROFILE_TORCH", "1")
+        monkeypatch_context.delenv("CALI_CONFIG", raising=False)
+        for name in ("PROFILE_TORCH_WAIT", "PROFILE_TORCH_WARMUP"):
+            monkeypatch_context.delenv(name, raising=False)
+        for key, value in env.items():
+            monkeypatch_context.setenv(key, value)
+        importlib.reload(perf_measure)
+        assert perf_measure.TORCH_PERF_ENABLED
+        ctx, is_local = perf_measure.get_torch_context(1, 0)
+        assert is_local
+        return ctx
+
+    def test_wait_zero_does_not_record_step_zero(self, monkeypatch, caplog):
+        """PROFILE_TORCH_WAIT=0 is clamped so step 0 records nothing.
+
+        worker.main enters the profiler context around checkpoint cleanup and
+        every warmup batch, and ``prof.step()`` only advances once per training
+        batch -- so a schedule that is already active at step 0 buffers all of
+        that as a single unbounded step, which is exactly what the bounded
+        window exists to prevent.
+        """
+        import importlib
+
+        from torch.profiler import ProfilerAction
+
+        import ScaFFold.utils.perf_measure as perf_measure
+
+        try:
+            with caplog.at_level(logging.WARNING, logger=perf_measure.logger.name):
+                with monkeypatch.context() as m:
+                    ctx = self._context_with(m, {"PROFILE_TORCH_WAIT": "0"})
+                    assert ctx.schedule(0) == ProfilerAction.NONE
+            messages = " ".join(record.getMessage() for record in caplog.records)
+            assert "PROFILE_TORCH_WAIT" in messages
+        finally:
+            importlib.reload(perf_measure)
+
+    def test_default_schedule_skips_step_zero(self, monkeypatch):
+        """The default window already skips step 0 (control)."""
+        import importlib
+
+        from torch.profiler import ProfilerAction
+
+        import ScaFFold.utils.perf_measure as perf_measure
+
+        try:
+            with monkeypatch.context() as m:
+                ctx = self._context_with(m, {})
+                assert ctx.schedule(0) == ProfilerAction.NONE
+        finally:
+            importlib.reload(perf_measure)
+
+    def test_larger_wait_is_preserved(self, monkeypatch):
+        """A wait longer than the minimum is left alone."""
+        import importlib
+
+        from torch.profiler import ProfilerAction
+
+        import ScaFFold.utils.perf_measure as perf_measure
+
+        try:
+            with monkeypatch.context() as m:
+                ctx = self._context_with(
+                    m, {"PROFILE_TORCH_WAIT": "3", "PROFILE_TORCH_WARMUP": "1"}
+                )
+                assert ctx.schedule(2) == ProfilerAction.NONE
+                assert ctx.schedule(3) == ProfilerAction.WARMUP
         finally:
             importlib.reload(perf_measure)

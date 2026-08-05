@@ -28,6 +28,7 @@ from pathlib import Path
 import numpy as np
 from mpi4py import MPI
 
+from ScaFFold.datagen import layout
 from ScaFFold.datagen.generate_fractal_points import generate_fractal_points
 from ScaFFold.datagen.rng import derive_seed, seed_numba
 from ScaFFold.utils.config_utils import Config
@@ -239,12 +240,12 @@ def main(config: Config):
 
     log.info("MPI size = %s", size)
 
-    # Setup directories
-    fracts_sub_dir = f"var{config.variance_threshold}"
-    fracts_read_dir = os.path.join(config.fract_base_dir, fracts_sub_dir, "3DIFS_param")
-    instance_write_dir = os.path.join(
-        config.fract_base_dir, fracts_sub_dir, "instances", f"np{config.point_num}"
-    )
+    # Setup directories. The library is keyed by seed (see
+    # ScaFFold.datagen.layout): every instance is generated from
+    # (seed, category, instance), so resuming onto another seed's files would
+    # silently mix data from two different seeds into one dataset.
+    fracts_read_dir = layout.category_param_dir(config)
+    instance_write_dir = layout.instance_dir(config)
     if rank == 0:
         log.info(
             "Generating instances for num_points=%s, writing to %s",
@@ -345,14 +346,27 @@ def main(config: Config):
 
     start_time = time.time()
 
+    # One-entry cache of the most recently parsed category CSV. The work list
+    # is built category-major and block-sliced, so every rank's items for a
+    # given category are contiguous: a single entry is enough to turn the
+    # per-item re-parse -- one redundant read of the same small file off the
+    # shared filesystem for every instance generated in the category -- into
+    # one parse per category per rank.
+    # ``generate_instance_points`` copies before scaling, so sharing the parsed
+    # array across instances cannot leak weights from one item into the next.
+    cached_category = None
+    params = None
+
     for i, category_instance_pair in enumerate(instances_to_generate_for_this_rank):
         category, instance = category_instance_pair
-        category_IFS_params = IFS_param_csv_names[category]
-        params = np.genfromtxt(
-            f"{fracts_read_dir}/{category_IFS_params}",
-            dtype=DEFAULT_NP_DTYPE,
-            delimiter=",",
-        )
+        if category != cached_category:
+            category_IFS_params = IFS_param_csv_names[category]
+            params = np.genfromtxt(
+                f"{fracts_read_dir}/{category_IFS_params}",
+                dtype=DEFAULT_NP_DTYPE,
+                delimiter=",",
+            )
+            cached_category = category
         weights = weights_all[instance]
 
         # Generate a validated, weighted point cloud. Weighting can turn a

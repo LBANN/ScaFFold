@@ -12,7 +12,7 @@
 #
 # SPDX-License-Identifier: (Apache-2.0)
 
-"""Tests for config loading/validation, override merging, and benchmark sweeps."""
+"""Tests for config loading/validation, override merging, and the benchmark driver."""
 
 from pathlib import Path
 
@@ -87,7 +87,7 @@ def test_unknown_key_warns_when_not_strict(capsys):
 )
 def test_documented_keys_accepted(config_path):
     """Every shipped config file loads cleanly under strict validation."""
-    config_utils.load_config(str(config_path), "sweep")
+    config_utils.load_config(str(config_path), "benchmark")
 
 
 def test_invalid_type_message_names_type(tmp_path):
@@ -96,6 +96,39 @@ def test_invalid_type_message_names_type(tmp_path):
     path.write_text(yaml.dump(BASE))
     with pytest.raises(ValueError, match="bogus"):
         config_utils.load_config(str(path), "bogus")
+
+
+def test_activation_checkpointing_is_a_real_option():
+    """Activation checkpointing is reachable from a config, defaulting off.
+
+    The U-Net has always had ``use_checkpointing``, but with no config key and
+    no caller it could not be turned on: any attempt was rejected as an unknown
+    key.
+    """
+    cfg = config_utils.Config(dict(BASE))
+    assert cfg.activation_checkpointing is False
+    assert (
+        config_utils.Config({**BASE, "activation_checkpointing": 1})
+    ).activation_checkpointing is True
+    assert (
+        config_utils.Config({**BASE, "activation_checkpointing": True})
+    ).activation_checkpointing is True
+    assert (
+        config_utils.Config({**BASE, "activation_checkpointing": 0})
+    ).activation_checkpointing is False
+
+
+@pytest.mark.parametrize("value", [2, -1, "yes", 0.0])
+def test_activation_checkpointing_rejects_non_flag_values(value):
+    """Anything that is not a 0/1 (or bool) toggle is rejected by name."""
+    with pytest.raises(ValueError, match="activation_checkpointing"):
+        config_utils.Config({**BASE, "activation_checkpointing": value})
+
+
+def test_activation_checkpointing_documented_in_the_default_config():
+    """The shipped config is the parameter reference, so the key lives there."""
+    text = (CONFIG_DIR / "benchmark_default.yml").read_text()
+    assert "activation_checkpointing:" in text
 
 
 def test_async_save_is_real_option():
@@ -167,11 +200,11 @@ def test_config_yaml_roundtrip(tmp_path):
         }
     )
     path = _write_yaml(tmp_path / "config.yaml", combined)
-    config_utils.load_config(path, "sweep")  # must not raise
+    config_utils.load_config(path, "benchmark")  # must not raise
 
 
 # ---------------------------------------------------------------------------
-# Benchmark parameter sweeps
+# Single-run benchmark driver; list-valued (sweep) params are rejected
 # ---------------------------------------------------------------------------
 
 
@@ -203,31 +236,168 @@ def _run_benchmark(monkeypatch, tmp_path, config_updates):
     return calls
 
 
-def test_sweep_cross_product(monkeypatch, tmp_path):
-    """List-valued sweep params produce one scalarized run per combination."""
-    calls = _run_benchmark(
-        monkeypatch,
-        tmp_path,
-        {"local_batch_size": [1, 2], "starting_learning_rate": [0.1, 0.2]},
-    )
-    assert len(calls) == 4
-    combos = sorted((c["local_batch_size"], c["starting_learning_rate"]) for c in calls)
-    assert combos == [(1, 0.1), (1, 0.2), (2, 0.1), (2, 0.2)]
-    # Every run received scalars and its own run directory.
-    run_dirs = {c["run_dir"] for c in calls}
-    assert len(run_dirs) == 4
-
-
-def test_scalar_config_single_run(monkeypatch, tmp_path):
-    """An all-scalar config runs the worker exactly once."""
+def test_benchmark_runs_worker_once(monkeypatch, tmp_path):
+    """One benchmark invocation runs the worker exactly once, in the run dir."""
     calls = _run_benchmark(monkeypatch, tmp_path, {})
     assert len(calls) == 1
     assert calls[0]["local_batch_size"] == BASE["local_batch_size"]
+    # The run uses the benchmark run dir directly: no per-combination subdirs.
+    run_root = tmp_path / "run"
+    assert calls[0]["run_dir"] == str(run_root)
+    assert list(run_root.glob("param_set_*")) == []
 
 
-def test_list_in_scalar_field_fails_fast():
-    """A list reaching a scalar Config field raises naming the key."""
+def test_no_sweep_expansion_helper():
+    """The sweep-expansion entry point is gone from the benchmark driver."""
+    import ScaFFold.benchmark as benchmark_mod
+
+    assert not hasattr(benchmark_mod, "expand_sweep_combinations")
+
+
+@pytest.mark.parametrize(
+    "key, value",
+    [
+        ("problem_scale", [6, 7]),
+        ("unet_bottleneck_dim", [3, 4]),
+        ("n_categories", [5, 10]),
+        ("local_batch_size", [1, 2]),
+    ],
+)
+def test_list_valued_scalar_key_rejected(key, value):
+    """A list value for a scalar key is rejected by name, not by a stray TypeError."""
     bad = dict(BASE)
-    bad["local_batch_size"] = [1, 2]
-    with pytest.raises(ValueError, match="local_batch_size"):
+    bad[key] = value
+    with pytest.raises(ValueError) as excinfo:
         config_utils.Config(bad)
+    message = str(excinfo.value)
+    assert key in message
+    assert "parameter sweeps are no longer supported" in message.lower()
+    assert str(value) in message
+
+
+def test_list_valued_key_rejected_by_load_config(tmp_path):
+    """The benchmark config load path rejects sweeps with the same clear error."""
+    path = _write_yaml(tmp_path / "sweepy.yml", {**BASE, "problem_scale": [6, 7]})
+    with pytest.raises(ValueError) as excinfo:
+        config_utils.load_config(path, "benchmark")
+    message = str(excinfo.value)
+    assert "problem_scale" in message
+    assert "parameter sweeps are no longer supported" in message.lower()
+
+
+def test_all_list_valued_keys_named():
+    """Every offending key is named in one error, not just the first one hit."""
+    bad = {**BASE, "problem_scale": [6, 7], "local_batch_size": [1, 2]}
+    with pytest.raises(ValueError) as excinfo:
+        config_utils.Config(bad)
+    message = str(excinfo.value)
+    assert "problem_scale" in message
+    assert "local_batch_size" in message
+
+
+def test_list_valued_key_rejected_in_run_config(tmp_path):
+    """A list reaching the worker's RunConfig is rejected before any setup."""
+    bad = {
+        **BASE,
+        "local_batch_size": [1, 2],
+        "run_dir": str(tmp_path),
+        "run_iter": str(tmp_path / "run"),
+    }
+    with pytest.raises(ValueError, match="local_batch_size"):
+        config_utils.RunConfig(bad)
+
+
+# ---------------------------------------------------------------------------
+# The base config is preserved under a name of its own
+# ---------------------------------------------------------------------------
+
+
+def _run_benchmark_with_base(monkeypatch, tmp_path, base_name):
+    """Run the driver with a base config named ``base_name``; return the run dir.
+
+    The run dir starts out holding the merged ``config.yaml`` the CLI writes,
+    so the test can tell whether the copy of the base config overwrote it.
+    """
+    import ScaFFold.benchmark as benchmark_mod
+    import ScaFFold.worker as worker_mod
+
+    monkeypatch.setattr(worker_mod, "main", lambda kwargs_dict={}: None)
+    monkeypatch.setattr(benchmark_mod.worker, "main", worker_mod.main)
+
+    base = _write_yaml(tmp_path / base_name, BASE)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    merged = {**BASE, "local_batch_size": 2, "machine_name": "some-host"}
+    _write_yaml(run_dir / "config.yaml", merged)
+
+    kwargs = {
+        **merged,
+        "command": "benchmark",
+        "restart": False,
+        "verbose": 0,
+        "config": base,
+        "benchmark_run_dir": str(run_dir),
+    }
+    benchmark_mod.main(kwargs_dict=kwargs)
+    return run_dir
+
+
+@pytest.mark.parametrize("base_name", ["config.yaml", "base.yml"])
+def test_base_config_copy_never_clobbers_merged_config(
+    monkeypatch, tmp_path, base_name
+):
+    """The merged config.yaml survives even when the base file has that name.
+
+    Copying the base config into the run dir under its own name silently
+    overwrote the merged dump -- losing the CLI overrides, machine name and
+    scheduler metadata -- and, since restart.sh points -c at
+    ``$RUN_DIR/config.yaml``, a restart then reloaded the raw base config.
+    """
+    run_dir = _run_benchmark_with_base(monkeypatch, tmp_path, base_name)
+
+    merged = yaml.safe_load((run_dir / "config.yaml").read_text())
+    assert merged["local_batch_size"] == 2
+    assert merged["machine_name"] == "some-host"
+
+    preserved = yaml.safe_load((run_dir / "base_config.yaml").read_text())
+    assert preserved["local_batch_size"] == BASE["local_batch_size"]
+    assert "machine_name" not in preserved
+
+
+# ---------------------------------------------------------------------------
+# unet_bottleneck_dim range
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "problem_scale, bottleneck",
+    [(5, -1), (5, 5), (5, 6)],
+    ids=["negative", "zero-layers", "negative-layers"],
+)
+def test_bottleneck_out_of_range_rejected(problem_scale, bottleneck):
+    """An out-of-range bottleneck fails at config time, naming both keys.
+
+    Left unvalidated it produced a U-Net with more pooling levels than the
+    volume has, and the run died hours later inside max_pool3d with "Given
+    input size: (2048x1x1x1)" -- naming no config key at all.
+    """
+    bad = {**BASE, "problem_scale": problem_scale, "unet_bottleneck_dim": bottleneck}
+
+    with pytest.raises(ValueError) as excinfo:
+        config_utils.Config(bad)
+
+    message = str(excinfo.value)
+    assert "unet_bottleneck_dim" in message
+    assert "problem_scale" in message
+    assert str(bottleneck) in message
+    assert str(problem_scale) in message
+
+
+@pytest.mark.parametrize("bottleneck", [0, 3, 4])
+def test_bottleneck_in_range_accepted(bottleneck):
+    """The full valid range (at least one U-Net layer) is accepted."""
+    cfg = config_utils.Config(
+        {**BASE, "problem_scale": 5, "unet_bottleneck_dim": bottleneck}
+    )
+    assert cfg.unet_layers == 5 - bottleneck
+    assert cfg.unet_layers >= 1

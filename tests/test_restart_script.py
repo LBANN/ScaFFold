@@ -25,6 +25,7 @@ generating-process sniffing sees exactly the intended state.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -45,8 +46,10 @@ _LAUNCHER_ENV_VARS = (
     "SLURM_JOB_NUM_NODES",
     "SLURM_NNODES",
     "WORLD_SIZE",
+    "MV2_COMM_WORLD_SIZE",
     "OMPI_COMM_WORLD_SIZE",
     "PMI_SIZE",
+    "PALS_NRANKS",
 )
 
 # Profiling variables re-exported only when set in the generating run.
@@ -182,3 +185,171 @@ def test_generated_script_is_valid_bash(monkeypatch, tmp_path):
         assert result.returncode == 0, (
             f"bash -n failed for variant {i}:\n{result.stderr}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Combined ``--flag=value`` tokens
+# ---------------------------------------------------------------------------
+
+
+def test_config_equals_form_is_substituted(monkeypatch, tmp_path):
+    """``--config=PATH`` is repointed at the run dir, not left as a placeholder.
+
+    The rewriter emits the placeholder as part of a combined token, so a
+    substitution that only matches whole tokens leaves ``--config=__CFG__`` in
+    the script and the restart dies with "Config file '__CFG__' not found".
+    """
+    _isolate_env(monkeypatch)
+    argv = [
+        "/usr/bin/scaffold",
+        "benchmark",
+        "--config=/some/where/config.yml",
+        "--epochs",
+        "10",
+    ]
+
+    script = _generate(monkeypatch, tmp_path / "run", argv=argv)
+
+    assert "__CFG__" not in script
+    assert '--config="$RUN_DIR/config.yaml"' in script
+    assert "/some/where/config.yml" not in script
+
+
+@pytest.mark.parametrize(
+    "config_argv",
+    [
+        ["-c", "/some/where/config.yml"],
+        ["--config", "/some/where/config.yml"],
+        ["--config=/some/where/config.yml"],
+    ],
+    ids=["short", "long-space", "long-equals"],
+)
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
+def test_every_config_spelling_expands_to_the_run_dir_config(
+    monkeypatch, tmp_path, config_argv
+):
+    """Bash expands every ``--config`` spelling to ``$RUN_DIR/config.yaml``.
+
+    The generated PY array is sourced and expanded by a real shell so the test
+    asserts on the arguments the restarted CLI actually receives.
+    """
+    _isolate_env(monkeypatch)
+    argv = ["/usr/bin/scaffold", "benchmark"] + config_argv
+
+    script = _generate(monkeypatch, tmp_path / "run", argv=argv)
+
+    py_decl = next(line for line in script.splitlines() if line.startswith("PY=("))
+    probe = tmp_path / f"probe_{config_argv[0][-1]}.sh"
+    probe.write_text(f'RUN_DIR=/run/dir\n{py_decl}\nprintf "%s\\n" "${{PY[@]}}"\n')
+    result = subprocess.run(
+        ["bash", str(probe)], capture_output=True, text=True, check=True
+    )
+
+    tokens = result.stdout.split("\n")
+    assert "/run/dir/config.yaml" in tokens or (
+        "--config=/run/dir/config.yaml" in tokens
+    )
+    assert not any("__CFG__" in tok for tok in tokens)
+
+
+def test_run_dir_placeholder_is_substituted(monkeypatch, tmp_path):
+    """The appended ``--run-dir`` placeholder still resolves (control)."""
+    _isolate_env(monkeypatch)
+
+    script = _generate(monkeypatch, tmp_path / "run")
+
+    assert "__RUN_DIR__" not in script
+    assert '--run-dir "$RUN_DIR"' in script
+
+
+# ---------------------------------------------------------------------------
+# Launch-shape sniffing must match the rank side
+# ---------------------------------------------------------------------------
+
+# Every variable ``ScaFFold.utils.distributed.get_world_size`` honors. The
+# restart generator must derive the same world size from each of them, or a
+# restart script silently relaunches the job at the wrong scale.
+_WORLD_SIZE_ENV_VARS = (
+    "WORLD_SIZE",
+    "MV2_COMM_WORLD_SIZE",
+    "OMPI_COMM_WORLD_SIZE",
+    "PMI_SIZE",
+    "PALS_NRANKS",
+    "SLURM_NTASKS",
+    "FLUX_JOB_SIZE",
+)
+
+
+@pytest.mark.parametrize("var", _WORLD_SIZE_ENV_VARS)
+def test_sniffed_world_size_matches_rank_side(monkeypatch, var):
+    """The generator and ``get_world_size`` agree on every launcher variable."""
+    from ScaFFold.utils.distributed import get_world_size
+
+    _isolate_env(monkeypatch)
+    for other in _WORLD_SIZE_ENV_VARS:
+        monkeypatch.delenv(other, raising=False)
+    monkeypatch.setenv(var, "8")
+
+    _, _, sniffed = crs._sniff_launch_shape(os.environ)
+
+    assert sniffed == 8, f"{var} not recognized by the restart generator"
+    assert sniffed == get_world_size()
+
+
+def test_pals_job_gets_a_multirank_restart_script(monkeypatch, tmp_path):
+    """A Cray PALS launch (PALS_NRANKS) emits the multi-rank template."""
+    _isolate_env(monkeypatch)
+    monkeypatch.setenv("PALS_NRANKS", "8")
+
+    script = _generate(monkeypatch, tmp_path / "run")
+
+    assert "torchrun-hpc" in script
+    assert 'exec "${PY[@]}"' not in script
+
+
+# ---------------------------------------------------------------------------
+# VC-5: the node shape comes from the local rank count when no scheduler
+# reports one. Flux and Slurm state their node count; PALS and plain torchrun
+# do not, and assuming one node relaunched an 8-rank/2-node job as
+# NODES=1 TASKS_PER_NODE=8 -- an oversubscribed node, or a rejected job.
+# ---------------------------------------------------------------------------
+
+
+def test_pals_multinode_shape_uses_the_local_rank_count(monkeypatch, tmp_path):
+    """8 PALS ranks, 4 per node -> NODES=2, TASKS_PER_NODE=4."""
+    _isolate_env(monkeypatch)
+    monkeypatch.delenv("PALS_LOCAL_SIZE", raising=False)
+    monkeypatch.delenv("LOCAL_WORLD_SIZE", raising=False)
+    monkeypatch.setenv("PALS_NRANKS", "8")
+    monkeypatch.setenv("PALS_LOCAL_SIZE", "4")
+
+    script = _generate(monkeypatch, tmp_path / "run")
+
+    assert 'NODES="2"' in script
+    assert 'TASKS_PER_NODE="4"' in script
+
+
+def test_single_node_torchrun_shape_is_unchanged(monkeypatch, tmp_path):
+    """8 torchrun ranks all on one node stay NODES=1, TASKS_PER_NODE=8."""
+    _isolate_env(monkeypatch)
+    monkeypatch.delenv("PALS_LOCAL_SIZE", raising=False)
+    monkeypatch.setenv("WORLD_SIZE", "8")
+    monkeypatch.setenv("LOCAL_WORLD_SIZE", "8")
+
+    script = _generate(monkeypatch, tmp_path / "run")
+
+    assert 'NODES="1"' in script
+    assert 'TASKS_PER_NODE="8"' in script
+
+
+def test_unknown_local_size_keeps_the_single_node_assumption(monkeypatch, tmp_path):
+    """With nothing reporting a per-node count, the old assumption stands."""
+    _isolate_env(monkeypatch)
+    for var in ("PALS_LOCAL_SIZE", "LOCAL_WORLD_SIZE", "PMI_LOCAL_SIZE"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("PALS_NRANKS", "8")
+
+    script = _generate(monkeypatch, tmp_path / "run")
+
+    assert 'NODES="1"' in script
+    assert 'TASKS_PER_NODE="8"' in script

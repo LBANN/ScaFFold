@@ -165,15 +165,35 @@ class BasicDataset(Dataset):
         customlog(f"Dataset format version: {self.dataset_format_version}")
 
         # Masks are handed off in a signed 16-bit carrier (widened to long on
-        # the compute device), so every class id must fit that range. Legacy
-        # masks are remapped to 0..len(mask_values)-1; optimized masks store
-        # dense ids that stay within the same bound.
-        max_class_id = len(self.mask_values) - 1
+        # the compute device), so the largest class id the carrier will hold
+        # must fit that range.
+        max_class_id = self._max_class_id()
         if max_class_id > np.iinfo(np.int16).max:
             raise ValueError(
-                f"{len(self.mask_values)} classes exceed the int16 mask carrier "
-                f"limit ({np.iinfo(np.int16).max})"
+                f"Mask class id {max_class_id} (from {len(self.mask_values)} "
+                f"classes) exceeds the int16 mask carrier limit "
+                f"({np.iinfo(np.int16).max}); it would wrap negative"
             )
+
+    def _max_class_id(self):
+        """Return the largest class id ``_to_mask_carrier`` will have to carry.
+
+        The bound differs by format, and using the wrong one is unsafe in one
+        direction and needlessly strict in the other. v2+ masks ship *raw*
+        ``category + 1`` ids, and the per-split table lists only the categories
+        present in that split -- so a sparse split can declare two classes while
+        holding an id in the tens of thousands, which the class *count* check
+        happily waved through. Legacy masks, by contrast, are remapped to
+        ``0..len(mask_values)-1``, so the count is exactly right there and their
+        (arbitrarily large) raw values are irrelevant.
+        """
+        if self.dataset_format_version < DATASET_FORMAT_VERSION:
+            return len(self.mask_values) - 1
+
+        ids = np.asarray(self.mask_values)
+        if ids.size == 0:
+            return 0
+        return int(ids.max())
 
     def _load_mask_values(self, data_dir):
         """Return the label-remap table for this split.
@@ -277,20 +297,41 @@ class BasicDataset(Dataset):
         return np.load(path, allow_pickle=False, mmap_mode=mmap_mode)
 
     def _load_dataset_format_version(self):
+        """Determine which on-disk layout this dataset uses.
+
+        Only a *missing* ``meta.yaml`` means legacy v1: those datasets predate
+        the metadata file. A metadata file that exists but cannot be read or
+        does not carry a usable version is a damaged modern dataset, and
+        falling back to the legacy loader there silently transposes
+        channels-first volumes and remaps already-dense labels -- corrupt
+        training data with no error. Such a dataset is rejected instead, with a
+        message naming the file so it can be repaired or regenerated.
+        """
         meta_path = self.dataset_root / META_FILENAME
         if not meta_path.exists():
             return LEGACY_DATASET_FORMAT_VERSION
 
         try:
             with open(meta_path, "r") as meta_file:
-                meta = yaml.safe_load(meta_file) or {}
+                meta = yaml.safe_load(meta_file)
         except Exception as exc:
-            customlog(
-                f"Failed to read dataset metadata from {meta_path}: {exc}. Falling back to legacy loader."
-            )
-            return LEGACY_DATASET_FORMAT_VERSION
+            raise ValueError(
+                f"Dataset metadata {meta_path} exists but could not be read "
+                f"({type(exc).__name__}: {exc}). A dataset carrying a "
+                f"{META_FILENAME} is not a legacy dataset; refusing to guess its "
+                "layout. Repair the file or regenerate the dataset."
+            ) from exc
 
-        return int(meta.get("dataset_format_version", LEGACY_DATASET_FORMAT_VERSION))
+        version = meta.get("dataset_format_version") if isinstance(meta, dict) else None
+        try:
+            return int(version)
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"Dataset metadata {meta_path} is missing a usable "
+                f"'dataset_format_version' (got {version!r}). A dataset carrying "
+                f"a {META_FILENAME} is not a legacy dataset; refusing to guess "
+                "its layout. Repair the file or regenerate the dataset."
+            ) from None
 
     @staticmethod
     def _prepare_legacy_image(img):

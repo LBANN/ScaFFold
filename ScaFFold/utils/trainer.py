@@ -117,6 +117,10 @@ class BaseTrainer:
         self.global_step = 0
         self.total_optimizer_steps = 0
         self.start_epoch = -1
+        # Validation dice already achieved by the epoch we resume from (0 for a
+        # fresh run). The training loop's exit condition is a threshold on this
+        # score, so it has to survive a restart: see cleanup_or_resume.
+        self.start_val_dice = 0.0
         self.ps = getattr(self.config, "_parallel_strategy", None)
         self.spatial_mesh = None  # Spatial mesh for use w/ DistConv
         self.data_num_replicas = self.world_size
@@ -387,6 +391,7 @@ class PyTorchTrainer(BaseTrainer):
                         pass
 
             self.start_epoch = 1
+            self.start_val_dice = 0.0
         else:
             # Load checkpoint via manager. An explicit restart must find a
             # checkpoint; a plain non-scratch launch may simply start fresh.
@@ -398,6 +403,16 @@ class PyTorchTrainer(BaseTrainer):
             restored = self.checkpoint_manager.restored_extras
             if "train_mask_values" in restored:
                 self.train_set.mask_values = restored["train_mask_values"]
+
+            # Resume the convergence state, not just the weights. The loop runs
+            # while the validation dice is below target_dice, so a run that had
+            # already converged must re-enter the loop with the score it
+            # achieved -- starting from 0 would unconditionally re-train (and
+            # re-log, and re-checkpoint) one full epoch before the condition is
+            # re-tested, inflating the epoch count and the FOM's total train
+            # time. Checkpoints written before this key existed simply fall
+            # back to 0, i.e. the old behaviour.
+            self.start_val_dice = restored.get("val_dice", 0.0)
 
             # Continue the optimizer-step counts from where the checkpoint
             # left off; otherwise a resumed run restarts them at 0 and
@@ -698,6 +713,79 @@ class PyTorchTrainer(BaseTrainer):
         minibatch_time_s = statistics.median(minibatch_times.cpu().tolist())
         return minibatch_time_s
 
+    def _warmup_ragged_batches(self, batch):
+        """Warm the narrower final batch each loader ends its epoch with.
+
+        Warmup runs only the *leading* batches of the train loader, which are
+        all ``local_batch_size`` wide, and neither loader drops its last batch.
+        So when a rank's sample count is not a multiple of the batch size, the
+        final batch of every epoch presents a set of convolution problems
+        nothing has ever run: with ``cudnn.benchmark`` on, its algorithm search
+        (MIOpen find) then happens inside the *first timed epoch* -- a one-off
+        stall measured at 95 s that lands in ``epoch_duration``, i.e. straight
+        in the FOM denominator, while staying invisible to the per-minibatch
+        timer (which excludes partial batches).
+
+        One extra iteration per distinct ragged size fixes that, cut from a
+        batch warmup already fetched so no additional I/O is needed. The
+        validation shapes are covered by the same (training) step: the forward
+        convolutions are what validation shares, and this runs inside warmup's
+        snapshot/restore envelope, so the extra step cannot affect training.
+        ``local_batch_size = 1`` never has a ragged batch and does no extra work.
+
+        The set of sizes is agreed across ranks first. The training shards are
+        padded to equal length, so their remainder is already identical
+        everywhere, but validation is sharded *unpadded* on purpose (F-series:
+        an unbiased SUM-reduced metric), so per-rank counts -- and their
+        remainders -- differ. A rank that decided on its own would run a step
+        its peers did not, and the collectives inside that step (the gradient
+        all-reduce, the sharded loss reductions) would deadlock.
+        """
+        local_batch_size = self.config.local_batch_size
+
+        # Agree on the ragged sizes FIRST. The all_gather below is a
+        # collective: every rank must post it even when its own warmup fetched
+        # no batch at all (``batch is None``), or its peers block in the
+        # gather. Batch availability is rank-invariant in practice (padded
+        # training shards give every rank the same loader length), but the
+        # collective pattern must not depend on local loader state, so the
+        # no-batch early return comes after the gather.
+        ragged_sizes = {len(self.train_sampler) % local_batch_size}
+        local_val_ragged = torch.tensor(
+            [len(self.val_sampler) % local_batch_size], device=self.device
+        )
+        gathered_val_ragged = [
+            torch.empty_like(local_val_ragged) for _ in range(self.world_size)
+        ]
+        torch.distributed.all_gather(gathered_val_ragged, local_val_ragged)
+        ragged_sizes.update(int(size.item()) for size in gathered_val_ragged)
+
+        if batch is None:
+            return
+        available = batch["image"].shape[0]
+
+        # The batches already run are all ``available`` wide, and ``available``
+        # is itself rank-invariant (the padded training shards give every rank
+        # the same leading batch size), so this loop is identical on all ranks.
+        warmed = {0, available}
+        for ragged in sorted(ragged_sizes):
+            if ragged in warmed:
+                continue
+            if ragged > available:
+                self.log.debug(
+                    f"  warmup: cannot build a {ragged}-sample batch from a "
+                    f"{available}-sample batch; skipping that shape"
+                )
+                continue
+            warmed.add(ragged)
+            self.log.debug(
+                f"  warmup: running the ragged batch shape ({ragged} samples)"
+            )
+            self._run_training_batch(
+                {key: value[:ragged] for key, value in batch.items()},
+                log_prefix=f"warmup ragged ({ragged}): ",
+            )
+
     def warmup(self):
         """Run warmup iterations before the main training loop."""
         warmup_batches = self.config.warmup_batches
@@ -720,10 +808,12 @@ class PyTorchTrainer(BaseTrainer):
         self.optimizer.zero_grad(set_to_none=True)
 
         try:
+            last_batch = None
             for batch_idx, batch in enumerate(self.train_loader):
                 if batch_idx >= max_batches:
                     break
 
+                last_batch = batch
                 self._run_training_batch(
                     batch,
                     log_prefix="warmup: ",
@@ -733,6 +823,8 @@ class PyTorchTrainer(BaseTrainer):
                 self.log.debug(
                     f"  warmup: batch {batch_idx} completed in {batch_t_end - start_warmup} seconds"
                 )
+
+            self._warmup_ragged_batches(last_batch)
 
             self.val_loader.sampler.set_epoch(0)
 
@@ -766,7 +858,10 @@ class PyTorchTrainer(BaseTrainer):
         """
 
         epoch = self.start_epoch
-        dice_score_train = 0
+        # Seeded from the resumed checkpoint (0 for a fresh run) so an already
+        # converged run exits the loop immediately instead of training an
+        # extra epoch to rediscover that it converged.
+        dice_score_train = self.start_val_dice
         epoch_minibatch_times_s = []
         # Track the last epoch checkpointed inside the loop so the final-save
         # decision below is identical on every rank. The in-loop checkpoint
@@ -776,6 +871,11 @@ class PyTorchTrainer(BaseTrainer):
         # other ranks would make them disagree about whether to call
         # save_checkpoint on exit, deadlocking its internal collective.
         last_checkpoint_epoch = None
+        # Whether this invocation completed at least one NEW epoch. A resume
+        # whose checkpoint already covers config.epochs (or an --epochs lowered
+        # below the checkpointed epoch) leaves the loop at the max-epoch check
+        # before any epoch body runs, so none of the per-epoch metrics exist.
+        completed_new_epoch = False
         with open(self.outfile_path, "a", newline="") as outfile:
             start = time.time()
             while dice_score_train < self.config.target_dice:
@@ -947,6 +1047,25 @@ class PyTorchTrainer(BaseTrainer):
                 # Reduced sample-weighted total and per-sample mean val loss.
                 val_loss_epoch = val_info[1].item()
                 val_loss_avg = val_loss_epoch / global_val_samples
+
+                # Divergence check. The dice score below is computed from a
+                # hard argmax, so it stays finite even for an all-NaN model
+                # (argmax of NaN logits is 0 and the one-hots are finite) --
+                # the loss is the only value that actually goes non-finite. Bail
+                # out before the CSV row and the checkpoint: continuing would
+                # keep overwriting checkpoint_last.pth with NaN weights (which
+                # then poison the next restart) while the loop's dice threshold
+                # can never be met. Both values come out of the data-parallel
+                # reductions above, so they are identical on every rank and
+                # every rank raises here together, leaving no unmatched
+                # collective behind.
+                if not (math.isfinite(overall_loss) and math.isfinite(val_loss_avg)):
+                    raise ValueError(
+                        f"Non-finite loss at epoch {epoch} "
+                        f"(train_loss={overall_loss}, val_loss={val_loss_avg}): "
+                        "training diverged, aborting before checkpointing."
+                    )
+
                 if not self.config.disable_scheduler:
                     self.scheduler.step()
                 else:
@@ -1022,6 +1141,9 @@ class PyTorchTrainer(BaseTrainer):
                         "train_mask_values": self.train_set.mask_values,
                         "global_step": self.global_step,
                         "total_optimizer_steps": self.total_optimizer_steps,
+                        # The convergence state: what a resume must restore to
+                        # know this epoch already met (or missed) target_dice.
+                        "val_dice": val_score,
                     }
                     self.checkpoint_manager.save_checkpoint(epoch, val_loss_avg, extras)
                     last_checkpoint_epoch = epoch
@@ -1030,6 +1152,7 @@ class PyTorchTrainer(BaseTrainer):
 
                 dice_score_train = val_score
                 epoch += 1
+                completed_new_epoch = True
 
                 # This check must exist otherwise the condition dice_score_train < self.config.target_dice will evaluate to False and incorrectly exit the training
                 if math.isnan(dice_score_train):
@@ -1039,12 +1162,31 @@ class PyTorchTrainer(BaseTrainer):
 
         completed_epochs = epoch - 1
 
+        if not completed_new_epoch:
+            # The loop exited without running a single epoch: the epoch budget
+            # was already exhausted (a resume whose checkpoint covers every
+            # epoch asked for, or a fresh run configured with none) or the
+            # starting state already met target_dice. There is nothing new to
+            # save -- any checkpoint on disk already records epoch
+            # `completed_epochs`, and none of the per-epoch metrics the final
+            # save would write were ever computed -- so skip it and return
+            # normally; the caller's post-processing still has whatever CSV is
+            # there.
+            self.log.warning(
+                "No new epoch was trained (start epoch %s, 'epochs' %s, "
+                "starting val dice %s vs target_dice %s): this run had no epoch "
+                "left to run, and no checkpoint was written.",
+                self.start_epoch,
+                self.config.epochs,
+                self.start_val_dice,
+                self.config.target_dice,
+            )
         # Save a final checkpoint when the run exits (convergence or max epochs)
         # at an epoch that was not a checkpoint interval, so the converged
         # weights that produced the reported metrics are not lost. Skipped when
         # checkpointing is disabled, when no epoch completed, or when the last
         # completed epoch was already checkpointed inside the loop.
-        if (
+        elif (
             self.config.checkpoint_interval > 0
             and completed_epochs >= 1
             and last_checkpoint_epoch != completed_epochs
@@ -1053,10 +1195,19 @@ class PyTorchTrainer(BaseTrainer):
                 "train_mask_values": self.train_set.mask_values,
                 "global_step": self.global_step,
                 "total_optimizer_steps": self.total_optimizer_steps,
+                "val_dice": val_score,
             }
             self.checkpoint_manager.save_checkpoint(
                 completed_epochs, val_loss_avg, extras
             )
+
+        # Nothing downstream of the training loop touches the checkpoint
+        # manager, so this is the last chance to observe the outcome of the
+        # run's final (possibly asynchronous) write. Without it a failed final
+        # save would let the process exit successfully with no checkpoint at
+        # all, and the next --restart would resume from a stale epoch or fail
+        # its pre-check.
+        self.checkpoint_manager.finalize_saves()
 
         if epoch_minibatch_times_s:
             minibatch_time_s = statistics.median(epoch_minibatch_times_s)

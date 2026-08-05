@@ -12,11 +12,30 @@
 #
 # SPDX-License-Identifier: (Apache-2.0)
 
+import logging
 import os
 from contextlib import nullcontext
 
 CALI_PERF_ENV_VAR = "CALI_CONFIG"
 TORCH_PERF_ENV_VAR = "PROFILE_TORCH"
+
+# This module is imported before (and independently of) the run's MPI logger,
+# so it keeps its own. Everything it has to say is about the user's profiling
+# request not being honored as written, which belongs on a diagnostic channel
+# that a caller can filter or capture -- not on stdout, where it lands in the
+# middle of whatever the run is printing.
+logger = logging.getLogger(__name__)
+
+
+def _profiler_env_flag(name):
+    """Return True only for an affirmative value of the environment variable.
+
+    Every profiler toggle -- the master switch and its sub-options alike --
+    goes through this, so "0"/"false"/"no"/"off"/"" all mean off and there is
+    no spelling that means the opposite of what it says.
+    """
+    return os.environ.get(name, "").lower() in ("1", "true", "on", "yes")
+
 
 _CALI_PERF_ENABLED = False
 TORCH_PERF_ENABLED = False
@@ -28,23 +47,24 @@ if CALI_PERF_ENV_VAR in os.environ:
 
         _CALI_PERF_ENABLED = True
     except Exception as e:
-        print("User requested Caliper annotations, but could not import Caliper")
-        print(f"Exception: {e}")
+        logger.warning(
+            "User requested Caliper annotations, but could not import Caliper: %s: %s",
+            type(e).__name__,
+            e,
+        )
 
 # The torch profiler is gated purely on its own environment variable: Caliper
 # and the torch profiler may both be enabled at once.
-if (
-    TORCH_PERF_ENV_VAR in os.environ
-    and os.environ.get(TORCH_PERF_ENV_VAR).lower() != "off"
-):
+if _profiler_env_flag(TORCH_PERF_ENV_VAR):
     try:
         from torch.profiler import ProfilerActivity
         from torch.profiler import profile as torchprofile
 
         TORCH_PERF_ENABLED = True
     except Exception:
-        print(
-            "User requested PyTorch profiling, but could not import the PyTorch profiler"
+        logger.warning(
+            "User requested PyTorch profiling, but could not import the "
+            "PyTorch profiler"
         )
 
 
@@ -100,10 +120,6 @@ def _profiler_env_int(name, default):
         return default
 
 
-def _profiler_env_flag(name):
-    return os.environ.get(name, "").lower() in ("1", "true", "on", "yes")
-
-
 def get_torch_context(ranks_per_node, rank):
     if TORCH_PERF_ENABLED:
         TORCH_PERF_LOCAL = TORCH_PERF_ENABLED and (rank % ranks_per_node == 0)
@@ -118,7 +134,22 @@ def get_torch_context(ranks_per_node, rank):
         # trace. The window (skip `wait`, prime `warmup`, capture `active`, once)
         # is tunable via the environment. Callers must drive it with
         # ``prof.step()`` once per training step for the schedule to advance.
+        # The context is entered around checkpoint cleanup and the warmup
+        # batches, but prof.step() only advances once per *training* batch, so
+        # everything before the first training batch lands in step 0. The
+        # window must therefore skip at least one step: with wait=0 that whole
+        # prologue -- warmup_batches forward+backward passes per rank -- is
+        # buffered in host memory as a single unbounded step, which is the very
+        # thing the bounded window exists to prevent.
         wait = _profiler_env_int("PROFILE_TORCH_WAIT", 1)
+        if wait < 1:
+            logger.warning(
+                "PROFILE_TORCH_WAIT must be at least 1: the profiler window "
+                "opens before the warmup batches, whose work would otherwise "
+                "accumulate in host memory as one unbounded step. Using "
+                "PROFILE_TORCH_WAIT=1."
+            )
+            wait = 1
         warmup = _profiler_env_int("PROFILE_TORCH_WARMUP", 1)
         active = _profiler_env_int("PROFILE_TORCH_ACTIVE", 3) or 1
 

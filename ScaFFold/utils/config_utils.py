@@ -18,13 +18,58 @@ from pathlib import Path
 
 import yaml
 
-import ScaFFold.paths
-
 
 def require_positive_int(name: str, value: int) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or value < 1:
         raise ValueError(f"{name} must be a positive integer")
     return value
+
+
+def require_flag(name: str, value) -> bool:
+    """Validate an on/off config toggle written as 0/1 (or a YAML boolean).
+
+    ``bool(value)`` would quietly accept ``2``, ``-1`` or ``"no"`` (all true),
+    so a mistyped toggle would enable the feature it was meant to disable.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    raise ValueError(f"{name} must be 0, 1, or a boolean; got {value!r}")
+
+
+def validate_unet_dims(problem_scale, unet_bottleneck_dim) -> int:
+    """Check that ``problem_scale``/``unet_bottleneck_dim`` describe a real U-Net.
+
+    The U-Net has ``unet_layers = problem_scale - unet_bottleneck_dim``
+    down/up levels over a ``2**problem_scale`` volume, so the bottleneck
+    exponent must satisfy ``0 <= unet_bottleneck_dim <= problem_scale - 1``:
+    a larger value asks for a bottleneck no smaller than the input (zero or
+    negative layers) and a negative one asks for more pooling levels than the
+    volume has. Both are only discovered later as an opaque
+    ``max_pool3d`` size error -- in production, after the whole dataset has
+    been generated -- so reject them here, at config time, naming the two keys
+    that have to change.
+
+    Returns the validated bottleneck dimension.
+    """
+    if isinstance(unet_bottleneck_dim, bool) or not isinstance(
+        unet_bottleneck_dim, int
+    ):
+        raise ValueError(
+            f"unet_bottleneck_dim must be an integer; got {unet_bottleneck_dim!r}"
+        )
+    unet_layers = problem_scale - unet_bottleneck_dim
+    if unet_bottleneck_dim < 0 or unet_layers < 1:
+        raise ValueError(
+            f"unet_bottleneck_dim={unet_bottleneck_dim} is out of range for "
+            f"problem_scale={problem_scale}: it must satisfy "
+            f"0 <= unet_bottleneck_dim <= problem_scale - 1 "
+            f"(i.e. <= {problem_scale - 1}) so that the U-Net has at least one "
+            f"layer, but unet_layers = problem_scale - unet_bottleneck_dim = "
+            f"{unet_layers}. Raise problem_scale or lower unet_bottleneck_dim."
+        )
+    return unet_bottleneck_dim
 
 
 class Config:
@@ -42,7 +87,6 @@ class Config:
             "dataset_dir",
             "fract_base_dir",
             "job_name",
-            "library_root",
             "n_categories",
             "problem_scale",
             "unet_bottleneck_dim",
@@ -71,6 +115,7 @@ class Config:
             "normalize",
             "group_norm_groups",
             "warmup_batches",
+            "activation_checkpointing",
             "ce_weight_sample_fraction",
             "dataset_reuse_enforce_commit_id",
             "target_dice",
@@ -106,8 +151,8 @@ class Config:
         }
     )
 
-    # Fields that hold scalars; a list here indicates an unexpanded parameter
-    # sweep leaking into a single run.
+    # Fields that hold scalars. Parameter sweeps are not supported, so a list
+    # here is a user error and is rejected by name (see _validate_keys).
     _SCALAR_KEYS = frozenset(
         {
             "n_categories",
@@ -129,6 +174,7 @@ class Config:
             "loss_freq",
             "group_norm_groups",
             "warmup_batches",
+            "activation_checkpointing",
             "ce_weight_sample_fraction",
             "target_dice",
             "checkpoint_interval",
@@ -136,7 +182,7 @@ class Config:
     )
 
     @classmethod
-    def _validate_keys(cls, config_dict, strict, allow_sweeps):
+    def _validate_keys(cls, config_dict, strict):
         allowed = cls.KNOWN_KEYS | cls.AUX_KEYS
         unknown = sorted(set(config_dict) - allowed)
         if unknown:
@@ -144,21 +190,22 @@ class Config:
             if strict:
                 raise ValueError(message)
             print(f"WARNING: {message}")
-        if allow_sweeps:
-            return
         lists = sorted(
             k for k in cls._SCALAR_KEYS if isinstance(config_dict.get(k), list)
         )
         if lists:
+            details = "; ".join(
+                f"{k}: parameter sweeps are no longer supported; "
+                f"got list {config_dict[k]}"
+                for k in lists
+            )
             raise ValueError(
-                f"Config key(s) {', '.join(lists)} hold list values but a "
-                "single run needs scalars. Parameter sweeps must be expanded "
-                "before constructing a run config."
+                f"{details}. Each of these keys must hold a single value; "
+                "launch one benchmark run per parameter setting."
             )
 
-    def __init__(self, config_dict, strict=True, allow_sweeps=False):
-        self._validate_keys(config_dict, strict, allow_sweeps)
-        self.library_root = str(ScaFFold.paths.scaffold_root).rstrip("/") + "/ScaFFold/"
+    def __init__(self, config_dict, strict=True):
+        self._validate_keys(config_dict, strict)
         self.base_run_dir = str(Path(config_dict["base_run_dir"]).resolve())
         self.dataset_dir = str(
             Path(config_dict.get("dataset_dir", "datasets/")).resolve()
@@ -180,7 +227,9 @@ class Config:
                 "WARNING: problem_scale found to be non-integer. Truncating to nearest int."
             )
             self.problem_scale = math.floor(self.problem_scale)
-        self.unet_bottleneck_dim = config_dict["unet_bottleneck_dim"]
+        self.unet_bottleneck_dim = validate_unet_dims(
+            self.problem_scale, config_dict["unet_bottleneck_dim"]
+        )
         self.unet_layers = self.problem_scale - self.unet_bottleneck_dim
         self.n_fracts_per_vol = config_dict["n_fracts_per_vol"]
         self.n_instances_used_per_fractal = config_dict["n_instances_used_per_fractal"]
@@ -214,6 +263,10 @@ class Config:
         self.normalize = config_dict["normalize"]
         self.group_norm_groups = config_dict.get("group_norm_groups", 8)
         self.warmup_batches = config_dict.get("warmup_batches")
+        self.activation_checkpointing = require_flag(
+            "activation_checkpointing",
+            config_dict.get("activation_checkpointing", 0),
+        )
         self.ce_weight_sample_fraction = config_dict.get(
             "ce_weight_sample_fraction", 0.1
         )
@@ -279,7 +332,11 @@ def load_config_files(file_paths):
 
 def load_config(file_path: str, config_type: str):
     """
-    Load run config from yaml file
+    Load a config from a yaml file.
+
+    ``config_type`` is either ``"benchmark"`` (a benchmark config, before a run
+    directory has been resolved) or ``"run"`` (a config for one run, which also
+    carries ``run_dir``/``run_iter``). Both require single-valued parameters.
 
     Returns:
         Config: A Config instance with settings loaded from the yaml file
@@ -290,13 +347,12 @@ def load_config(file_path: str, config_type: str):
     with open(file_path, "r") as file:
         config_dict = yaml.safe_load(file)
 
-    if config_type == "sweep":
-        # Sweep configs may hold list-valued parameters that the benchmark
-        # driver expands into one run per combination.
-        return Config(config_dict, allow_sweeps=True)
+    if config_type == "benchmark":
+        return Config(config_dict)
     elif config_type == "run":
         return RunConfig(config_dict)
     else:
         raise ValueError(
-            f"Invalid config type specified: {config_type}. Must be either 'sweep' or 'run'"
+            f"Invalid config type specified: {config_type}. "
+            "Must be either 'benchmark' or 'run'"
         )
