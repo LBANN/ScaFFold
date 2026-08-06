@@ -20,6 +20,7 @@ handling, and validation host-sync avoidance. Each asserts the fast path is
 numerically equivalent to the straightforward reference it replaced.
 """
 
+import pytest
 import torch
 import torch.nn.functional as F
 
@@ -65,6 +66,72 @@ def test_ce_log_probs_path_matches_cross_entropy():
         plain = compute_sharded_cross_entropy_loss(preds, labels, None, (1,), "cpu", w)
         assert torch.allclose(fused, ref, atol=1e-6)
         assert torch.allclose(plain, ref, atol=1e-6)
+
+
+@pytest.mark.gpu
+def test_gpu_ce_numerator_is_bitwise_reproducible():
+    # The CE numerator must be summed outside the loss kernel. reduction="sum"
+    # on CUDA accumulates with atomicAdd, so the value depends on block retire
+    # order and changes between otherwise identical calls. Both entry points
+    # (precomputed log_probs via NLL, and raw logits via CE) go through the
+    # same reduction, so both are checked.
+    #
+    # Bitwise, not allclose: the whole point is that repeated calls agree to
+    # the last bit. The pre-fix code yields 4 distinct values here.
+    #
+    # 128**3 with 7 classes is scale 7 with the shipped n_categories, and the
+    # size is load-bearing, not incidental: sweeping the pre-fix code, a shape
+    # has to be big enough to put many blocks in flight before the atomics
+    # collide at all. 48**3 and 64**3 give 1 distinct value, 96**3 gives 2-3,
+    # 128**3 gives 4. Shrinking this test for speed would quietly turn it into
+    # a test that passes either way.
+    torch.manual_seed(3)
+    device = torch.device("cuda")
+    b, c, n = 1, 7, 128
+    preds = torch.randn(b, c, n, n, n, device=device)
+    labels = torch.randint(0, c, (b, n, n, n), device=device)
+    weights = torch.rand(c, device=device) + 0.5
+    log_probs = F.log_softmax(preds.float(), dim=1)
+
+    for w in (None, weights):
+        for kwargs in ({"log_probs": log_probs}, {}):
+            values = {
+                compute_sharded_cross_entropy_loss(
+                    preds, labels, None, (1,), "cuda", w, **kwargs
+                ).item()
+                for _ in range(50)
+            }
+            assert len(values) == 1, f"{len(values)} distinct CE values: {values}"
+
+
+@pytest.mark.gpu
+def test_gpu_ce_survives_strict_deterministic_algorithms():
+    # more_determinism sets use_deterministic_algorithms(warn_only=True), so a
+    # nondeterministic kernel only warns there and the run stays irreproducible
+    # -- a determinism regression in this path would be invisible under the
+    # config that is supposed to catch it. Assert against strict mode instead,
+    # where the fused reduction raises:
+    #   "nll_loss2d_forward_out_cuda_template does not have a deterministic
+    #    implementation"
+    torch.manual_seed(4)
+    device = torch.device("cuda")
+    b, c = 1, 5
+    preds = torch.randn(b, c, 16, 16, 16, device=device)
+    labels = torch.randint(0, c, (b, 16, 16, 16), device=device)
+    weights = torch.rand(c, device=device) + 0.5
+    log_probs = F.log_softmax(preds.float(), dim=1)
+
+    was_deterministic = torch.are_deterministic_algorithms_enabled()
+    was_warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
+    torch.use_deterministic_algorithms(True)
+    try:
+        for w in (None, weights):
+            for kwargs in ({"log_probs": log_probs}, {}):
+                compute_sharded_cross_entropy_loss(
+                    preds, labels, None, (1,), "cuda", w, **kwargs
+                )
+    finally:
+        torch.use_deterministic_algorithms(was_deterministic, warn_only=was_warn_only)
 
 
 def test_ce_uses_single_spatial_collective(monkeypatch):
