@@ -24,27 +24,25 @@ The model is trained from a random initialization until convergence, which is de
 
 ## **Setup**
 
-1. If running on an LLNL system, try using the scripts in `scripts/install-*.sh` for machine-specific install scripts.
+1. If running on an LLNL system, use the machine-specific install scripts in `scripts/install-*.sh`.
 
 1. Clone the repository:  
     `git clone https://github.com/LBANN/ScaFFold.git && cd ScaFFold`
 
-1. Create and activate a python venv for running the benchmark:  
-    `ml load python/3.11.5 && python3 -m venv .venvs/scaffoldvenv && source .venvs/scaffoldvenv/bin/activate && pip install --upgrade pip`
+1. Create and activate a python venv for running the benchmark:
+    - Matrix: `ml load python/3.13.2 && python3 -m venv .venvs/scaffoldvenv-matrix && source .venvs/scaffoldvenv-matrix/bin/activate && pip install --upgrade pip`
+    - Tuolumne: `ml load python/3.13.2 && python3 -m venv .venvs/scaffoldvenv-tuo && source .venvs/scaffoldvenv-tuo/bin/activate && pip install --upgrade pip`
 
 1. Necessary LLNL settings:
     - CUDA (matrix):
-        1. `ml cuda/12.9.1 gcc/13.3.1 mvapich2/2.3.7`
+        1. `ml cuda/13.1.1 gcc/13.3.1 mvapich2/2.3.7`
         1. `export LD_LIBRARY_PATH=/usr/lib64:$LD_LIBRARY_PATH`
-    - ROCm (elcap):
-        1. `ml cce/21.0.0 cray-mpich/9.1.0 rocm/7.1.1 rccl/fast-env-slows-mpi`
-            - If using WCI wheel:
-                1. `export LD_PRELOAD=/opt/rocm-7.1.1/llvm/lib/libomp.so` # for libomp.so
+    - ROCm (tuolumne):
+        1. `ml cce/21.0.2 cray-mpich/9.1.0 rocm/7.2.1 rccl/fast-env-slows-mpi`
 
 1. Install the benchmark in the python venv:
-    - CUDA: `pip install --no-binary=mpi4py .[cuda] --prefix=.venvs/scaffoldvenv --extra-index-url https://download.pytorch.org/whl/cu129 2>&1 | tee install.log`
-    - ROCm (generic): `pip install --no-binary=mpi4py .[rocm] --prefix=.venvs/scaffoldvenv --extra-index-url https://download.pytorch.org/whl/rocm7.1 2>&1 | tee install.log`
-    - ROCm (LLNL): `pip install .[rocmwci] --prefix=.venvs/scaffoldvenv 2>&1 | tee install.log`
+    - CUDA: `pip install --no-binary=mpi4py -e .[cuda] --prefix=.venvs/scaffoldvenv-matrix --extra-index-url https://download.pytorch.org/whl/cu132 2>&1 | tee install.log`
+    - ROCm: `pip install -e .[rocm] --find-links https://download.pytorch.org/whl/torch/ --find-links https://download.pytorch.org/whl/torchaudio/ --find-links https://download.pytorch.org/whl/torchvision/ --find-links https://download.pytorch.org/whl/triton-rocm/ 2>&1 | tee install.log`
 
 
 ## Running the benchmark
@@ -222,8 +220,8 @@ make && make install
 git clone https://github.com/LLNL/Caliper.git
 cd Caliper
 mkdir pybuild && cd pybuild
-ml rocm/7.1.1
-ml cuda/12.9.1
+ml rocm/7.2.1
+ml cuda/13.1.1
 cmake -DWITH_PYTHON_BINDINGS=ON \
    -DWITH_ROCPROFILER=ON \
    -DWITH_CUPTI=ON \
