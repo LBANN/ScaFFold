@@ -190,20 +190,33 @@ def compute_sharded_cross_entropy_loss(
             )
         local_ce_sum = local_ce.sum()
 
+        # Neither branch below may read device memory from the host. Both used
+        # to: torch.bincount sizes its output from the largest label, so it
+        # copies that value back even when minlength already fixes the width,
+        # and new_tensor() stages a Python float through a pageable H2D copy.
+        # Either one is a full pipeline drain in the middle of the step -- the
+        # host blocks, stops submitting, and the queue runs dry behind it.
+        # Measured with torch.cuda.set_sync_debug_mode("error"), which flags
+        # both and neither replacement.
         if class_weights is None:
             # Sum the actual local voxel counts across spatial shards. We use
             # an all-reduced count instead of numel()*num_shards because shard
             # sizes can differ at chunk boundaries.
-            local_normalizer = local_ce_sum.new_tensor(float(local_labels.numel()))
+            #
+            # new_full rather than new_tensor: numel() is shape metadata the
+            # host already has, and full() fills on the device with the value
+            # as a kernel argument instead of copying it across.
+            local_normalizer = local_ce_sum.new_full((), float(local_labels.numel()))
         else:
             # Weighted CE divides by sum(weight[target_i]) over all voxels.
-            # Build that denominator from the local label histogram.
-            local_class_counts = torch.bincount(
-                local_labels.reshape(-1), minlength=class_weights.numel()
-            ).to(dtype=local_ce_sum.dtype)
-            local_normalizer = torch.dot(
-                local_class_counts, class_weights.to(dtype=local_ce_sum.dtype)
-            )
+            # Gather the per-voxel weights and sum them, which is that
+            # definition transcribed -- the histogram this replaced was an
+            # indirect route to the same number, and the more expensive one:
+            # bincount's own kernel plus the dot cost 83.6 us at 128**3 and
+            # 373.6 us at 256**3 against 26.1 and 90.8 us for the gather.
+            local_normalizer = class_weights.to(dtype=local_ce_sum.dtype)[
+                local_labels
+            ].sum()
 
     # Reduce the CE numerator and its denominator across the spatial shards in
     # one collective (they share the same mesh) rather than two, halving the
