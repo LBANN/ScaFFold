@@ -349,9 +349,11 @@ def main(kwargs_dict: dict = {}):
         total_epochs = int(epochs[-1])
         if config.epochs == -1:
             fom = 1.0 / total_train_time
+            fom_per_megasecond = fom * 1_000_000
             adiak_value("FOM", fom)
             log.info(
                 f"FOM = {fom} (1 / total_train_time={total_train_time:.6f} seconds). "
+                f"{fom_per_megasecond} (1/Megaseconds). "
                 f"This FOM is specific to problem_scale={config.problem_scale}, "
                 f"target_dice={config.target_dice}, "
                 f"n_categories={config.n_categories}, "
