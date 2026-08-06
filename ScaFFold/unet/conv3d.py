@@ -1249,6 +1249,10 @@ class FastConv3d(nn.Conv3d):
     #: free.
     _triton_ok = False
 
+    #: How this ladder is named in the startup kernel-selection line; see
+    #: :func:`ScaFFold.unet._rungs.kernel_selection`.
+    _rung_label = "Convolution"
+
     def _triton_forward(self, local, plan=None):
         """Run the Triton rung -- and its fallback -- on an unwrapped tensor.
 
@@ -1777,6 +1781,11 @@ class FastConvTranspose3d(nn.ConvTranspose3d):
     #: Per-module "a call has been answered by the Triton rung"; see
     #: :attr:`FastConv3d._triton_ok`, which this mirrors exactly.
     _triton_ok = False
+
+    #: Reported separately from ``FastConv3d``: it is a different operator with
+    #: a different kernel behind it, so a mixed run should say which one fell
+    #: back rather than pooling both into one count.
+    _rung_label = "Convolution (transposed)"
 
     def _triton_forward(self, local):
         """Run the Triton rung on an unwrapped tensor.

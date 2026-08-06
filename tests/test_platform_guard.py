@@ -46,6 +46,7 @@ import torch.nn as nn
 from ScaFFold.unet import _rungs
 from ScaFFold.unet import conv3d as conv_mod
 from ScaFFold.unet import group_norm as gn_mod
+from ScaFFold.unet._rungs import format_kernel_selection, kernel_selection
 from ScaFFold.unet.conv3d import FastConv3d, FastConvTranspose3d
 from ScaFFold.unet.group_norm import FastGroupNorm
 
@@ -500,3 +501,84 @@ def test_a_whole_unet_step_asks_the_hardware_once(monkeypatch):
     with torch.no_grad():
         model(x)
     assert asked == [0]
+
+
+# ---------------------------------------------------------------------------
+# The startup kernel-selection line
+# ---------------------------------------------------------------------------
+
+
+class _Ladder(torch.nn.Module):
+    """Stands in for a rung-bearing module: the reporter is duck-typed."""
+
+    _triton_ok = False
+    _rung_label = "Ladder"
+
+
+class _OtherLadder(torch.nn.Module):
+    _triton_ok = False
+    _rung_label = "Other"
+
+
+class _Unlabelled(torch.nn.Module):
+    _triton_ok = False
+
+
+def test_kernel_selection_counts_each_ladder_separately():
+    model = torch.nn.Sequential(_Ladder(), _Ladder(), _OtherLadder(), torch.nn.ReLU())
+    model[0]._triton_ok = True
+    assert kernel_selection(model) == [("Ladder", 1, 2), ("Other", 0, 1)]
+
+
+def test_kernel_selection_ignores_modules_without_a_rung():
+    """A plain module must not appear -- the line is about ladders only."""
+    model = torch.nn.Sequential(torch.nn.ReLU(), torch.nn.Identity())
+    assert kernel_selection(model) == []
+
+
+def test_a_ladder_without_a_label_still_reports_under_its_class_name():
+    """Adding a ladder must not require remembering to declare a label."""
+    assert kernel_selection(torch.nn.Sequential(_Unlabelled())) == [
+        ("_Unlabelled", 0, 1)
+    ]
+
+
+def test_a_split_ladder_names_both_kernels():
+    """The mixed case is the informative one and must not read as uniform."""
+    line = format_kernel_selection([("Convolution", 17, 19)])[0]
+    assert "Triton 17/19" in line and "Native 2/19" in line
+
+
+@pytest.mark.parametrize(
+    "selection,expected",
+    [([("C", 3, 3)], "Triton"), ([("C", 0, 3)], "Native")],
+)
+def test_an_unsplit_ladder_names_one_kernel(selection, expected):
+    line = format_kernel_selection(selection)[0]
+    assert expected in line
+    assert ("Native" if expected == "Triton" else "Triton") not in line
+
+
+@pytest.mark.gpu
+def test_the_real_model_reports_triton_on_every_site_after_a_forward():
+    """The shipped configuration is all-Triton, and the line must say so.
+
+    Also pins the placement rule: the same model reports ``Native`` everywhere
+    *before* a forward, because ``_triton_ok`` is a latch. That is why
+    ``_log_kernel_selection`` is called after warmup and after the first batch
+    rather than at construction.
+    """
+    from ScaFFold.unet.unet_model import UNet
+
+    model = UNet(n_channels=3, n_classes=6, trilinear=False, layers=3)
+    model = model.cuda().to(memory_format=_CHANNELS_LAST)
+    assert all(triton == 0 for _, triton, _ in kernel_selection(model))
+
+    x = _gpu_input((1, 3, 32, 32, 32), dtype=torch.float32)
+    with torch.autocast("cuda", dtype=torch.bfloat16), torch.no_grad():
+        model(x)
+
+    selection = kernel_selection(model)
+    labels = {label for label, _, _ in selection}
+    assert labels == {"Convolution", "Convolution (transposed)", "GroupNorm"}
+    assert all(triton == total for _, triton, total in selection), selection
