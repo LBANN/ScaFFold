@@ -1,0 +1,29 @@
+#!/bin/bash
+
+# flux: --exclusive
+# flux: -N 1
+# flux: -g=1
+# flux: -t 60m
+# flux: -q pdebug
+# flux: -B flask
+
+ml cce/21.0.2 cray-mpich/9.1.0 rocm/7.2.1 rccl/fast-env-slows-mpi
+
+. .venvs/scaffoldvenv-tuo/bin/activate
+
+export NCCL_NET_PLUGIN=/collab/usr/global/tools/rccl/toss_4_x86_64_ib_cray/rocm-7.2.0/install/lib/librccl-net.so
+
+# Disable direct convolution benchmarking (should speedup warmup by a significant amount if using MIOpen)
+export MIOPEN_DEBUG_CONV_DIRECT=0
+# Use Triton kernels instead of MIOpen kernels. Set to 0 to use MIOpen.
+export SCAFFOLD_GROUPNORM_TRITON=1
+export SCAFFOLD_CONV_TRITON=1
+
+CONFIG_PATH="$(pwd)/ScaFFold/configs/benchmark_default.yml"
+
+torchrun-hpc -N 1 -n 1 $(which scaffold) generate_fractals -c "$CONFIG_PATH"
+
+# Uncomment if you want torch profiling
+#export PROFILE_TORCH=ON
+
+torchrun-hpc -N 1 -n 4 --gpus-per-proc 1 $(which scaffold) benchmark -c "$CONFIG_PATH"

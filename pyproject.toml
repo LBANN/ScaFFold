@@ -51,7 +51,7 @@ authors = [
 ]
 license = { file = "LICENSE" }
 dependencies = [
-  "hpc-launcher @ git+https://github.com/llnl/HPC-launcher.git@v1.0.5",
+  "hpc-launcher==1.0.5",
   "matplotlib>=3.9.4",
   "numpy>=1.26.4",
   "numba>=0.60.0",
@@ -77,13 +77,9 @@ cuda = [
     "mpi4py==4.1.1",
 ]
 rocm = [
-    "torch==2.12.0+rocm7.1",
-    "torchaudio==2.11.0+rocm7.1",
-    "torchvision==0.27.0+rocm7.1",
-    "mpi4py==4.1.1+mpich.9.1.0",
-]
-rocmwci = [
-    "torch==2.10.0+rocm710",
+    "torch==2.12.0+rocm7.2",
+    "torchaudio==2.11.0+rocm7.2",
+    "torchvision==0.27.0+rocm7.2",
     "mpi4py==4.1.1+mpich.9.1.0",
 ]
 
