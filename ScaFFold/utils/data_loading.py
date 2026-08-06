@@ -168,9 +168,7 @@ class BasicDataset(Dataset):
             for entry in self.mask_dir.iterdir()
             if entry.is_file() and not entry.name.startswith(".")
         ]
-        _, self._mask_paths = self._index_paths_by_id(
-            self.mask_dir, mask_files, "mask"
-        )
+        _, self._mask_paths = self._index_paths_by_id(self.mask_dir, mask_files, "mask")
 
         # Belt-and-braces: when a process group is live, verify every rank built
         # the identical id list. Any residual divergence (e.g. inconsistent
