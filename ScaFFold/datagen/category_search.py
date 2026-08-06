@@ -455,8 +455,10 @@ def main(config: Config) -> None:
     log = setup_mpi_logger(__file__, getattr(config, "verbose", 0))
 
     datagen_batch_size = int(getattr(config, "datagen_batch_size", 10000))
-    if datagen_batch_size <= 0:
-        raise ValueError("datagen_batch_size must be positive")
+    if datagen_batch_size < 1:
+        raise ValueError(
+            f"datagen_batch_size must be positive, got {datagen_batch_size}"
+        )
 
     base_seed = int(config.seed)
 
