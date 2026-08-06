@@ -422,3 +422,68 @@ def _warn_rung_failure(what, error, fallback, env_var):
         f"{fallback} for modules that have not already used it. "
         f"Set {env_var}=0 to skip this attempt entirely."
     )
+
+
+#: The per-module "this rung has served me" flag every ladder carries.  Read by
+#: name rather than by ``isinstance`` so this module does not have to import the
+#: modules that import it, and so a ladder added later is reported without
+#: touching this function.
+_RUNG_FLAG = "_triton_ok"
+
+
+def kernel_selection(model):
+    """Which kernel each rung-bearing module in ``model`` is currently using.
+
+    Returns ``[(label, triton, total), ...]``, one entry per kind of ladder,
+    ordered as the modules appear in the model.  ``label`` comes from the
+    class's ``_rung_label`` and falls back to its name, so a new ladder shows up
+    here whether or not it remembers to declare one.
+
+    **This reads a latch, not a decision.**  ``_triton_ok`` is set on the first
+    call a rung actually answers, so a module that has not run yet reports
+    ``Native`` -- truthfully, in that it has used no other kernel, but
+    misleadingly, in that it has used none at all.  Callers must therefore run
+    at least one forward first; :meth:`PyTorchTrainer._log_kernel_selection`
+    does, and says in its own docstring why it is placed where it is.
+
+    Nothing here is authoritative for the rest of the run either.  A rung can
+    fall back later (a shape it does not serve, an allocator failure), and under
+    DDP each rank latches independently, so this is one rank's answer at one
+    moment.  It is an informational line, not a contract.
+    """
+    counts = {}
+    order = []
+    for module in model.modules():
+        cls = type(module)
+        if not hasattr(cls, _RUNG_FLAG):
+            continue
+        label = getattr(cls, "_rung_label", cls.__name__)
+        if label not in counts:
+            counts[label] = [0, 0]
+            order.append(label)
+        counts[label][1] += 1
+        if getattr(module, _RUNG_FLAG, False):
+            counts[label][0] += 1
+    return [(label, counts[label][0], counts[label][1]) for label in order]
+
+
+def format_kernel_selection(selection):
+    """:func:`kernel_selection`'s answer as lines fit for a log.
+
+    One line per ladder, naming both kernels only when the ladder is actually
+    split -- a mixed line is the interesting case (some sites fell back) and
+    should not be hidden inside a ratio that reads like a uniform one.
+    """
+    if not selection:
+        return ["  (no accelerated modules)"]
+    width = max(len(label) for label, _, _ in selection)
+    lines = []
+    for label, triton, total in selection:
+        if triton == total:
+            used = f"Triton  {triton}/{total}"
+        elif triton == 0:
+            used = f"Native  {total}/{total}"
+        else:
+            used = f"Triton {triton}/{total}, Native {total - triton}/{total}"
+        lines.append(f"  {label.ljust(width)}  {used}")
+    return lines

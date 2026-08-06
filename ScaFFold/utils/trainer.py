@@ -29,6 +29,7 @@ from torch import optim
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
+from ScaFFold.unet._rungs import format_kernel_selection, kernel_selection
 from ScaFFold.utils.checkpointing import CheckpointManager
 from ScaFFold.utils.data_loading import FractalDataset, SpatialShardSpec
 from ScaFFold.utils.data_types import AMP_DTYPE, VOLUME_TORCH_DTYPE
@@ -90,6 +91,9 @@ class BaseTrainer:
 
     def __init__(self, model, config, device, log):
         self.model = model
+        # One-shot guard for the startup kernel-selection line; see
+        # _log_kernel_selection for why it has two call sites.
+        self._kernel_selection_logged = False
         self.config = config
         self.device = device
         self.log = log
@@ -786,6 +790,31 @@ class PyTorchTrainer(BaseTrainer):
                 log_prefix=f"warmup ragged ({ragged}): ",
             )
 
+    def _log_kernel_selection(self):
+        """Log which kernel each accelerated module is using, once, on rank 0.
+
+        Called from two places -- the end of :meth:`warmup` and after the first
+        training batch -- because the answer only exists once a forward has run.
+        ``_triton_ok`` is a latch set when a rung first answers a call, so
+        reporting at construction time would say "Native" about modules that
+        have simply not run yet.  ``warmup_batches <= 0`` makes :meth:`warmup`
+        return without running anything, so neither call site alone covers every
+        run; the flag below makes the pair idempotent rather than making either
+        one conditional on the other.
+
+        Rank 0 only, and one rank's answer: each rank latches independently, so
+        under DDP this is representative rather than global.  It is an
+        informational line and is deliberately not a collective -- gathering it
+        would put a barrier on a path that has no other reason for one.
+        """
+        if self._kernel_selection_logged or self.world_rank != 0:
+            return
+        self._kernel_selection_logged = True
+        model = getattr(self.model, "module", self.model)
+        self.log.info("Kernel selection (rank 0):")
+        for line in format_kernel_selection(kernel_selection(model)):
+            self.log.info(line)
+
     def warmup(self):
         """Run warmup iterations before the main training loop."""
         warmup_batches = self.config.warmup_batches
@@ -847,6 +876,7 @@ class PyTorchTrainer(BaseTrainer):
 
         torch.distributed.barrier()
         self.log.info(f"Done warmup. Took {int(time.time() - start_warmup)}s")
+        self._log_kernel_selection()
 
     def train(self, profiler=None):
         """
@@ -953,6 +983,8 @@ class PyTorchTrainer(BaseTrainer):
                         # not skew the epoch mean.
                         train_dice_total += batch_dice_score * batch_size
                         end_code_region("run_training_batch")
+                        if first_batch:
+                            self._log_kernel_selection()
 
                         # Update the loss
                         begin_code_region("update_loss")

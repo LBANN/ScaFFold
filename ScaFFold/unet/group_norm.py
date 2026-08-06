@@ -630,6 +630,12 @@ class FastGroupNorm(nn.GroupNorm):
     _triton_ok = False
     _compiled_ok = False
 
+    #: How this ladder is named in the startup kernel-selection line.  The line
+    #: reports Triton against everything else, so ``_compiled_ok`` does not
+    #: appear there: from the outside the compiled and eager rungs are both
+    #: "what PyTorch does".
+    _rung_label = "GroupNorm"
+
     def __init__(
         self,
         num_groups,
