@@ -105,6 +105,51 @@ def test_gpu_ce_numerator_is_bitwise_reproducible():
 
 
 @pytest.mark.gpu
+def test_gpu_ce_does_not_synchronize():
+    # The CE term runs once per training step, so a host-device sync in it
+    # drains the whole launch queue mid-step: the host stops submitting until
+    # the read comes back, and the GPU runs out of queued work behind it.
+    #
+    # Both branches have had one. torch.bincount sizes its output from the
+    # largest label and copies that value back even when minlength already
+    # fixes the width; new_tensor() stages a Python float through a pageable
+    # H2D copy. Both are invisible in the result and in the loss value, which
+    # is why they need a test rather than a review.
+    #
+    # set_sync_debug_mode is documented as a prototype that does not catch
+    # every synchronizing op, so this is a floor, not a proof. It does catch
+    # both of the above -- verified by running it against the previous code.
+    torch.manual_seed(5)
+    device = torch.device("cuda")
+    b, c, n = 1, 7, 64
+    preds = torch.randn(b, c, n, n, n, device=device)
+    labels = torch.randint(0, c, (b, n, n, n), device=device)
+    weights = torch.rand(c, device=device) + 0.5
+    log_probs = F.log_softmax(preds.float(), dim=1)
+
+    # .item() is itself a sync, so results are kept on device and only
+    # inspected after the debug mode is back off.
+    outs = []
+    torch.cuda.synchronize()
+    torch.cuda.set_sync_debug_mode("error")
+    try:
+        # Both weighting branches (the normalizer is built differently in
+        # each) and both entry points.
+        for w in (weights, None):
+            for kwargs in ({"log_probs": log_probs}, {}):
+                outs.append(
+                    compute_sharded_cross_entropy_loss(
+                        preds, labels, None, (1,), "cuda", w, **kwargs
+                    )
+                )
+    finally:
+        torch.cuda.set_sync_debug_mode("default")
+
+    torch.cuda.synchronize()
+    assert all(torch.isfinite(o) for o in outs)
+
+
+@pytest.mark.gpu
 def test_gpu_ce_survives_strict_deterministic_algorithms():
     # more_determinism sets use_deterministic_algorithms(warn_only=True), so a
     # nondeterministic kernel only warns there and the run stays irreproducible
