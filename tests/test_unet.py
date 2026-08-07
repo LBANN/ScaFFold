@@ -198,3 +198,144 @@ def test_up_pad_guarded_when_diffs_zero():
             f"Guard not yet in place: {exact_match_pad_calls} pad calls with diffs=0 "
             f"(expected 0 when fixed). This is the RED baseline."
         )
+
+
+# --------------------------------------------------------------------------- #
+# The decoder skip concatenation.
+#
+# ``Up.forward`` no longer calls ``torch.cat`` directly; it goes through
+# ``unet_parts._skip_concat``, which may legitimately emit a narrower dtype
+# than ``torch.cat`` would when autocast is on (see the ``Up`` docstring).
+# Everything below pins the part that must NOT change: outside autocast the
+# block is bitwise what it was, the ``F.pad`` path still works, and both the
+# ``trilinear`` and ``ConvTranspose3d`` branches agree with an explicit
+# ``torch.cat`` reference.
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("trilinear", [False, True])
+def test_up_matches_an_explicit_torch_cat_reference(trilinear):
+    """``Up.forward`` must equal ``conv(cat([x2, up(x1)]))``, bitwise, on CPU."""
+    from ScaFFold.unet.unet_parts import Up
+
+    up = Up(in_channels=32, out_channels=16, group_norm_groups=8, trilinear=trilinear)
+    up.eval()
+    generator = torch.Generator().manual_seed(11)
+    # Either branch must hand ``self.conv`` ``in_channels`` channels: the
+    # transposed convolution halves 32 -> 16, while ``nn.Upsample`` changes no
+    # channels, so its input already carries 16.
+    x1 = torch.randn(1, 16 if trilinear else 32, 8, 8, 8, generator=generator)
+    x2 = torch.randn(1, 16, 16, 16, 16, generator=generator)
+
+    with torch.no_grad():
+        got = up(x1, x2)
+        reference = up.conv(torch.cat([x2, up.up(x1)], dim=1))
+
+    assert got.shape == reference.shape
+    assert torch.equal(got, reference), (
+        "the skip concatenation must be bitwise torch.cat outside autocast"
+    )
+
+
+def test_up_still_pads_and_concatenates_when_shapes_disagree():
+    """The non-power-of-two path: ``F.pad`` fires and the result still matches."""
+    import torch.nn.functional as F
+
+    from ScaFFold.unet.unet_parts import Up
+
+    up = Up(in_channels=32, out_channels=16, group_norm_groups=8, trilinear=False)
+    up.eval()
+    generator = torch.Generator().manual_seed(12)
+    x1 = torch.randn(1, 32, 7, 7, 7, generator=generator)  # -> 14^3 after up
+    x2 = torch.randn(1, 16, 16, 16, 16, generator=generator)  # 16^3: diff = 2
+
+    with torch.no_grad():
+        got = up(x1, x2)
+        padded = F.pad(up.up(x1), [1, 1, 1, 1, 1, 1])
+        reference = up.conv(torch.cat([x2, padded], dim=1))
+
+    assert got.shape == (1, 16, 16, 16, 16)
+    assert torch.equal(got, reference)
+
+
+def test_up_gradients_match_an_explicit_torch_cat_reference():
+    """Backward through the skip concatenation, bitwise, on CPU."""
+    from ScaFFold.unet.unet_parts import Up
+
+    up = Up(in_channels=32, out_channels=16, group_norm_groups=8, trilinear=False)
+    generator = torch.Generator().manual_seed(13)
+    x1 = torch.randn(1, 32, 8, 8, 8, generator=generator)
+    x2 = torch.randn(1, 16, 16, 16, 16, generator=generator)
+
+    a, b = x1.clone().requires_grad_(True), x2.clone().requires_grad_(True)
+    up.zero_grad(set_to_none=True)
+    up(a, b).pow(2).sum().backward()
+    got = (a.grad.clone(), b.grad.clone())
+    got_params = {n: p.grad.clone() for n, p in up.named_parameters()}
+
+    c, d = x1.clone().requires_grad_(True), x2.clone().requires_grad_(True)
+    up.zero_grad(set_to_none=True)
+    up.conv(torch.cat([d, up.up(c)], dim=1)).pow(2).sum().backward()
+
+    assert torch.equal(got[0], c.grad)
+    assert torch.equal(got[1], d.grad)
+    for name, param in up.named_parameters():
+        assert torch.equal(got_params[name], param.grad), name
+
+
+def test_up_concatenation_keeps_channels_last():
+    """The concatenation must not break the layout chain it exists to preserve.
+
+    Asserted on ``_skip_concat`` with two channels-last halves rather than on a
+    whole ``Up`` block: on CPU ``nn.ConvTranspose3d`` returns a *contiguous*
+    tensor whatever it is handed, so the block's own inputs to the
+    concatenation are not both channels-last there and the block-level
+    assertion would be measuring the convolution's layout policy, not this
+    one's.  On GPU with ``PYTORCH_MIOPEN_SUGGEST_NHWC=1`` -- the production
+    configuration -- both halves are channels-last and this is the property
+    ``Up`` relies on.
+    """
+    from ScaFFold.unet.unet_parts import _skip_concat as skip_concat
+
+    generator = torch.Generator().manual_seed(14)
+    x1 = torch.randn(1, 16, 16, 16, 16, generator=generator).contiguous(
+        memory_format=torch.channels_last_3d
+    )
+    x2 = torch.randn(1, 16, 16, 16, 16, generator=generator).contiguous(
+        memory_format=torch.channels_last_3d
+    )
+    out = skip_concat(x2, x1)
+    assert out.shape == (1, 32, 16, 16, 16)
+    assert out.is_contiguous(memory_format=torch.channels_last_3d)
+    assert torch.equal(out, torch.cat([x2, x1], dim=1))
+
+
+def test_whole_model_forward_and_backward_still_agree_with_a_cat_based_up():
+    """End to end: swapping the concatenation back must change nothing on CPU."""
+    import torch as _torch
+
+    from ScaFFold.unet import unet_parts
+
+    def cat_forward(self, x1, x2):
+        x1 = self.up(x1)
+        return self.conv(_torch.cat([x2, x1], dim=1))
+
+    model = UNet(
+        n_channels=_N_CHANNELS, n_classes=_N_CLASSES, trilinear=False, layers=2
+    )
+    x = _make_input(seed=15).requires_grad_(True)
+
+    model.zero_grad(set_to_none=True)
+    model(x).pow(2).sum().backward()
+    grads = {n: p.grad.clone() for n, p in model.named_parameters()}
+    x_grad = x.grad.clone()
+
+    original = unet_parts.Up.forward
+    try:
+        unet_parts.Up.forward = cat_forward
+        x2 = _make_input(seed=15).requires_grad_(True)
+        model.zero_grad(set_to_none=True)
+        model(x2).pow(2).sum().backward()
+        for name, param in model.named_parameters():
+            assert torch.equal(grads[name], param.grad), name
+        assert torch.equal(x_grad, x2.grad)
+    finally:
+        unet_parts.Up.forward = original
