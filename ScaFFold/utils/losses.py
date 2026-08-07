@@ -128,7 +128,7 @@ def compute_sharded_cross_entropy_loss(
 
     Each rank only sees a local spatial shard, so we cannot use the local
     `reduction="mean"` result directly. Instead we:
-    1. compute the local CE numerator with `reduction="sum"`,
+    1. compute the local CE numerator by summing the per-voxel losses,
     2. build the correct global denominator,
     3. all-reduce numerator and denominator together across the spatial mesh
        in a single collective, and
@@ -146,40 +146,77 @@ def compute_sharded_cross_entropy_loss(
 
     autocast_device = device_type if device_type != "mps" else "cpu"
     with torch.autocast(autocast_device, enabled=False):
-        # Accumulate CE in full precision. Using reduction="sum" gives us the
-        # numerator of the final global mean; if class weights are present,
-        # PyTorch applies the target-class weight to each voxel here. When the
-        # caller already computed log-softmax, NLL over it is identical to
-        # cross-entropy over the raw logits but avoids a second full upcast.
+        # Accumulate CE in full precision. Summing the per-voxel losses gives
+        # us the numerator of the final global mean; if class weights are
+        # present, PyTorch applies the target-class weight to each voxel here.
+        # When the caller already computed log-softmax, NLL over it is
+        # identical to cross-entropy over the raw logits but avoids a second
+        # full upcast.
+        #
+        # reduction="none" followed by .sum() rather than reduction="sum",
+        # which is not the same computation on CUDA: the fused reduction
+        # accumulates with atomicAdd, so the summation order is whatever order
+        # the blocks happen to retire in and the loss value changes run to run
+        # (measured at 128**3: 3-4 distinct values per 100 calls, rel 2.2e-7 --
+        # enough to perturb train_stats.csv and to flip a best-checkpoint tie).
+        # It has no deterministic implementation at all: under
+        # torch.use_deterministic_algorithms(True) the fused form raises, and
+        # `more_determinism` passes warn_only=True, so it warns and stays
+        # nondeterministic. The separate .sum() is an ordinary tree reduction
+        # over a fixed shape and is bitwise reproducible.
+        #
+        # It is also not a cost at the scale that matters. Measured here,
+        # fwd+bwd, 7 classes, paired alternating arms:
+        #     128**3 (scale 7)  241 -> 147 us   0.61x -- the split form wins,
+        #                                       the atomics were serializing
+        #     256**3 (scale 8)  654 -> 715 us   1.09x, +61 us
+        # against 74 ms and 458 ms steps respectively, so under 0.15% either
+        # way. Peak memory is unchanged at both: the per-voxel fp32 tensor
+        # (8/64 MiB) is freed by the time the backward allocates a gradient
+        # the size of log_probs (56/448 MiB), which sets the peak.
         if log_probs is not None:
-            local_ce_sum = F.nll_loss(
+            local_ce = F.nll_loss(
                 log_probs,
                 local_labels,
                 weight=class_weights,
-                reduction="sum",
+                reduction="none",
             )
         else:
-            local_ce_sum = F.cross_entropy(
+            local_ce = F.cross_entropy(
                 local_preds.float(),
                 local_labels,
                 weight=class_weights,
-                reduction="sum",
+                reduction="none",
             )
+        local_ce_sum = local_ce.sum()
 
+        # Neither branch below may read device memory from the host. Both used
+        # to: torch.bincount sizes its output from the largest label, so it
+        # copies that value back even when minlength already fixes the width,
+        # and new_tensor() stages a Python float through a pageable H2D copy.
+        # Either one is a full pipeline drain in the middle of the step -- the
+        # host blocks, stops submitting, and the queue runs dry behind it.
+        # Measured with torch.cuda.set_sync_debug_mode("error"), which flags
+        # both and neither replacement.
         if class_weights is None:
             # Sum the actual local voxel counts across spatial shards. We use
             # an all-reduced count instead of numel()*num_shards because shard
             # sizes can differ at chunk boundaries.
-            local_normalizer = local_ce_sum.new_tensor(float(local_labels.numel()))
+            #
+            # new_full rather than new_tensor: numel() is shape metadata the
+            # host already has, and full() fills on the device with the value
+            # as a kernel argument instead of copying it across.
+            local_normalizer = local_ce_sum.new_full((), float(local_labels.numel()))
         else:
             # Weighted CE divides by sum(weight[target_i]) over all voxels.
-            # Build that denominator from the local label histogram.
-            local_class_counts = torch.bincount(
-                local_labels.reshape(-1), minlength=class_weights.numel()
-            ).to(dtype=local_ce_sum.dtype)
-            local_normalizer = torch.dot(
-                local_class_counts, class_weights.to(dtype=local_ce_sum.dtype)
-            )
+            # Gather the per-voxel weights and sum them, which is that
+            # definition transcribed -- the histogram this replaced was an
+            # indirect route to the same number, and the more expensive one:
+            # bincount's own kernel plus the dot cost 83.6 us at 128**3 and
+            # 373.6 us at 256**3 against 26.1 and 90.8 us for the gather.
+            local_normalizer = class_weights.to(dtype=local_ce_sum.dtype)[
+                local_labels
+            ].sum()
 
     # Reduce the CE numerator and its denominator across the spatial shards in
     # one collective (they share the same mesh) rather than two, halving the

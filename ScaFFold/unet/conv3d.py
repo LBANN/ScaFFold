@@ -1205,10 +1205,11 @@ class _TritonConv3dFn(torch.autograd.Function):
             return grad_x, grad_w, grad_b, None, None, None
 
         # d(bias) is the sum of grad_output over every axis but the channel one,
-        # whatever the forward kernel was.  Only the segmentation head has a
-        # bias and it is on the policy block-list, so this is unreachable in
-        # ScaFFold today -- but ``is_supported`` accepts a bias, and the class is
-        # a public drop-in, so it has to be right.
+        # whatever the forward kernel was.  The segmentation head is the only
+        # biased convolution in ScaFFold, and emptying the block-list on
+        # 2026-08-04 (:func:`_policy_declines`) put it on this rung -- so this
+        # line runs once a step on a full-volume ``grad_output``, where it used
+        # to be unreachable outside the tests.
         grad_b = grad_output.sum(dim=(0, 2, 3, 4)) if (has_bias and needs_b) else None
         return grad_x, grad_w, grad_b, None, None, None
 
@@ -1632,9 +1633,11 @@ class _TritonConvTranspose3dFn(torch.autograd.Function):
 
     * **``grad_bias`` is on the path.**  All four transposed sites have one
       (``nn.ConvTranspose3d`` defaults to ``bias=True`` and ``unet_parts`` does
-      not turn it off), where the only biased ordinary convolution is the
-      segmentation head, which the block-list keeps on MIOpen.  So the reduction
-      below is reached on every step of every run, not only by a test.
+      not turn it off), so the reduction below is reached on every step of every
+      run, not only by a test.  This used to be a *difference* between the two
+      ladders, because the ordinary operator's only biased site -- the
+      segmentation head -- was blocked; emptying the block-list on 2026-08-04
+      put that on the rung too, so both are now hot.
     * **The rung-flip hazard is wider.**  ``DCTensor`` mirrors its local shard's
       size, strides, dtype and device exactly, and this ladder never adds a halo
       -- so the tensor this node saves and the one ``nn.ConvTranspose3d.forward``
