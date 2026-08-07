@@ -253,9 +253,34 @@ class BaseTrainer:
         """Set up the optimizer, scheduler, gradient scaler, and loss function."""
         # Set up optimizer
         if self.config.optimizer == "ADAM":
-            self.log.info("Using ADAM optimizer.")
+            # The fused path does the whole parameter update in one kernel
+            # rather than the foreach path's several: seven ``_foreach_``
+            # launches collapse into one ``_fused_adam_``, taking the optimizer
+            # line item from 3.199 to 1.617 ms at scale 7 and 11.999 to 5.884
+            # at scale 8 (kernel-only device time). End to end, paired arms
+            # alternating within each rep, 6 reps: **-1.23 +/- 0.80 ms/step at
+            # scale 7 and -6.17 +/- 0.53 at scale 8**, 12/12 pairs same sign.
+            #
+            # Worth having because the optimizer is the one line item that does
+            # *not* shrink with spatial sharding -- 12.0 ms at scale 8 on 1, 2
+            # and 4 GPUs alike, so it grows from 2.7% of a step to 7.1% as
+            # ranks are added -- which means this saving lands whole on every
+            # rank instead of being divided among them.
+            #
+            # CUDA only: the fused kernels are device-specific, and the CPU
+            # trainers the tests build have nothing to gain. Not free
+            # numerically -- fused Adam accumulates differently from foreach,
+            # which moves the loss by up to 6.7e-6 relative over a run. Each
+            # arm is still reproducible with itself, measured: 7 independent
+            # scale-7 runs bitwise identical, and checkpoint/resume bitwise
+            # transparent, which is not free here because the fused path keeps
+            # its ``step`` counter on the device rather than on the host.
+            fused = self.device.type == "cuda"
+            self.log.info(f"Using ADAM optimizer{' (fused)' if fused else ''}.")
             self.optimizer = optim.Adam(
-                self.model.parameters(), lr=self.config.starting_learning_rate
+                self.model.parameters(),
+                lr=self.config.starting_learning_rate,
+                fused=fused,
             )
         elif self.config.optimizer == "SGD":
             self.log.info("Using SGD optimizer.")
