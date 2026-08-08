@@ -31,13 +31,15 @@ with the group axis costing nothing.
 Public API
 ==========
 ``triton_group_norm(input, num_groups, weight=None, bias=None, eps=1e-5,
-activation=None)``
+activation=None, *, out_dtype=MATCH_STOCK_DTYPE)``
     Drop-in for ``F.group_norm`` (plus an optionally fused ReLU) with
     first-order autograd.  Accepts anything ``F.group_norm`` accepts; inputs
     the Triton kernel cannot serve fall back to ``F.group_norm`` internally.
     ``activation`` defaults to ``None`` because this is a stand-alone
     replacement for ``F.group_norm``; ScaFFold itself always passes
     ``"relu"`` (both of ``unet_parts.DoubleConv``'s sites fuse their ReLU).
+    ``out_dtype`` is an opt-in that overrides the dtype rule below; its default
+    keeps the rule exactly.
 
 ``is_supported(input, num_groups, weight=None, bias=None, activation=None)``
     Cheap, side-effect-free predicate: ``True`` exactly when the native Triton
@@ -55,8 +57,14 @@ to within fp32 reduction-order noise, with:
   ``_autocast_out_dtype`` reproduces that rule without materializing the fp32
   copy of the input that autocast's own cast would make: the kernels read at
   the native width and accumulate in fp32, which is the same computation as
-  upcasting first but reads fewer bytes.  Gradients follow suit -- ``d_input``
-  has the input's dtype, ``d_weight``/``d_bias`` the parameter's.
+  upcasting first but reads fewer bytes.  A caller who wants a different
+  output width has to ask for it: ``out_dtype=`` overrides this rule (``None``
+  spells "the input's dtype"), the statistics stay fp32 either way, and the
+  default, ``MATCH_STOCK_DTYPE``, is the rule above, so nothing that does not
+  ask can be surprised.  ``FastGroupNorm`` is the one caller that asks; see
+  its docstring for why, and for what makes it safe there.  Gradients follow
+  suit -- ``d_input`` has the input's dtype, ``d_weight``/``d_bias`` the
+  parameter's.
 * **statistics** -- always accumulated in fp32, never in the input dtype, and
   rounded to the output dtype exactly once, on the store.
 * **memory format** -- the output has the *input's* memory format.  This is the
@@ -1499,6 +1507,55 @@ def _autocast_out_dtype(input: torch.Tensor) -> Optional[torch.dtype]:
     return None
 
 
+class _MatchStockDtype:
+    """The type of :data:`MATCH_STOCK_DTYPE`; see it."""
+
+    __slots__ = ()
+
+    def __repr__(self):  # pragma: no cover - diagnostics only
+        return "MATCH_STOCK_DTYPE"
+
+
+#: :func:`triton_group_norm`'s default ``out_dtype``: "whatever
+#: ``F.group_norm`` would have returned for this call", i.e. fp32 inside an
+#: autocast region and the input's dtype outside one.
+#:
+#: A distinct sentinel rather than ``None`` because ``None`` already means
+#: something else here -- it is the *op*-level spelling of "the input's dtype",
+#: and that is precisely one of the things a caller may ask for explicitly.  The
+#: default has to be a third value, and a named one makes the two askable
+#: answers visible at the call site instead of hiding one of them behind the
+#: absence of an argument.
+MATCH_STOCK_DTYPE = _MatchStockDtype()
+
+
+def _checked_out_dtype(out_dtype):
+    """Validate :func:`triton_group_norm`'s ``out_dtype`` and return it.
+
+    Argument-only, so it can run before the input has been shown to be a tensor
+    at all: a bad ``out_dtype`` is the caller's error either way, and raising it
+    here keeps the stock ``F.group_norm`` error for a bad *input* intact.
+    """
+    if out_dtype is MATCH_STOCK_DTYPE or out_dtype is None:
+        return out_dtype
+    if out_dtype in SUPPORTED_DTYPES:
+        return out_dtype
+    raise ValueError(
+        f"out_dtype must be MATCH_STOCK_DTYPE (the default), None (the input's "
+        f"dtype) or one of {SUPPORTED_DTYPES}, got {out_dtype!r}"
+    )
+
+
+def _out_dtype_for(input: torch.Tensor, out_dtype) -> Optional[torch.dtype]:
+    """Resolve a validated ``out_dtype`` against ``input``.
+
+    Returns the op's spelling: a concrete dtype, or ``None`` for "the input's".
+    """
+    if out_dtype is MATCH_STOCK_DTYPE:
+        return _autocast_out_dtype(input)
+    return out_dtype
+
+
 def is_supported(
     input,
     num_groups: int,
@@ -1575,6 +1632,8 @@ def triton_group_norm(
     bias=None,
     eps: float = 1e-5,
     activation: Optional[str] = None,
+    *,
+    out_dtype=MATCH_STOCK_DTYPE,
 ):
     """GroupNorm with an optionally fused activation, channels-last native.
 
@@ -1585,16 +1644,37 @@ def triton_group_norm(
     callers with a faster fallback should branch on :func:`is_supported`
     themselves.
 
-    The output has the input's memory format and ``F.group_norm``'s dtype; see
-    the module docstring for the full contract.
+    The output has the input's memory format and, by default,
+    ``F.group_norm``'s dtype; see the module docstring for the full contract.
+
+    ``out_dtype`` is the one way to depart from that dtype rule, and it is
+    keyword-only and opt-in: :data:`MATCH_STOCK_DTYPE` (the default) reproduces
+    ``F.group_norm`` exactly, ``None`` asks for the input's dtype -- which is
+    the same thing outside autocast and *narrower* inside it -- and a
+    :data:`SUPPORTED_DTYPES` member asks for that dtype.  It is honoured on both
+    routes, the kernel's and the ``F.group_norm`` fallback's, so the answer
+    never depends on which one served the call: the kernel stores the requested
+    dtype directly (no round trip through fp32), the fallback casts afterwards.
+    Only the *store* changes -- the statistics are accumulated in fp32
+    regardless, so a narrowed output is the fp32 answer rounded once, not a
+    narrower computation.
     """
     if activation not in SUPPORTED_ACTIVATIONS:
         raise ValueError(
             f"activation must be one of {SUPPORTED_ACTIVATIONS}, got {activation!r}"
         )
+    out_dtype = _checked_out_dtype(out_dtype)
     if not is_supported(input, num_groups, weight, bias, activation):
         out = F.group_norm(input, num_groups, weight, bias, eps)
-        return F.relu(out) if activation == "relu" else out
+        if activation == "relu":
+            out = F.relu(out)
+        # Resolved only now: `input` has been through F.group_norm, so it is a
+        # tensor, and MATCH_STOCK_DTYPE on this route is by construction a
+        # no-op -- F.group_norm just produced exactly that dtype.
+        target = _out_dtype_for(input, out_dtype)
+        if target is None:
+            target = input.dtype
+        return out if out.dtype is target else out.to(target)
     out, _mean, _rstd = torch.ops.scaffold_gn.group_norm(
         input,
         num_groups,
@@ -1602,6 +1682,6 @@ def triton_group_norm(
         bias,
         float(eps),
         activation,
-        _autocast_out_dtype(input),
+        _out_dtype_for(input, out_dtype),
     )
     return out
