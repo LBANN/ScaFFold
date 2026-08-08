@@ -520,10 +520,16 @@ def test_a_proven_rung_does_not_degrade_while_a_backward_replays_it(monkeypatch,
     proven_flag = "_triton_ok" if rung == "triton" else "_compiled_ok"
 
     def make_kernel(fail_always):
-        def _kernel(input, num_groups, weight, bias, eps, *activation):
+        # ``out_dtype`` is keyword-only on the real ``triton_group_norm`` and
+        # ``_triton_forward`` passes it on every call; the double honours it
+        # rather than swallowing it, so that a double never hides a dtype the
+        # kernel would have produced.  The compiled rung's kernel takes no such
+        # argument, which is why this signature has to accept it optionally.
+        def _kernel(input, num_groups, weight, bias, eps, *activation, out_dtype=None):
             if fail_always or gn_mod._replaying_a_forward():
                 raise failure("simulated kernel failure")
-            return F.group_norm(input, num_groups, weight, bias, eps)
+            out = F.group_norm(input, num_groups, weight, bias, eps)
+            return out if out_dtype in (None, out.dtype) else out.to(out_dtype)
 
         return _kernel
 
