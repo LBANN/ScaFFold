@@ -646,20 +646,24 @@ class FastGroupNorm(nn.GroupNorm):
     that rounding used to cost twice over: every consumer of a GroupNorm in
     this network immediately narrowed the fp32 result back to bf16 (see below),
     and writing fp32 to memory to read it back and write bf16 is a full-volume
-    read plus two full-volume writes that do no arithmetic.  Priced end to end
-    before this landed, paired and alternating arms: **-36.39 +/- 1.55 ms of a
-    449.56 ms step at scale 8 on one MI300A** (peak memory 42.78 -> 38.49 GiB)
-    and -3.93 +/- 1.19 ms of 66.49 at scale 7, of which -22.13 ms at scale 8 is
-    the cast traffic itself and the rest is the GroupNorm's own halved store
-    and a cheaper max-pool.
+    read plus two full-volume writes that do no arithmetic.  Measured end to
+    end on the landed code, paired, arms alternating within each of 6
+    replicates: **-35.73 +/- 0.93 ms of a 440.28 ms step at scale 8 on one
+    MI300A** (0.9189x; peak memory 42.776 -> 38.486 GiB) and **-4.03 +/- 0.57 ms
+    of 66.00 at scale 7** (0.9390x; 6.102 -> 5.572 GiB).  Of the 35.4 ms of
+    device time that buys at scale 8, 22.2 is the cast traffic itself, 9.1 the
+    GroupNorm's own halved store and load, and 1.4 a max-pool that reads and
+    writes half the bytes; the remaining 2.8 sits in rows this change cannot
+    reach and is not claimed.
 
     **Why it is safe here, and what would invalidate that.**  Every consumer of
     a GroupNorm output in this UNet rounds it to autocast's dtype before doing
     any arithmetic: the following convolution (``aten::convolution`` carries the
     ``lower_precision_fp`` policy), the skip concatenation (``_skip_concat``
     casts to :func:`~ScaFFold.unet.unet_parts._consumer_dtype` for exactly this
-    reason), and ``max_pool3d``, which is a selection and commutes with
-    rounding.  So no consumer in *this* model ever sees the fp32 bits it used
+    reason), and ``max_pool3d``, whose *forward* is a selection and commutes
+    with rounding (its backward does not; see below).  So no consumer in *this*
+    model ever sees the fp32 bits it used
     to be handed.  A future consumer that does want them -- an fp32 residual
     add, a loss term, a normalization whose statistics are taken over the
     GroupNorm output, anything reading it outside an autocast region -- will
@@ -668,13 +672,33 @@ class FastGroupNorm(nn.GroupNorm):
     input from somewhere else.  This is the one place ``FastGroupNorm`` is not
     a drop-in replacement, and it is deliberate.
 
-    The departure is *not* free numerically, in one respect worth naming: it
-    does not change the forward's value (which is the same fp32 number, rounded
-    once), but it changes the backward's reduction order, so a run is not
-    bitwise comparable with one taken before it.  Measured at 4.4e-06 relative
-    on the loss by step 23 at scale 8 -- the same class and size as the other
-    fp32-noise changes on this branch.  Each configuration remains bitwise
-    reproducible with itself.
+    **The departure is not free numerically, and the reason is not the
+    kernel.**  The forward is exact -- every site's output is bitwise the wide
+    answer rounded once, and the whole model's output is bitwise unchanged --
+    but the backward moves, so a run is not bitwise comparable with one taken
+    before this.  Measured on the loss at production geometry: identical at
+    step 1, first differing at step 2, worst **3.3e-06 relative by step 13 at
+    scale 8** and 5.4e-06 by step 18 at scale 7 over 24 steps, which is the same
+    class and size as the other fp32-noise changes on this branch.  Two
+    mechanisms, both *downstream* of this module and both measured
+    (``work/profile/PROFILE_GN_DTYPE.md`` SS6; the kernel itself is bitwise
+    invariant to its output dtype, and its tiling plan is a pure function of the
+    shape, so an earlier guess that the plan changed is refuted):
+
+    1. **Gradient accumulation at fan-out.**  Every encoder block's output is
+       consumed twice -- the max-pool into the next block and the skip
+       concatenation -- so autograd sums two cotangents at it.  When this
+       module returned fp32 both arrived upcast from bf16 and the sum was
+       exact; now it is rounded to bf16.  A GroupNorm with one consumer is
+       bitwise unchanged; the same one with two is not.
+    2. **``max_pool3d``'s tie-breaking.**  Rounding to bf16 creates ties inside
+       a pooling window that fp32 broke strictly, and the backward scatters
+       through *indices*, so the gradient lands on a different element.  0.76 %
+       of windows have a tied bf16 maximum on a ReLU'd GroupNorm output.
+
+    Each configuration remains bitwise reproducible **with itself**: 6
+    independent processes per arm per scale produce identical 24-step loss
+    vectors.
 
     All three rungs do this, not just the Triton one.  The Triton kernel is
     told to store the input's dtype (:func:`_triton_forward` passes
