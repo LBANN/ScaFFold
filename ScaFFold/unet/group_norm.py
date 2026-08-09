@@ -39,10 +39,14 @@ Three kernels, tried in order, all of them producing the same numbers:
 same shapes, same numerics -- only the kernel differs, so checkpoints are
 interchangeable in both directions with any other GroupNorm-based build.  The
 one addition is the optional fused ``activation`` (see below), which adds no
-state either.
+state either.  There is one deliberate departure from ``nn.GroupNorm``, in the
+output *dtype* under autocast, and it has its own section in
+``FastGroupNorm``'s docstring; read it before consuming a GroupNorm output as
+fp32.
 
-All three return the input's memory format, so the rungs are interchangeable in
-everything a caller can observe (see :func:`_match_memory_format`).
+All three rungs return the input's memory format *and* the input's dtype, so
+they are interchangeable in everything a caller can observe (see
+:func:`_match_memory_format` and :func:`_match_input_dtype`).
 
 Routing rejections, in the order they are tested:
 
@@ -581,6 +585,32 @@ def _match_memory_format(out, reference):
     return out.contiguous(memory_format=torch.channels_last_3d)
 
 
+def _match_input_dtype(out, reference):
+    """Give ``out`` ``reference``'s dtype, casting only if it differs.
+
+    The compiled and eager rungs call ``F.group_norm``, which carries
+    autocast's **fp32** cast policy and therefore returns fp32 for a bf16 input
+    inside an autocast region.  ``FastGroupNorm`` emits the input's dtype
+    instead (see its docstring for why, and for the warning that goes with it),
+    and the Triton rung does it in the store; these two have to do it here.
+
+    Free outside autocast and free for an fp32 input, where ``F.group_norm``
+    already returns the input's dtype -- the identity check, not the cast, is
+    what runs.  Inside autocast on a narrower input it is one cast, which is
+    exactly the cast the *consumer* was going to do a moment later, so nothing
+    is spent that was not being spent already; what it buys is that a rung
+    change cannot change the dtype of an activation.
+
+    ``.to(dtype)`` preserves the memory format, so this composes with
+    :func:`_match_memory_format` in either order; it is applied last because
+    the fused-activation rung applies its activation before the store, and the
+    other two must round after the ReLU for the same reason.
+    """
+    if out.dtype is reference.dtype:
+        return out
+    return out.to(reference.dtype)
+
+
 class FastGroupNorm(nn.GroupNorm):
     """``nn.GroupNorm`` with a Triton GPU kernel and an optional fused ReLU.
 
@@ -594,6 +624,99 @@ class FastGroupNorm(nn.GroupNorm):
     explicit in-place ``F.relu`` on the compiled and eager paths.  The
     correctness of the model therefore does not depend on which kernel runs;
     only the number of memory passes does.
+
+    Output dtype -- read this before consuming a GroupNorm output
+    =============================================================
+    **This module returns its input's dtype, which is not what
+    ``nn.GroupNorm``/``F.group_norm`` returns under autocast.**  ``at::group_norm``
+    carries autocast's ``fp32`` cast policy, so stock GroupNorm returns fp32
+    for *any* input dtype inside an enabled autocast region; this module
+    returns bf16 for a bf16 input, fp16 for an fp16 one, and fp32 for an fp32
+    one.  Concretely, in the shipped configuration (``torch_amp: 1``, bf16) the
+    activations a ``FastGroupNorm`` hands out are **bf16**; under
+    ``torch_amp: 0``, or in ``eval``/``inference_mode`` outside an autocast
+    region, they are **fp32** and nothing here differs from stock; under an
+    fp16 autocast they are fp16.  "The input's dtype" is the rule; "bf16" is
+    only what that rule evaluates to in production.
+
+    The statistics are *not* narrowed: mean and variance are accumulated in
+    fp32 on every rung, exactly as before, and the normalized value is computed
+    in fp32.  Only the store changes, so the output is the fp32 answer rounded
+    once -- not a narrower computation.  What this is buying is the round trip
+    that rounding used to cost twice over: every consumer of a GroupNorm in
+    this network immediately narrowed the fp32 result back to bf16 (see below),
+    and writing fp32 to memory to read it back and write bf16 is a full-volume
+    read plus two full-volume writes that do no arithmetic.  Measured end to
+    end on the landed code, paired, arms alternating within each of 6
+    replicates: **-35.73 +/- 0.93 ms of a 440.28 ms step at scale 8 on one
+    MI300A** (0.9189x; peak memory 42.776 -> 38.486 GiB) and **-4.03 +/- 0.57 ms
+    of 66.00 at scale 7** (0.9390x; 6.102 -> 5.572 GiB).  Of the 35.4 ms of
+    device time that buys at scale 8, 22.2 is the cast traffic itself, 9.1 the
+    GroupNorm's own halved store and load, and 1.4 a max-pool that reads and
+    writes half the bytes; the remaining 2.8 sits in rows this change cannot
+    reach and is not claimed.
+
+    **Why it is safe here, and what would invalidate that.**  Every consumer of
+    a GroupNorm output in this UNet rounds it to autocast's dtype before doing
+    any arithmetic: the following convolution (``aten::convolution`` carries the
+    ``lower_precision_fp`` policy), the skip concatenation (``_skip_concat``
+    casts to :func:`~ScaFFold.unet.unet_parts._consumer_dtype` for exactly this
+    reason), and ``max_pool3d``, whose *forward* is a selection and commutes
+    with rounding (its backward does not; see below).  So no consumer in *this*
+    model ever sees the fp32 bits it used
+    to be handed.  A future consumer that does want them -- an fp32 residual
+    add, a loss term, a normalization whose statistics are taken over the
+    GroupNorm output, anything reading it outside an autocast region -- will
+    get bf16 **silently**, with no error and no warning, only ~3 decimal digits
+    where it expected ~7.  Such a consumer must upcast explicitly, or take its
+    input from somewhere else.  This is the one place ``FastGroupNorm`` is not
+    a drop-in replacement, and it is deliberate.
+
+    **The departure is not free numerically, and the reason is not the
+    kernel.**  The forward is exact -- every site's output is bitwise the wide
+    answer rounded once, and the whole model's output is bitwise unchanged --
+    but the backward moves, so a run is not bitwise comparable with one taken
+    before this.  Measured on the loss at production geometry: identical at
+    step 1, first differing at step 2, worst **3.3e-06 relative by step 13 at
+    scale 8** and 5.4e-06 by step 18 at scale 7 over 24 steps, which is the same
+    class and size as the other fp32-noise changes on this branch.  Two
+    mechanisms, both *downstream* of this module and both measured
+    (``work/profile/PROFILE_GN_DTYPE.md`` SS6; the kernel itself is bitwise
+    invariant to its output dtype, and its tiling plan is a pure function of the
+    shape, so an earlier guess that the plan changed is refuted):
+
+    1. **Gradient accumulation at fan-out.**  Every encoder block's output is
+       consumed twice -- the max-pool into the next block and the skip
+       concatenation -- so autograd sums two cotangents at it.  When this
+       module returned fp32 both arrived upcast from bf16 and the sum was
+       exact; now it is rounded to bf16.  A GroupNorm with one consumer is
+       bitwise unchanged; the same one with two is not.
+    2. **``max_pool3d``'s tie-breaking.**  Rounding to bf16 creates ties inside
+       a pooling window that fp32 broke strictly, and the backward scatters
+       through *indices*, so the gradient lands on a different element.  0.76 %
+       of windows have a tied bf16 maximum on a ReLU'd GroupNorm output.
+
+    Each configuration remains bitwise reproducible **with itself**: 6
+    independent processes per arm per scale produce identical 24-step loss
+    vectors.
+
+    All three rungs do this, not just the Triton one.  The Triton kernel is
+    told to store the input's dtype (:func:`_triton_forward` passes
+    ``out_dtype``); the compiled and eager rungs cast afterwards
+    (:func:`_match_input_dtype`).  Divergence would have been cheaper -- the
+    fallback rungs pay one cast -- and it was rejected: the rungs are chosen
+    per module and per *process*, a latch can demote an unproven module
+    mid-run, and a proven module still falls back when its kernel raises
+    outside a backward replay.  A dtype that depended on that choice would be
+    an activation width that changes mid-step, differs between DDP ranks with
+    different latch histories, and -- the sharp one -- breaks
+    ``torch.utils.checkpoint``, whose non-reentrant recompute compares the
+    *dtype* of every saved tensor against the original and raises
+    ``CheckpointError`` on a mismatch.  The rungs already go to some length to
+    be indistinguishable in everything a caller can observe (see
+    ``_match_memory_format`` and the module docstring's "Latches"); dtype is
+    now on that list, and the cast that keeps it there is one the consumer
+    would have paid anyway.
 
     DistConv's ``DCTensor`` gets the fast kernels too, by unwrapping to the
     local shard in front of them rather than by letting the op dispatch through
@@ -687,26 +810,47 @@ class FastGroupNorm(nn.GroupNorm):
         )
 
     def _triton_forward(self, local):
-        """The native channels-last kernel, with the activation fused in."""
+        """The native channels-last kernel, with the activation fused in.
+
+        ``out_dtype=local.dtype`` is this module's departure from
+        ``F.group_norm``'s autocast contract, spelled at the one call site that
+        wants it rather than in the kernel module's default -- the standalone
+        ``triton_group_norm`` is documented as reproducing ``F.group_norm``'s
+        dtype and still does.  The kernel stores that dtype directly, so unlike
+        the two rungs below there is no fp32 intermediate to cast; the
+        statistics are fp32 either way.  See the class docstring's "Output
+        dtype".
+        """
         return _get_triton_module().triton_group_norm(
-            local, self.num_groups, self.weight, self.bias, self.eps, self.activation
+            local,
+            self.num_groups,
+            self.weight,
+            self.bias,
+            self.eps,
+            self.activation,
+            out_dtype=local.dtype,
         )
 
     def _compiled_forward(self, local):
-        return self._activate(
-            _match_memory_format(
-                _get_compiled_group_norm()(
-                    local, self.num_groups, self.weight, self.bias, self.eps
-                ),
-                local,
-            )
+        return _match_input_dtype(
+            self._activate(
+                _match_memory_format(
+                    _get_compiled_group_norm()(
+                        local, self.num_groups, self.weight, self.bias, self.eps
+                    ),
+                    local,
+                )
+            ),
+            local,
         )
 
     def _eager_forward(self, input):
         # super().forward() is the stock kernel; deferring to it keeps the eager
-        # path identical to nn.GroupNorm's (plus the ReLU and the relayout) by
-        # construction.
-        return self._activate(_match_memory_format(super().forward(input), input))
+        # path identical to nn.GroupNorm's (plus the ReLU, the relayout and the
+        # dtype narrowing) by construction.
+        return _match_input_dtype(
+            self._activate(_match_memory_format(super().forward(input), input)), input
+        )
 
     def forward(self, input):
         global _compile_failed, _triton_failed
