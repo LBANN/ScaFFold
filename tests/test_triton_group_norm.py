@@ -595,13 +595,11 @@ def test_output_dtype_matches_stock(dtype, autocast_dtype):
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("autocast_dtype", [None, torch.bfloat16])
 def test_out_dtype_opt_in_overrides_the_stock_rule(dtype, autocast_dtype):
-    """``out_dtype=`` is the only way past the rule above, and it is opt-in.
+    """Pins the three ``out_dtype`` spellings against the rule above.
 
-    Three spellings, one call each: the default (:data:`tgn.MATCH_STOCK_DTYPE`)
-    reproduces ``F.group_norm``; ``None`` asks for the input's dtype, which
-    differs from stock exactly inside an autocast region; and an explicit dtype
-    asks for that one.  ``FastGroupNorm`` is the caller that uses the middle
-    spelling -- see ``ScaFFold.unet.group_norm``.
+    The default reproduces ``F.group_norm``; ``None`` asks for the input's
+    dtype, which differs from stock exactly inside an autocast region and is
+    the spelling ``FastGroupNorm`` uses; an explicit dtype asks for that one.
     """
     device = torch.device("cuda")
     x, weight, bias, _ = _tensors((1, 64, 5, 5, 5), dtype, device, seed=61)
@@ -623,10 +621,9 @@ def test_out_dtype_opt_in_overrides_the_stock_rule(dtype, autocast_dtype):
     assert wide.dtype == torch.float32
     for got in (default, narrow, wide):
         assert got.is_contiguous(memory_format=CL)
-    # Only the *store* changes: the statistics and the normalized value are
-    # fp32 on every one of these calls, and the tiling plan is a function of
-    # the shape alone (`_plan` takes no dtype), so the narrow answer is the
-    # wide one rounded once -- bitwise, not approximately.
+    # Only the store changes: the statistics are fp32 on every one of these
+    # calls and the tiling plan depends on the shape alone (`_plan` takes no
+    # dtype), so the narrow answer is bitwise the wide one rounded once.
     assert torch.equal(narrow, wide.to(dtype))
     assert torch.equal(
         default, wide if default.dtype is torch.float32 else wide.to(dtype)
@@ -635,10 +632,9 @@ def test_out_dtype_opt_in_overrides_the_stock_rule(dtype, autocast_dtype):
 
 @pytest.mark.gpu
 def test_out_dtype_is_honoured_on_the_fallback_route_too():
-    """A contiguous input takes ``F.group_norm``, and still answers in the
-    requested dtype -- otherwise the dtype of a result would depend on which
-    kernel served it, which is the thing every other part of this contract
-    exists to prevent."""
+    """A contiguous input takes the ``F.group_norm`` fallback and still answers
+    in the requested dtype, so a result's dtype never depends on which kernel
+    served it."""
     device = torch.device("cuda")
     gen = torch.Generator(device=device).manual_seed(63)
     x = torch.randn(2, 64, 5, 6, 7, device=device, dtype=torch.bfloat16, generator=gen)
@@ -654,8 +650,8 @@ def test_out_dtype_is_honoured_on_the_fallback_route_too():
     assert stock.dtype is torch.float32, "assumption about stock GroupNorm broke"
     assert narrow.dtype is torch.bfloat16
     assert torch.equal(narrow, stock.to(torch.bfloat16))
-    # ... and the activation is applied before the narrowing, as it is in the
-    # kernel's store, so a fused and an unfused ReLU still agree bitwise.
+    # The activation is applied before the narrowing, as it is in the kernel's
+    # store, so a fused and an unfused ReLU still agree bitwise.
     assert relu.dtype is torch.bfloat16
     assert torch.equal(relu, F.relu(stock).to(torch.bfloat16))
 
@@ -663,8 +659,7 @@ def test_out_dtype_is_honoured_on_the_fallback_route_too():
 @pytest.mark.parametrize("bad", [torch.float64, torch.int32, "bfloat16", 16])
 def test_out_dtype_rejects_what_the_kernel_cannot_store(bad):
     """Validated as an argument, before anything looks at the input, so the
-    message names the argument rather than surfacing as a Triton compile error
-    deep inside a launch."""
+    error names ``out_dtype`` rather than surfacing from inside a launch."""
     x = torch.randn(1, 64, 2, 2, 2).to(memory_format=CL)
     with pytest.raises(ValueError, match="out_dtype"):
         triton_group_norm(x, GROUPS, out_dtype=bad)
