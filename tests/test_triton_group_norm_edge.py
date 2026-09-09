@@ -14,36 +14,35 @@
 
 """Adversarial edge-case tests for the channels-last Triton GroupNorm.
 
-Companion to ``tests/test_triton_group_norm.py``, written independently during
-an audit of the kernel.  It covers the ground the author's suite does not, and
-pins the divergences that audit found.
+Companion to ``tests/test_triton_group_norm.py``: it covers ground that
+suite's coverage misses, and pins the divergences an audit of the kernel
+found.
 
 The two structural gaps this file closes:
 
-* **The masked channel axis is never exercised upstream.**  Every GPU test in
+* The masked channel axis is never exercised upstream.  Every GPU test in
   ``test_triton_group_norm.py`` uses ``num_groups=8`` with a channel count of
-  64/128/256/2048, so ``G`` and ``C/G`` are *always* powers of two and
+  64, 128, 256, or 2048, so ``G`` and ``C/G`` are always powers of two and
   ``_Plan.masked_c`` is always ``False``.  The entire ``MASKED_C=True`` code
   path -- the ``cmask``/``wbm`` predicates in all four kernels, and the
   ``inner`` offsets that deliberately run past the end of a voxel -- ships
   untested.  :func:`test_masked_channel_axis_parity` and friends run it.
 
-* **Uninitialised split-K scratch is never checked.**  ``_forward`` and
-  ``_backward`` allocate their partial buffers with ``torch.empty``, so a slot
-  that is read before it is written would surface as *plausible* numbers, not
-  as a crash.  :func:`test_scratch_slots_are_all_written` poisons every
-  ``torch.empty`` with NaN for the duration of the call, which turns that class
-  of bug into a hard failure.
+* Uninitialised split-K scratch is never checked.  ``_forward`` and
+  ``_backward`` allocate their partial buffers with ``torch.empty``, so a
+  slot that is read before it is written would surface as plausible numbers,
+  not as a crash.  :func:`test_scratch_slots_are_all_written` poisons every
+  ``torch.empty`` with NaN for the duration of the call, which turns that
+  class of bug into a hard failure.
 
-The audit's six findings -- no device guard, the backward fake kernel's stride
-promise, silently-differentiable ``mean``/``rstd``, accepting a shape
-``F.group_norm`` rejects, a non-zero ``d_input`` for single-element groups, and
-undocumented double backward -- were tested here as ``xfail(strict=True)``
-first and fixed afterwards; the tests remain, without the markers, as the
-regression pins.  The last section adds the coverage a mutation sweep of the
-kernels found thinnest: the ``INT64=True`` branch (which a default run never
-compiled), the split-K Welford merge on *unequal* split counts, ``eps``
-placement, and the tile-mean correction term.
+The tests below also pin six behaviours an audit of the kernel found: no
+device guard, the backward fake kernel's stride promise,
+silently-differentiable ``mean``/``rstd``, accepting a shape
+``F.group_norm`` rejects, a non-zero ``d_input`` for single-element groups,
+and undocumented double backward.  The last section adds the coverage a
+mutation sweep of the kernels found thinnest: the ``INT64=True`` branch, the
+split-K Welford merge on unequal split counts, ``eps`` placement, and the
+tile-mean correction term.
 """
 
 import contextlib
@@ -62,16 +61,16 @@ from ScaFFold.unet.triton_group_norm import is_supported, triton_group_norm
 CL = torch.channels_last_3d
 EPS = 1e-5
 
-#: Relative-error ceiling against the float64 reference below.  fp32 parity at
-#: these (small) shapes measures ~1e-07; the ceiling leaves room for the
-#: reduction noise a production-sized split-K reduction shows.
+#: Relative-error ceiling against the float64 reference below.  It leaves
+#: headroom above typical fp32 parity at these small shapes, for the
+#: reduction noise a production-sized split-K reduction adds.
 FP32_TOL = 1e-4
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 # ---------------------------------------------------------------------------
-# independent float64 reference (deliberately *not* F.group_norm, and
+# independent float64 reference (deliberately not F.group_norm, and
 # deliberately not the helper the author's suite uses)
 # ---------------------------------------------------------------------------
 
@@ -183,10 +182,10 @@ def test_masked_channel_axis_parity(shape, groups, activation):
     """``MASKED_C=True``: the padded (G, C/G) tile must be fully predicated.
 
     ``inner = g * CG + j`` deliberately runs past the end of a voxel for the
-    padding lanes, so a wrong ``cmask``/``wbm`` predicate reads (or writes) the
-    *next* voxel's channels, and a wrong ``other=`` poisons the Welford sums.
-    Neither shows up anywhere in the author's suite, which only ever runs
-    ``num_groups=8`` over 64/128/256/2048 channels.
+    padding lanes, so a wrong ``cmask``/``wbm`` predicate reads (or writes)
+    the next voxel's channels, and a wrong ``other=`` poisons the Welford
+    sums.  Neither shows up anywhere in the author's suite, which only ever
+    runs ``num_groups=8`` over 64, 128, 256, or 2048 channels.
     """
     plan = tgn._plan(shape[0], shape[1], shape[2] * shape[3] * shape[4], groups, 0)
     assert plan.masked_c, "case is supposed to exercise the padded channel axis"
@@ -236,7 +235,7 @@ def test_ragged_spatial_tails(shape):
 
     The ragged tail is where ``offs_s < S - s0`` in ``_normalize_kernel`` /
     ``_dx_kernel`` and ``nvalid = min(BLOCK_S, s_end - s0)`` in the two partial
-    kernels have to agree; ``cnt_t = nvalid * CG`` also has to be the *valid*
+    kernels have to agree; ``cnt_t = nvalid * CG`` also has to be the valid
     lane count or the Welford mean is scaled wrong.
     """
     _parity(shape, 8, seed=abs(hash(shape)) % 997)
@@ -300,12 +299,12 @@ def test_scratch_slots_are_all_written(shape, groups):
     """Every split-K partial slot must be written before it is read.
 
     ``_forward``/``_backward`` allocate ``pcnt/pmean/pm2`` and
-    ``ps1/ps2/pdw/pdb`` with ``torch.empty``.  A slot that is read but never
-    written would inherit whatever the caching allocator last left there --
-    usually finite, plausible numbers, which no parity test can be relied on to
-    catch.  Poisoning every ``torch.empty``/``empty_like`` with NaN for the
-    duration of the call turns that into a hard failure, and also proves the
-    output buffer itself is fully covered by the store masks.
+    ``ps1/ps2/pdw/pdb`` with ``torch.empty``, so a slot read before it is
+    written inherits whatever the caching allocator last left there --
+    plausible numbers that no parity test would catch.  Poisoning every
+    ``torch.empty``/``empty_like`` with NaN during the call turns that into a
+    hard failure, and also proves the output buffer is fully covered by the
+    store masks.
     """
     x, weight, bias, grad_out = _make(shape, groups, seed=5)
     real_empty, real_empty_like = torch.empty, torch.empty_like
@@ -349,11 +348,10 @@ def test_all_equal_input_has_exactly_zero_variance(value, eps):
     """Variance exactly 0 => ``rstd = 1/sqrt(eps)`` and ``xhat`` exactly 0.
 
     This is the sharpest possible statement of the Welford claim: with
-    ``weight=1, bias=0`` the output must be *identically* zero, with no
-    tolerance at all.  ATen's fp32 GroupNorm does not manage it (it forms the
-    variance by cancellation and leaves ~1e-05 of noise at ``value=3`` and
-    ~3e-03 at ``value=1e3``), which is asserted here so the comparison stays
-    honest if ATen ever changes.
+    ``weight=1, bias=0`` the output must be identically zero, with no
+    tolerance at all.  ATen's fp32 GroupNorm forms the variance by
+    cancellation and does not manage it, which is why this asserts equality
+    rather than a bound.
     """
     device = torch.device("cuda")
     shape = (2, 64, 8, 8, 8)
@@ -383,9 +381,9 @@ def test_all_equal_input_has_exactly_zero_variance(value, eps):
 def test_welford_at_extreme_mean_to_std_ratio(mean, std, naive_floor):
     """Past the ratios the author's suite tests (mu/sigma up to 1e5).
 
-    At ``mu/sigma = 1e6`` the ``E[x^2]-E[x]^2`` formulation is off by ~2e0 to
-    ~3e2 relative while this kernel holds ~5e-04, and ATen's own fp32 kernel is
-    50-70x worse than this one.  Measured on MI300A at ``[1, 256, 24^3]``.
+    At these more extreme ratios the naive ``E[x^2]-E[x]^2`` formulation
+    loses the variance outright; this kernel stays correct, and does at
+    least as well as ATen's own fp32 GroupNorm on the same input.
     """
     x, weight, bias, _ = _make((1, 256, 24, 24, 24), 8, seed=37, mean=mean, std=std)
     got = triton_group_norm(x, 8, weight, bias, EPS)
@@ -444,7 +442,7 @@ def test_grad_out_layout_variants(kind):
     """A cotangent that is not channels-last-contiguous.
 
     ``_group_norm_backward_op`` relayouts it; the kernels index it with the
-    *input's* channels-last stride pattern, so a missed relayout silently
+    input's channels-last stride pattern, so a missed relayout silently
     permutes the gradient rather than raising.  The author's suite only ever
     feeds a channels-last-contiguous cotangent to the fast path.
     """
@@ -488,7 +486,7 @@ def test_grad_out_layout_variants(kind):
     assert _rel(xi.grad, xd.grad) <= FP32_TOL
     assert _rel(wi.grad, wd.grad) <= FP32_TOL
     assert _rel(bi.grad, bd.grad) <= FP32_TOL
-    # d_input keeps the *input's* format regardless of the cotangent's.
+    # d_input keeps the input's format regardless of the cotangent's.
     assert xi.grad.is_contiguous(memory_format=CL)
 
 
@@ -537,14 +535,13 @@ def test_channels_last_views_with_a_storage_offset(lo, hi):
 
 @pytest.mark.gpu
 def test_double_backward_raises_instead_of_returning_garbage():
-    """Higher-order gradients are *not* supported, and must say so.
+    """Higher-order gradients are not supported, and must say so.
 
-    ``scaffold_gn::group_norm_backward`` has no autograd formula of its own, so
-    a second ``torch.autograd.grad`` through the kernel raises.  Stock
-    ``F.group_norm`` supports double backward, so this is a real (if narrow)
-    behavioural difference from the op it replaces -- anything that needs a
-    gradient penalty or a Hessian-vector product cannot use this kernel.  The
-    test pins "raises loudly", which is the safe half of the story.
+    ``scaffold_gn::group_norm_backward`` has no autograd formula of its own,
+    so a second ``torch.autograd.grad`` through the kernel raises.  Stock
+    ``F.group_norm`` supports double backward, so anything that needs a
+    gradient penalty or a Hessian-vector product cannot use this kernel; the
+    test pins that it raises loudly rather than silently.
     """
     x, weight, bias, grad_out = _make((1, 64, 4, 4, 4), 8, seed=97)
     xi = x.detach().clone().requires_grad_(True)
@@ -573,11 +570,11 @@ def test_double_backward_raises_instead_of_returning_garbage():
 @pytest.mark.parametrize("out_dtype", [None, torch.float32])
 @pytest.mark.parametrize("has_w,has_b", [(True, True), (False, False), (True, False)])
 def test_fake_forward_matches_real_in_every_branch(dtype, out_dtype, has_w, has_b):
-    """The fake kernel must promise the real shape, dtype, stride *and* device.
+    """The fake kernel must promise the real shape, dtype, stride and device.
 
     A meta mismatch is invisible in eager and silently corrupts
     ``torch.compile``; the author's suite spot-checks two combinations, this
-    walks the whole cross product of dtype x out_dtype override x affine.
+    walks the whole cross product of dtype, out_dtype override, and affine.
     """
     from torch._subclasses.fake_tensor import FakeTensorMode
 
@@ -608,20 +605,20 @@ def test_fake_forward_matches_real_in_every_branch(dtype, out_dtype, has_w, has_
 def test_fake_backward_matches_real_in_every_branch(layout, has_w, has_b):
     """The backward's fake kernel must promise what the real op returns.
 
-    The real op relayouts a non-channels-last ``input`` and *always* returns a
+    The real op relayouts a non-channels-last ``input`` and always returns a
     channels-last ``d_input``; ``torch.empty_like(input)`` would instead
-    preserve the input's own format, so for a plain contiguous NCDHW input the
-    two disagree ((13440, 1, 2688, 448, 64) against (13440, 210, 42, 7, 1)).  A
-    meta mismatch is invisible in eager and silently corrupts
-    ``torch.compile``, so every branch of the promise -- both layouts, a
-    non-contiguous view, the shape where the two formats coincide, and each
-    affine combination -- is checked here rather than only the CL case.
+    preserve the input's own format, so for a plain contiguous NCDHW input
+    the two disagree.  A meta mismatch is invisible in eager and silently
+    corrupts ``torch.compile``, so every branch of the promise -- both
+    layouts, a non-contiguous view, the shape where the two formats
+    coincide, and each affine combination -- is checked here rather than
+    only the CL case.
     """
     from torch._subclasses.fake_tensor import FakeTensorMode
 
     device = torch.device("cuda")
     if layout == "degenerate":
-        shape = (2, 64, 1, 1, 1)  # contiguous *is* channels_last_3d here
+        shape = (2, 64, 1, 1, 1)  # contiguous is channels_last_3d here
         x = torch.randn(shape, device=device)
     else:
         shape = (2, 64, 5, 6, 7)
@@ -661,13 +658,12 @@ def test_fake_backward_matches_real_in_every_branch(layout, has_w, has_b):
 def test_mean_and_rstd_are_not_silently_differentiable():
     """``mean``/``rstd`` are backward state, so they must refuse, not lie.
 
-    They are documented as "not differentiable".  Before they were marked as
-    such, they came back with ``requires_grad=True`` and differentiating
-    through them *succeeded*: autograd materialised an all-zero cotangent for
-    the unused ``out``, ran the entire backward (a full-size zeros allocation
-    plus four kernels) and returned zeros -- a plausible wrong answer where the
-    true value is ~6e-04.  ``ctx.mark_non_differentiable`` turns that into an
-    error, which is the only safe outcome short of a real formula.
+    They are documented as "not differentiable".  Without
+    ``ctx.mark_non_differentiable``, they would come back with
+    ``requires_grad=True``, and differentiating through them would silently
+    run the full backward and return a plausible but wrong answer rather
+    than raising.  Marking them non-differentiable is the only safe outcome
+    short of a real formula.
     """
     device = torch.device("cuda")
     shape = (2, 64, 5, 6, 7)
@@ -683,8 +679,8 @@ def test_mean_and_rstd_are_not_silently_differentiable():
         with pytest.raises(RuntimeError, match="does not require grad"):
             torch.autograd.grad(t.sum(), xi)
         assert xi.grad is None, f"differentiating {name} left a gradient behind"
-    # The value that used to come back silently wrong is genuinely non-zero,
-    # so "returns zeros" was never defensible as an answer.
+    # The true gradient here is genuinely non-zero, so returning zeros would
+    # never have been a defensible answer.
     xd = x.clone().double().requires_grad_(True)
     (want,) = torch.autograd.grad(xd.reshape(2, 8, -1).mean(-1).sum(), xd)
     assert want.abs().max() > 0
@@ -701,13 +697,13 @@ def test_mean_and_rstd_are_not_silently_differentiable():
     [((1, 64, 1, 1, 1), 8), ((2, 64, 1, 1, 1), 8), ((1, 1, 4, 5, 6), 1)],
 )
 def test_is_supported_accepts_layout_ambiguous_contiguous_input(shape, groups):
-    """``is_supported`` is *not* simply "False for contiguous input".
+    """``is_supported`` is not simply "False for contiguous input".
 
     For shapes whose spatial or channel extents are all 1 the contiguous and
     channels-last-3d stride patterns coincide, so a plain ``torch.randn``
-    tensor is accepted by the fast path.  That is benign -- the two layouts are
-    the same bytes -- but it means callers cannot use ``is_supported`` as a
-    layout *classifier*.  Pinned here so the behaviour is deliberate.
+    tensor is accepted by the fast path.  That is benign -- the two layouts
+    are the same bytes -- but it means callers cannot use ``is_supported`` as
+    a layout classifier.  Pinned here so the behaviour is deliberate.
     """
     device = torch.device("cuda")
     x = torch.randn(shape, device=device)  # never asked for channels_last
@@ -723,13 +719,12 @@ def test_is_supported_accepts_layout_ambiguous_contiguous_input(shape, groups):
 def test_one_value_per_channel_matches_stock_rejection(shape, groups):
     """``N*(C/G)*D*H*W == 1`` is a shape ``F.group_norm`` refuses to run.
 
-    The kernel *can* compute it (every group has zero variance, so the answer
-    is ``bias``), and it used to: ``is_supported`` returned True and
-    ``triton_group_norm`` returned a value where the op it is a drop-in for
-    raises ``ValueError``.  A caller branching on ``is_supported`` would then
-    get a different answer from the reference path, which is worse than being
-    slower, so all three of ``is_supported``, the public wrapper and the raw op
-    now reject it the same way stock does.
+    The kernel can compute it (every group has zero variance, so the answer
+    is ``bias``), but a caller branching on ``is_supported`` must get the
+    same answer as the reference path it stands in for, not a different one
+    -- silently diverging is worse than being slower.  All three of
+    ``is_supported``, the public wrapper, and the raw op reject it the same
+    way stock does.
     """
     device = torch.device("cuda")
     x = torch.empty(shape, device=device, memory_format=CL).normal_()
@@ -754,10 +749,10 @@ def test_one_value_per_channel_matches_stock_rejection(shape, groups):
 def test_neighbours_of_the_one_value_per_channel_shape_are_still_served(shape, groups):
     """The rejection must be exactly stock's, not a shape family around it.
 
-    ``_verify_batch_size`` rejects ``N*(C/G)*spatial == 1`` and nothing else, so
-    bumping *any one* of N, C/G or the spatial extent to 2 has to come back to
-    the fast path -- including ``(2, 8, 1, 1, 1)``, which still has a single
-    element per group.
+    ``_verify_batch_size`` rejects ``N*(C/G)*spatial == 1`` and nothing else,
+    so bumping any one of N, C/G or the spatial extent to 2 has to come back
+    to the fast path -- including ``(2, 8, 1, 1, 1)``, which still has a
+    single element per group.
     """
     device = torch.device("cuda")
     x = torch.empty(shape, device=device, memory_format=CL).normal_()
@@ -781,16 +776,16 @@ def test_single_element_group_gradient_is_exactly_zero(shape, groups, activation
     """One element per group => y is constant in x => dx must be identically 0.
 
     ``mean == x`` and ``var == 0`` identically, so ``xhat`` is the constant 0
-    and nothing downstream depends on ``x``.  ``_dx_kernel`` used to answer
-    2.2e-05 instead: the compiler contracts ``dy*w - c1`` to
-    ``fma(dy, w, -c1)`` while ``c1`` was accumulated from the *rounded*
-    product, so what survives is the product's rounding error (7.0e-08, well
-    under one ulp of ``dyw``), amplified by ``rstd = 1/sqrt(eps) = 316``.
-    ``_backward`` now recognises the degenerate case and returns the exact
-    zero; ATen, on the shapes where it will run at all, leaves ~3e-05 there.
+    and nothing downstream depends on ``x``.  A naive ``_dx_kernel`` misses
+    this: the compiler contracts ``dy*w - c1`` to ``fma(dy, w, -c1)`` while
+    ``c1`` was accumulated from the rounded product, so the rounding error
+    that survives gets amplified by ``rstd = 1/sqrt(eps)``, which is large at
+    the default ``eps``.  ``_backward`` recognises the degenerate case
+    instead and returns the exact zero; ATen, on the shapes where it runs at
+    all, does not.
 
-    The ``(1, 8, 2, 1, 1)`` case is the control: two elements per group, so the
-    gradient is *not* identically zero and the kernel must not zero it.
+    The ``(1, 8, 2, 1, 1)`` case is the control: two elements per group, so
+    the gradient is not identically zero and the kernel must not zero it.
     """
     device = torch.device("cuda")
     gen = torch.Generator(device=device).manual_seed(3)
@@ -826,12 +821,11 @@ def test_single_element_group_gradient_is_exactly_zero(shape, groups, activation
     else:
         assert xd.grad.abs().max() > 0, "control case is supposed to be non-trivial"
         assert xi.grad.abs().max() > 0, "the kernel zeroed a non-degenerate gradient"
-        # A *two*-element group is merely ill-conditioned, not degenerate:
-        # xhat is +-1/sqrt(1+eps/var) and dx is a difference of near-equal
-        # terms, so every fp32 implementation loses digits here -- 4.9e-04
-        # relative for this kernel and 1.4e-04 for ATen on this input.  The
-        # bound is therefore loose against float64, and tight against ATen,
-        # which suffers the same cancellation.
+        # A two-element group is merely ill-conditioned, not degenerate: xhat
+        # is +-1/sqrt(1+eps/var) and dx is a difference of near-equal terms,
+        # so every fp32 implementation loses digits here.  The bound is
+        # therefore loose against float64, and tight against ATen, which
+        # suffers the same cancellation.
         assert _rel(xi.grad, xd.grad) <= 1e-3
         xa = x.clone().requires_grad_(True)
         F.group_norm(xa, groups, weight, bias, EPS).backward(grad_out)
@@ -848,9 +842,10 @@ def test_single_element_group_gradient_is_exactly_zero(shape, groups, activation
 def test_torch_compile_with_dynamic_shapes(activation):
     """``dynamic=True`` as well as the author's ``dynamic=False``.
 
-    With dynamic shapes the fake kernel is invoked on *symbolic* sizes, so a
-    shape/stride promise that only happens to hold for a concrete size shows up
-    here and nowhere else.  ``fullgraph=True`` is the no-graph-break assertion.
+    With dynamic shapes the fake kernel is invoked on symbolic sizes, so a
+    shape/stride promise that only happens to hold for a concrete size shows
+    up here and nowhere else.  ``fullgraph=True`` is the no-graph-break
+    assertion.
     """
     x, weight, bias, grad_out = _make((2, 64, 6, 6, 6), 8, seed=59)
 
@@ -929,13 +924,13 @@ _DETERMINISM_SCRIPT = textwrap.dedent(
 def test_bitwise_determinism_across_processes():
     """Process-to-process bitwise reproducibility, which is half the claim.
 
-    ``test_bitwise_determinism`` upstream only calls the kernel twice in *one*
-    process, where the plan is already memoised and the JIT cache already warm.
-    This runs three fresh interpreters -- one of which first JITs other shapes,
-    churns the caching allocator and changes how much memory is free -- and
-    compares SHA-256 of the raw output bytes.  Anything that made the split
-    count, tile size or launch geometry depend on device state rather than on
-    the shape would show up only here.
+    ``test_bitwise_determinism`` upstream only calls the kernel twice in one
+    process, where the plan is already memoised and the JIT cache already
+    warm.  This runs three fresh interpreters -- one of which first JITs
+    other shapes, churns the caching allocator and changes how much memory is
+    free -- and compares SHA-256 of the raw output bytes.  Anything that made
+    the split count, tile size or launch geometry depend on device state
+    rather than on the shape would show up only here.
     """
     outputs = []
     for mode in ("plain", "plain", "warm"):
@@ -1009,16 +1004,16 @@ _DEVICE_GUARD_SCRIPT = textwrap.dedent(
 @pytest.mark.slow
 @pytest.mark.timeout(600)
 def test_kernel_runs_on_the_inputs_device_not_the_current_one():
-    """Tensors on cuda:1 while cuda:0 is current, forward *and* backward.
+    """Tensors on cuda:1 while cuda:0 is current, forward and backward.
 
-    A Triton launch goes to whatever device is *current*, so without a device
+    A Triton launch goes to whatever device is current, so without a device
     guard the kernel dereferences another device's pointers and the process
     dies with ``Memory access fault by GPU node-N``.  ``F.group_norm`` carries
     ATen's ``DeviceGuard`` and handles the identical call, so this is a
     divergence from the op being replaced, not a PyTorch limitation.
 
-    Run in a subprocess because the failure mode is an unrecoverable GPU memory
-    fault, which would take the whole pytest session with it.
+    Run in a subprocess because the failure mode is an unrecoverable GPU
+    memory fault, which would take the whole pytest session with it.
     """
     if torch.cuda.device_count() < 2:
         pytest.skip("needs 2 visible CUDA devices")
@@ -1039,12 +1034,12 @@ def test_kernel_runs_on_the_inputs_device_not_the_current_one():
 def test_device_guard_helper_is_a_no_op_on_the_current_device():
     """The guard must be free on the hot path and real off it.
 
-    ``_device_guard`` skips ``torch.cuda.device`` when the tensor already lives
-    on the current device (1.55 us against 0.51 us of host time per call, which
-    is 0.5% of the two smallest scale-8 shapes' 0.65 ms fwd+bwd because they
-    are host-dispatch bound).  This pins both halves of that shortcut so a
-    future edit cannot quietly turn it into "no guard at all"; the multi-device
-    behaviour itself is covered by the subprocess test above.
+    ``_device_guard`` skips ``torch.cuda.device`` when the tensor already
+    lives on the current device, since that construction costs real host
+    time on the smallest, host-dispatch-bound shapes.  This pins both halves
+    of that shortcut so a future edit cannot quietly turn it into "no guard
+    at all"; the multi-device behaviour itself is covered by the subprocess
+    test above.
     """
     device = torch.device("cuda", torch.cuda.current_device())
     guard = tgn._device_guard(device)
@@ -1067,9 +1062,9 @@ def test_device_guard_helper_is_a_no_op_on_the_current_device():
 def test_int32_addressing_at_its_documented_maximum():
     """``numel = INT32_MAX - 127`` with N=2, i.e. ``plan.int64 is False``.
 
-    The author's suite tests the shape *above* the switch
-    (``test_correct_above_int32_max_elements``) but never the largest shape the
-    **int32** path itself has to serve, which is where a missing term in the
+    The author's suite tests the shape above the switch
+    (``test_correct_above_int32_max_elements``) but never the largest shape
+    the int32 path itself has to serve, which is where a missing term in the
     ``numel + channels > INT32_MAX`` guard would bite.  ``65 * 63 * 4097`` is
     ``2^24 - 1`` voxels, so nothing about the extents is a power of two.
 
@@ -1163,7 +1158,7 @@ def _force_int64_addressing():
     ``_Plan`` sets ``int64 = numel + channels > _INT32_MAX``, so dropping the
     threshold turns the wide path on for a shape that fits in a few MiB.  The
     plan cache is keyed on the shape, not on the threshold, so it has to be
-    cleared on the way in *and* on the way out.
+    cleared on the way in and on the way out.
     """
     real = tgn._INT32_MAX
     tgn._plan.cache_clear()
@@ -1189,16 +1184,18 @@ def _force_int64_addressing():
 def test_int64_addressing_path_is_behaviourally_correct(shape, groups, activation):
     """Run the ``INT64=True`` branch of all seven kernels on a small shape.
 
-    ``INT64`` is a ``tl.constexpr``, so the wide and narrow paths are *different
-    compiled kernels*; only shapes above 2^31 elements reach the wide one
-    naturally, and the one test that does is ``@pytest.mark.slow`` and needs
-    8 GiB.  In a default ``-m "not slow"`` run the int64 branch therefore has no
-    behavioural coverage at all -- forcing ``self.int64`` gives it some for the
-    price of a few MiB.
+    ``INT64`` is a ``tl.constexpr``, so the wide and narrow paths are
+    different compiled kernels; only shapes above 2^31 elements reach the
+    wide one naturally, and the one test that does needs enough device
+    memory that it is marked ``@pytest.mark.slow``.  In a default
+    ``-m "not slow"`` run the int64 branch therefore has no behavioural
+    coverage at all -- forcing ``self.int64`` gives it some for the price of
+    a few MiB.
 
-    The two paths differ only in the *type* of the scalar tile base, so the
-    results must be **bitwise** identical, which is a far sharper assertion than
-    a tolerance and would catch a widened offset that lost or duplicated a tile.
+    The two paths differ only in the type of the scalar tile base, so the
+    results must be bitwise identical, which is a far sharper assertion than
+    a tolerance and would catch a widened offset that lost or duplicated a
+    tile.
     """
     x, weight, bias, grad_out = _make(shape, groups, seed=abs(hash(shape)) % 997)
 
@@ -1230,13 +1227,11 @@ def test_int64_addressing_path_is_behaviourally_correct(shape, groups, activatio
     assert _rel(wide[0], ref) <= FP32_TOL
 
 
-#: ``(shape, groups)`` whose split-K partials have *unequal* counts, because
+#: ``(shape, groups)`` whose split-K partials have unequal counts, because
 #: ``chunk = ceil(S / nsplit)`` does not divide ``S``.  Chan's combine weights
 #: the delta by ``cnt_b / (cnt_a + cnt_b)``; with equal counts every level of
 #: the reduction tree has ``cnt_a == cnt_b``, so weighting by the wrong one is
-#: invisible.  Only a ragged (or empty) trailing split exposes it -- which is
-#: why the mutation sweep killed that bug with exactly two parametrizations of
-#: one test upstream.
+#: invisible.  Only a ragged (or empty) trailing split exposes it.
 _UNEVEN_SPLIT_CASES = [
     ((2, 64, 9, 7, 5), 8),
     ((1, 2048, 6, 6, 6), 8),
@@ -1256,14 +1251,14 @@ def test_group_statistics_match_float64_with_uneven_splits(shape, groups, eps):
 
     Two things hide inside the output's 1e-4 tolerance and show up here:
 
-    * **the Welford merge.**  The shapes above all have at least one split with
-      a different element count from its neighbours, which is the only
+    * the Welford merge.  The shapes above all have at least one split with a
+      different element count from its neighbours, which is the only
       configuration in which mis-weighting Chan's delta changes the answer.
-    * **where ``eps`` goes.**  Every parity test in both files uses
-      ``eps=1e-5`` against a variance of ~1, where ``1/sqrt(var+eps)`` and
+    * where ``eps`` goes.  Every parity test in both files uses ``eps=1e-5``
+      against a variance of ~1, where ``1/sqrt(var+eps)`` and
       ``1/(sqrt(var)+eps)`` agree to ~1e-5 -- inside that tolerance.  At
-      ``eps=0.5`` they are 0.816 and 0.667, a 22% difference that no tolerance
-      can absorb.
+      ``eps=0.5`` they diverge enough that no tolerance in this suite could
+      absorb the difference.
     """
     spatial = shape[2] * shape[3] * shape[4]
     plan = tgn._plan(shape[0], shape[1], spatial, groups, shape[0] * shape[1] * spatial)
@@ -1294,23 +1289,19 @@ def test_group_statistics_match_float64_with_uneven_splits(shape, groups, eps):
 def test_welford_correction_recovers_rstd_in_a_single_tile_reduction(groups, seed):
     """The third reduction pass (``corr``) is load-bearing, and here is where.
 
-    ``mean0 = sum(x)/n`` loses digits in proportion to the tile's element count
-    times ``mu/sigma``; ``corr = sum(x-mean0)/n`` recovers them, and ``M2`` is
-    then formed around the corrected mean.  The effect is largest when one tile
-    carries a whole group's reduction, which is this shape: ``block_s_stats``
-    covers all 128 voxels and ``nsplit == 1``, so 8192/``G`` elements per group
-    go through a single ``mean0``.
+    ``mean0 = sum(x)/n`` loses digits in proportion to the tile's element
+    count times ``mu/sigma``; ``corr = sum(x-mean0)/n`` recovers them, and
+    ``M2`` is then formed around the corrected mean.  The effect is largest
+    when one tile carries a whole group's reduction, which is this shape:
+    ``block_s_stats`` covers all 128 voxels and ``nsplit == 1``, so
+    8192/``G`` elements per group go through a single ``mean0``.  At this
+    mean/std ratio, dropping the correction term measurably degrades
+    ``rstd``'s relative error; the ceiling below is set well below where the
+    uncorrected path lands.
 
-    At ``mu/sigma = 1e6`` the correction is worth **216x** (G=1), **580x**
-    (G=2) and **1472x** (G=4) on the relative error of ``rstd`` -- measured by
-    running a copy of this module with the term deleted.  Corrected lands at
-    ~1e-07 for every seed and group count; without it, at 2.1e-05 to 1.6e-04.
-    The 1e-06 ceiling below sits an order of magnitude above the first and an
-    order of magnitude below the second.
-
-    The *output* is not a witness for this: ``y`` moves by at most ~1.4x with
-    or without the term, because it is dominated by the fp32 representation of
-    the mean.  That is why this asserts ``rstd`` directly.
+    The output is not a witness for this: ``y`` is dominated by the fp32
+    representation of the mean whether or not the term is present, so this
+    asserts ``rstd`` directly.
     """
     device = torch.device("cuda")
     shape = (2, 64, 8, 4, 4)
@@ -1342,17 +1333,17 @@ def test_welford_correction_recovers_rstd_in_a_single_tile_reduction(groups, see
 # 12. the fused finalize and the capped elementwise grid
 # ---------------------------------------------------------------------------
 #
-# ``_stats_finalize``/``_bwd_finalize``/``_dwdb_reduce`` are no longer their own
+# ``_stats_finalize``/``_bwd_finalize``/``_dwdb_reduce`` are not separate
 # launches: each is recomputed inside the elementwise kernel that consumes it.
 # Two consequences need pinning.
 #
 # * The elementwise grid is capped at ``GNConfig.elem_progs`` and each program
-#   *strides* over its share of the tiles, so that the fused finalize costs
+#   strides over its share of the tiles, so that the fused finalize costs
 #   ``nprog_elem * nsplit`` and not ``nblk_elem * nsplit`` reads.  No scale-8
 #   shape and no shape in either suite reaches that path with the shipped
-#   table -- ``nprog_elem == nblk_elem`` at every small shape -- so it has to be
-#   reached deliberately.
-# * The cap is a *performance* knob.  If it could change a single bit of the
+#   table -- ``nprog_elem == nblk_elem`` at every small shape -- so it has to
+#   be reached deliberately.
+# * The cap is a performance knob.  If it could change a single bit of the
 #   output it would break the module's reproducibility contract, since it is
 #   the one plan field that does not follow from the shape alone.
 
@@ -1393,7 +1384,7 @@ def _forced_config(channels, spatial, **overrides):
     [
         ((1, 64, 16, 16, 16), 8),
         ((2, 64, 16, 16, 16), 8),  # N > 1: the stride is per (blk, n) program
-        ((1, 20, 8, 8, 8), 5),  # capped grid *and* a padded channel axis
+        ((1, 20, 8, 8, 8), 5),  # capped grid and a padded channel axis
     ],
 )
 @pytest.mark.parametrize("elem_progs", [1, 3, 8])
@@ -1435,12 +1426,13 @@ def test_elementwise_grid_cap_is_bitwise_neutral(shape, groups):
     """``elem_progs`` may not change a single bit of any output.
 
     It is the only field of ``_Plan`` that is a free parameter rather than a
-    consequence of the shape, and the module promises bitwise reproducibility.
-    That promise holds only because the elementwise kernels carry nothing
-    across loop iterations: the fused finalize is computed once per program
-    from the *same* partials with the *same* tile shape, and the tile bodies
-    are pure elementwise.  If tuning this knob ever moved a result, the frozen
-    table would have become part of the numerical contract.
+    consequence of the shape, and the module promises bitwise
+    reproducibility.  That promise holds only because the elementwise
+    kernels carry nothing across loop iterations: the fused finalize is
+    computed once per program from the same partials with the same tile
+    shape, and the tile bodies are pure elementwise.  If tuning this knob
+    ever moved a result, the frozen table would have become part of the
+    numerical contract.
     """
     spatial = shape[2] * shape[3] * shape[4]
     x, weight, bias, grad_out = _make(shape, groups, seed=11)
@@ -1473,15 +1465,15 @@ def test_elementwise_grid_cap_is_bitwise_neutral(shape, groups):
     ],
 )
 def test_fused_finalize_publishes_the_statistics(shape, groups, elem_progs):
-    """``mean``/``rstd`` are published by program 0 of the *normalize* kernel.
+    """``mean``/``rstd`` are published by program 0 of the normalize kernel.
 
-    There is no separate finalize launch any more: every elementwise program
-    re-derives the statistics from the split-K Welford partials, and program 0
-    is the one that stores them for the backward pass.  A wrong publishing
-    program, a wrong partials index, or a group-mask slip in that fused
-    reduction would hand the backward garbage while leaving the forward -- which
-    uses its own locally computed copy -- perfectly correct.  So check the
-    published tensors directly against float64.
+    Every elementwise program re-derives the statistics from the split-K
+    Welford partials rather than reading them from a separate finalize
+    launch, and program 0 is the one that stores them for the backward pass.
+    A wrong publishing program, a wrong partials index, or a group-mask slip
+    in that fused reduction would hand the backward garbage while leaving
+    the forward -- which uses its own locally computed copy -- perfectly
+    correct.  So check the published tensors directly against float64.
     """
     spatial = shape[2] * shape[3] * shape[4]
     with _forced_config(shape[1], spatial, elem_tile=1024, elem_progs=elem_progs):
@@ -1505,11 +1497,12 @@ def test_dweight_blocks_are_covered_when_there_are_more_of_them_than_tiles(
 ):
     """The dweight/dbias reduction rides in ``_dx_kernel``'s first NDW programs.
 
-    Those blocks are per-*channel*, the elementwise tiles are per-*voxel*, and
+    Those blocks are per-channel, the elementwise tiles are per-voxel, and
     nothing makes the first outnumber the second: at ``(2, 2048, 1, 1, 1)``
     there is one elementwise tile and eight dweight blocks.  The grid is
     ``max(nprog_elem, dwdb_progs)`` for exactly that reason, and a grid of
-    ``nprog_elem`` alone would silently leave 7/8 of ``d_weight`` unwritten.
+    ``nprog_elem`` alone would silently leave all but one dweight block
+    unwritten.
     """
     spatial = shape[2] * shape[3] * shape[4]
     plan = tgn._plan(shape[0], shape[1], spatial, groups, 0)
@@ -1530,14 +1523,14 @@ def test_kernel_failures_are_tagged_and_carry_their_cause():
     """Everything the launch region raises comes out as ``TritonKernelError``.
 
     The tag is what lets a caller with a fallback (``FastGroupNorm``'s ladder)
-    catch *exactly* "the kernel is broken" instead of catching ``Exception`` and
-    then trying to enumerate every framework mechanism -- saved-tensor pack
-    hooks, ``torch.utils.checkpoint``'s recompute control flow, functorch --
-    that legitimately raises through a forward.  The region it wraps is closed
-    (allocations and launches, no autograd-observable op), so a blanket catch
-    inside it is sound where one at the call site is not.
+    catch exactly "the kernel is broken" instead of catching ``Exception``
+    and then trying to enumerate every framework mechanism -- saved-tensor
+    pack hooks, ``torch.utils.checkpoint``'s recompute control flow,
+    functorch -- that legitimately raises through a forward.  The region it
+    wraps is closed (allocations and launches, no autograd-observable op), so
+    a blanket catch inside it is sound where one at the call site is not.
 
-    The tag must survive the *type* of the original error, whatever it was: a
+    The tag must survive the type of the original error, whatever it was: a
     mismatched Triton release raises ``TypeError``/``AttributeError`` from a
     changed signature, an unwritable JIT cache ``OSError``, a bad launch
     ``RuntimeError``.
@@ -1628,10 +1621,10 @@ _SPECIALS = [float("nan"), float("inf"), float("-inf"), -0.0, 0.0, -1.0, 1.0, 2.
 def _zero_weight_case(activation, seed=3):
     """A case whose pre-activation is exactly ``bias``, elementwise.
 
-    Poisoning the *input* can only produce NaN pre-activations -- one non-finite
-    value makes the whole group's statistics NaN -- so the values that actually
-    distinguish the spellings of ReLU have to be placed directly.  A zero
-    ``weight`` does that: ``xhat * 0 + bias == bias``.
+    Poisoning the input can only produce NaN pre-activations -- one
+    non-finite value makes the whole group's statistics NaN -- so the values
+    that actually distinguish the spellings of ReLU have to be placed
+    directly.  A zero ``weight`` does that: ``xhat * 0 + bias == bias``.
     """
     x = torch.randn(
         1,

@@ -9,8 +9,7 @@
 # Set PYTHON to choose an interpreter; otherwise the first virtualenv under
 # .venvs/ is used, falling back to python3 on PATH.
 #
-# Everything this script exports is here because omitting it changes the
-# result, not because it seemed prudent.  See the comments at each one.
+# Every export below changes the result when omitted; see the comment at each.
 
 set -euo pipefail
 
@@ -28,10 +27,9 @@ if [ -z "${PYTHON:-}" ]; then
 fi
 # --- required: channels-last has to reach MIOpen ----------------------------
 # Without this, channels_last_3d is inert on ROCm and MIOpen is silently handed
-# NCDHW -- a different problem than the one under test.  This is not a tuning
-# preference: both parametrizations of
+# NCDHW -- a different problem than the one under test.  Both parametrizations of
 # tests/test_groupnorm.py::test_gpu_triton_dctensor_matches_eager_and_stays_wrapped
-# fail deterministically when it is unset.  It is also what production runs set.
+# fail deterministically when it is unset; production runs set it too.
 export PYTORCH_MIOPEN_SUGGEST_NHWC=1
 
 # --- required: ROCm needs a writable TMPDIR ---------------------------------
@@ -64,11 +62,10 @@ done
 
 # --- runtime warning: a cold MIOpen find database dominates the run ---------
 # The tests compare against MIOpen, and with an empty find database MIOpen
-# searches for an algorithm per convolution problem instead of looking one up.
-# Measured on triton_conv3d/tests/test_bwd_data.py (305 tests): 322 s cold
-# against 14.7 s with a populated database -- 22x, and it is all search, not
-# test work.  MIOPEN_USER_DB_PATH defaults to ~/.config/miopen; point it at a
-# warm database to avoid paying this on every run.
+# searches for an algorithm per convolution problem instead of looking one up,
+# which dominates the convolution suites and is all search, not test work.
+# MIOPEN_USER_DB_PATH defaults to ~/.config/miopen; point it at a warm database
+# to avoid paying this on every run.
 _miopen_db="${MIOPEN_USER_DB_PATH:-$HOME/.config/miopen}"
 if ! ls "$_miopen_db"/*.ufdb.txt >/dev/null 2>&1; then
     echo "note: MIOpen find database ($_miopen_db) is cold, so this run will be" >&2
@@ -82,8 +79,8 @@ fi
 #
 # The cross-device tests skip themselves when only one device is visible, so a
 # one-device run reports a healthy pass count with those clauses never
-# exercised.  Warn rather than fail: a one-device run is still worth doing, it
-# is just not the full one.
+# exercised.  Warn rather than fail: such a run is still worth doing, it is
+# just not the full one.
 _devices=$("$PYTHON" - <<'PY' 2>/dev/null
 import ScaFFold, torch  # noqa: F401  -- import is the check
 print(torch.cuda.device_count() if torch.cuda.is_available() else 0)

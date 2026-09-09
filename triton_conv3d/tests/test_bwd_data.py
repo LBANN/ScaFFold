@@ -16,7 +16,7 @@ bitwise standard is not vacuous:
   and without this test a passing suite would not rule it out.
 
 The other thing these tests cover that the forward's do not is that
-backward-data's effective convolution is **always padded** for ``k > 1``, even
+backward-data's effective convolution is always padded for ``k > 1``, even
 when the forward was not: DistConv issues an unpadded ``130^3`` convolution and
 its backward-data has ``p' = 2``.  So the halo'd corpus is parametrized here in
 its own right rather than only in its logical, padded form.
@@ -49,20 +49,17 @@ EDGE = [p for p in edge_cases() if not p.transposed]
 def _corpus_channel_pairs() -> list[ConvProblem]:
     """Every distinct ``(Cin, Cout, kernel)`` in the corpus, at a testable volume.
 
-    The forward suite selects corpus problems by *volume* -- small enough for an
-    fp64 reference -- and that works there.  It does not work here, and the way
-    it fails is worth recording because the first version of this file shipped
-    with it: backward-data reduces over ``Cout * taps``, so the surviving
-    problems are exactly the deep, wide ones, and a sum of ``27648`` random
-    signs runs to about 500 while bf16 holds integers only to 256.  Every single
-    corpus case then hit ``is_exactly_representable`` and skipped, and the file
-    reported "89 passed" with zero real-shape coverage.
+    The forward suite selects corpus problems by *volume*, small enough for an
+    fp64 reference.  That does not work here: backward-data reduces over
+    ``Cout * taps``, so for the corpus's deepest channels that reduction is
+    long enough to push the exact sum outside bf16's representable integer
+    range, and every corpus case would skip.
 
     Restating each channel pair at ``6x7x8`` instead keeps what the corpus is
     *for* -- the channel widths, and with them ``EVEN_K``/``EVEN_N``, the tile
     selection and the 512-byte row strides -- while making the reference cheap.
 
-    **All three paddings** are generated, because ScaFFold issues all three and
+    All three paddings are generated, because ScaFFold issues all three and
     they are three different problems (``shapes.py``'s module docstring):
 
     * ``p = (1,1,1)`` -- what the adapter hands the kernel at one GPU, and the
@@ -74,8 +71,7 @@ def _corpus_channel_pairs() -> list[ConvProblem]:
     * ``p = (0,0,0)`` -- what upstream DistConv hands MIOpen, and the form every
       published baseline was measured in.
 
-    None of the three subsumes another, and the middle one is the one that used
-    to be missing.
+    None of the three subsumes another, so all three are covered here.
     """
     seen: set[tuple] = set()
     out: list[ConvProblem] = []
@@ -107,7 +103,7 @@ CORPUS_PAIRS = _corpus_channel_pairs()
 
 #: Real ScaFFold shapes, at their real volumes, small enough to reference in
 #: fp64.  Used only for the fp32 test below: their bf16 references are never
-#: exactly representable, which is the whole point of the note above.
+#: exactly representable (see :func:`_corpus_channel_pairs`).
 CORPUS_SMALL = [
     p
     for p in scaffold_corpus()
@@ -166,14 +162,12 @@ def test_the_padding_identity_is_the_one_the_derivation_claims():
 def test_flipping_every_tap_axis_is_complementing_the_fused_index():
     """The identity the kernel's ``taps - 1 - dij`` rests on.
 
-    The transform this replaced -- ``permute(2,3,4,0,1).flip((0,1,2))`` --
-    materialized a whole second copy of every weight, once per optimizer step,
-    to express a *reindexing*.  The kernel now flips by walking the fused tap
-    index backwards, which is only the same thing because the fused index is a
-    mixed-radix number and complementing every digit complements the number.
-    That is exactly the sort of claim that is obvious, load-bearing and one
-    off-by-one away from a silently wrong gradient, so it is checked over
-    anisotropic kernels rather than argued.
+    The kernel flips a tap by walking the fused tap index backwards rather
+    than materializing a permuted, flipped copy of the weight.  That is only
+    the same thing because the fused index is a mixed-radix number and
+    complementing every digit complements the number -- a claim that is
+    obvious, load-bearing, and one off-by-one away from a silently wrong
+    gradient, so it is checked over anisotropic kernels rather than argued.
 
     ``k=(1,3,1)``-shaped cases are in the list on purpose: an axis of extent 1
     contributes ``0`` to both sides, which is where a formula that got the radix
@@ -340,7 +334,7 @@ def test_corpus_channel_pairs_match_bitwise(problem: ConvProblem):
     anisotropic: ``p'`` is ``(2,1,1)`` and the two shell thicknesses coexist in
     one kernel.  ``p=1`` (the adapter's, unsharded) is the ordinary one.
     Running only one of them would leave a shape ScaFFold actually issues
-    untested; the middle one was the one missing until 2026-08-04.
+    untested.
 
     The five deepest pairs skip here and are picked up by the fp32 test below;
     see :func:`test_the_bitwise_corpus_is_not_entirely_skipped` for why that is
@@ -361,9 +355,8 @@ def test_the_bitwise_corpus_is_not_entirely_skipped():
 
     ``is_exactly_representable`` declining is the correct behaviour, but if it
     declines for *every* parametrized case the suite reports a wall of passes
-    and tests nothing.  That is exactly what the first version of this file did.
-    So pin a floor: most of the corpus's channel pairs must actually reach the
-    bitwise comparison in bf16.
+    and tests nothing.  So pin a floor: most of the corpus's channel pairs must
+    actually reach the bitwise comparison in bf16.
     """
     exact = 0
     for problem in CORPUS_PAIRS:
@@ -468,11 +461,10 @@ def test_every_config_gives_the_same_answer(problem: ConvProblem):
     shell is two voxels thick rather than one -- so a mask that is right when
     ``BLOCK_M`` divides the row length and wrong when it does not has more room
     to hide here than in the forward.  That argument applies with most force to
-    the cases this stopped short of when it swept only ``EDGE[:8]``: ``batched``
-    (the only ``n > 1`` shape), ``kernel_aniso``, ``smaller_than_kernel``,
-    ``unpadded`` -- whose backward is padded where its forward is not -- and both
-    non-bf16 dtypes, which move the MFMA reduction depth and so the set of legal
-    ``BLOCK_K`` values.
+    ``batched`` (the only ``n > 1`` shape), ``kernel_aniso``,
+    ``smaller_than_kernel``, ``unpadded`` -- whose backward is padded where its
+    forward is not -- and both non-bf16 dtypes, which move the MFMA reduction
+    depth and so the set of legal ``BLOCK_K`` values.
     """
     ops = reference.make_inputs(problem, seed=2, exact=True)
     expected = reference.reference(problem, ops, "bwd-data")
@@ -552,11 +544,10 @@ def test_out_buffer_is_written_in_place_and_is_validated():
     """``out=`` is forwarded straight to the forward entry point, unexamined.
 
     Handing a preallocated gradient buffer to the backward is exactly what a
-    DistConv integration does, and both halves of the hole were reachable from
-    here: an undersized buffer wrote 10752 elements into a 256-element
-    allocation with no error, and an NCDHW buffer returned a gradient with
-    ``max_abs = 99.0``.  ``reduce_gemm`` validated the same parameter and this
-    direction did not.
+    DistConv integration does, and an unvalidated buffer fails silently either
+    way it can be wrong: an undersized one is an out-of-bounds device write,
+    and an NCDHW one is a full-rate kernel returning a scrambled gradient.
+    ``reduce_gemm`` validates the same parameter; this direction must too.
 
     The check lives in the forward, and that is exact rather than approximate:
     the effective forward's output shape *is* ``input_shape``.  This test is what
@@ -592,7 +583,7 @@ def test_hoisted_weight_buffer_is_validated():
     So a buffer belonging to another parameter -- a stale cache entry is the
     realistic way to get one -- is a smooth, correctly shaped, entirely wrong
     gradient.  This direction has its own trap on top of the forward's: the
-    buffer it takes is the **forward's** ``(kd, kh, kw, Cin, Cout)``, so the
+    buffer it takes is the forward's ``(kd, kh, kw, Cin, Cout)``, so the
     transposed spelling, which is what a reader who knows backward-data reduces
     over ``Cout`` would reach for, has to be rejected rather than quietly
     transposing the answer.
@@ -607,7 +598,7 @@ def test_hoisted_weight_buffer_is_validated():
         _run(problem, ops, weight_rsck=to_rsck(other))
     with pytest.raises(ValueError):
         _run(problem, ops, weight_rsck=good.float())
-    # (kd, kh, kw, Cout, Cin) -- the layout the deleted ``to_bwd_rsck`` produced.
+    # (kd, kh, kw, Cout, Cin) -- the transposed spelling a reader might reach for.
     with pytest.raises(ValueError):
         _run(problem, ops, weight_rsck=good.transpose(3, 4).contiguous())
 

@@ -1,15 +1,15 @@
 # SPDX-License-Identifier: (Apache-2.0)
-"""M0 gate: what can ``tl.dot`` actually reach on this device, at our shapes?
+"""What ``tl.dot`` can reach on this device, at our shapes.
 
-Every convolution direction reduces to a GEMM.  Before writing a gather-GEMM
-convolution it is worth knowing the ceiling of the thing it is built on, because
-no amount of clever addressing recovers throughput the matrix core never had.
+Every convolution direction reduces to a GEMM, and no amount of clever
+addressing recovers throughput the matrix core never had, so the GEMM's ceiling
+is the ceiling of the convolution built on it.
 
 Three measurements, in increasing specificity:
 
 ``peak``
     A large square GEMM.  Calibrates Triton against ``torch.matmul``
-    (hipBLASLt) and against the 600 TFLOP/s bf16 constant, so every later
+    (hipBLASLt) and against the bf16 peak in ``PEAK_FLOPS``, so every later
     percentage has a known reference.
 
 ``compute``
@@ -17,8 +17,8 @@ Three measurements, in increasing specificity:
     every row tile reads the same cached rows.  The FLOP count is unchanged and
     DRAM traffic is negligible, which isolates matrix-core throughput in the
     *shape regime* our convolutions live in -- skinny ``N`` (64-512), long ``K``
-    (81-27,648), enormous ``M``.  This is the real ceiling for a fused kernel:
-    a convolution reads its input once, so it is compute-bound wherever its
+    (81-27,648), enormous ``M``.  This is the ceiling for a fused kernel: a
+    convolution reads its input once, so it is compute-bound wherever its
     arithmetic intensity exceeds the 182 FLOP/byte crossover, which is almost
     everywhere in the corpus.
 
@@ -26,7 +26,7 @@ Three measurements, in increasing specificity:
     The same shape with real strides.  Always slower, and *not* a ceiling for
     the convolution -- materializing im2col multiplies ``A``'s bytes by the tap
     count, which is exactly the traffic a fused kernel avoids.  Measured anyway,
-    because the gap between ``compute`` and ``dram`` is how much a fused kernel
+    because the gap between ``compute`` and ``dram`` is what a fused kernel
     stands to gain over the explicit-GEMM approach.
 
 Usage::
@@ -85,10 +85,9 @@ def _gemm_kernel(
 ):
     """Textbook tiled GEMM with grouped-M ordering and optional split-K.
 
-    Deliberately unremarkable: the point of the probe is to measure what a
-    competent-but-ordinary Triton GEMM achieves, so that a later convolution
-    kernel's number can be read as "this much of the available throughput"
-    rather than against an unknown.
+    Deliberately unremarkable: the probe measures what an ordinary Triton GEMM
+    achieves, so that a convolution kernel's number can be read as "this much of
+    the available throughput" rather than against an unknown.
     """
     pid = tl.program_id(axis=0)
     pid_k = tl.program_id(axis=1)
@@ -107,13 +106,12 @@ def _gemm_kernel(
     offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
     offs_k = pid_k * BLOCK_K + tl.arange(0, BLOCK_K)
 
-    # ``INT32_OFF`` keeps every offset tensor ``i32``, which is condition 2 of
-    # the buffer-load fast path (briefing 1.3): ``canUseBufferOps`` bails out
-    # with ``if (ofstBit != 32) return false;`` before it ever looks at the
-    # range.  The int64 form below is the safe default -- ``M`` reaches 8.4M
-    # here and ``M * stride`` overflows i32 for the real strides -- so the flag
-    # exists to *measure* what the promotion costs, not to be switched on
-    # blindly.
+    # ``INT32_OFF`` keeps every offset tensor ``i32``, which the buffer-load
+    # fast path requires: ``canUseBufferOps`` bails out with
+    # ``if (ofstBit != 32) return false;`` before it ever looks at the range.
+    # The int64 form below is the safe default -- ``M * stride`` overflows i32
+    # at the corpus's real shapes -- so the flag exists to *measure* what the
+    # promotion costs, not to be switched on blindly.
     if INT32_OFF:
         a_ptrs = a_ptr + offs_m[:, None] * stride_am + offs_k[None, :] * stride_ak
         b_ptrs = b_ptr + offs_k[:, None] * stride_bk + offs_n[None, :] * stride_bn
@@ -164,8 +162,8 @@ class GemmConfig:
     num_warps: int = 8
     num_stages: int = 2
     #: AMD backend kernargs.  ``None`` means "do not pass it at all", which is
-    #: not the same as passing 0: the M0 sweep never passed them, so keeping a
-    #: distinct sentinel lets the old numbers be reproduced exactly.
+    #: not the same as passing 0: the ``legacy`` knob set passes none of them,
+    #: so a distinct sentinel keeps that sweep exactly reproducible.
     matrix_instr_nonkdim: int | None = None
     kpack: int | None = None
     waves_per_eu: int | None = None
@@ -197,12 +195,12 @@ class GemmConfig:
         return kw
 
 
-#: Curated tile shapes rather than a full product sweep.  A product over
-#: (BM, BN, BK, warps, stages) is ~250 configs per shape, and every one costs a
-#: JIT compile; at 57 problems x 3 directions that is hours of compilation to
-#: answer a yes/no question.  These are the shapes that matter on CDNA3: square
-#: tiles for balanced GEMMs, tall-skinny tiles for the huge-M/small-N regime the
-#: convolutions actually live in, and a couple of small tiles for the 8^3 sites.
+#: Curated tile shapes rather than a full product sweep: every config costs a
+#: JIT compile, and the product over (BM, BN, BK, warps, stages) would spend
+#: hours of compilation on a yes/no question.  These are the shapes that matter
+#: on CDNA3 -- square tiles for balanced GEMMs, tall-skinny tiles for the
+#: huge-M/small-N regime the convolutions live in, and a couple of small tiles
+#: for the 8^3 sites.
 _TILES: tuple[tuple[int, int, int], ...] = (
     (256, 128, 64),
     (256, 64, 64),
@@ -346,14 +344,14 @@ def _candidate_configs(
 
     ``legacy``
         The M0 sweep: curated tiles, ``GROUP_M=8``, no AMD kernargs at all.
-        Kept verbatim so the earlier numbers stay reproducible.
+        Kept verbatim so its numbers stay reproducible.
 
     ``amd``
         Inductor's ROCm conv seed grid under the gfx942 constraints, with
         ``matrix_instr_nonkdim=16`` and the arch-aware ``kpack``.  ``GROUP_M``
         sweeps 6 (MI300A has 6 XCDs; AMD's L2-swizzle rule is "multiple of the
-        XCD count") against the MI300X-derived 8 that the M0 sweep used, so the
-        report can say which actually won rather than assuming.
+        XCD count") against the MI300X-derived 8 the M0 sweep used, so the
+        report can say which won rather than assume.
 
     ``amd-wide``
         ``amd`` plus the skinny-N tiles, ``matrix_instr_nonkdim`` in
@@ -414,9 +412,8 @@ def _candidate_configs(
 def _randn(shape: tuple[int, ...], device, dtype: torch.dtype) -> torch.Tensor:
     """Random operand allocated directly in ``dtype``.
 
-    Going through fp32 and casting doubles peak memory, which for the largest
-    corpus shapes means a 29 GiB operand briefly needs 87 GiB and the allocator
-    spends minutes thrashing before it gets there.
+    Going through fp32 and casting multiplies peak memory several times over,
+    which the largest corpus operands do not have to spare.
     """
     return torch.randn(shape, device=device, dtype=dtype)
 
@@ -466,9 +463,8 @@ def plan_operands(m: int, n: int, k: int, mode: str, elem: int) -> dict | None:
     In ``compute`` mode an operand's non-reduction axis gets stride 0 whenever
     materializing it would spill out of cache: the same rows (or columns) are
     re-read by every tile.  The FLOP count is untouched, so the measured rate is
-    matrix-core throughput at this ``(M, N, K)`` with DRAM taken out of the
-    picture -- which is the ceiling a *fused* convolution kernel is entitled to
-    aim at, since it reads its input once rather than ``tap_count`` times.
+    matrix-core throughput at this ``(M, N, K)`` with DRAM out of the picture --
+    the ceiling a fused convolution kernel is entitled to aim at.
     """
     a_bytes, b_bytes, c_bytes = m * k * elem, k * n * elem, m * n * 4
     if mode == "dram":
@@ -481,7 +477,7 @@ def plan_operands(m: int, n: int, k: int, mode: str, elem: int) -> dict | None:
     if b_bytes > _RESIDENT_BUDGET:
         # Broadcast one column across N.  Only reachable for backward-weight,
         # where K is the whole volume and B is the im2col'd activation -- the
-        # 58 GiB tensor a fused kernel never builds.
+        # tensor a fused kernel never builds.
         plan["b_cols"], plan["stride_bn"] = 1, 0
     if c_bytes > _DRAM_BUDGET:
         return None
@@ -507,8 +503,7 @@ def best_triton_gemm(
     all in this mode -- which for ``dram`` is itself the finding.
 
     ``sink``, if given, collects ``(config string, ms)`` for every config that
-    ran.  Only the winner is reported normally, but "which knob won, and by how
-    much over second place" is the question the N=64 investigation asks, and it
+    ran.  Only the winner is reported normally, but the margin over second place
     is not answerable from a single best time.
     """
     plan = plan_operands(m, n, k, mode, torch.finfo(dtype).bits // 8)
@@ -695,15 +690,14 @@ def run_peak_compare(
 
     :func:`run_peak` sweeps one knob set and reports its winner, which is fine
     for a single number but useless for a before/after: two sweeps run minutes
-    apart are two different machines.  Measured here, three passes over the same
-    ``legacy`` grid spanned 386-428 TF/s at 8192 -- an 11% band with no code
-    change at all, which is larger than most knob effects we are looking for.
+    apart are two different machines, and repeated passes over one unchanged
+    grid drift by more than the knob effects being looked for.
 
     So: sweep each knob set to find its own champion, then put the champions
     (and hipBLASLt) into a single :func:`interleaved` call.  Drift then hits
     every variant equally and lands in the reported spread instead of in the
-    conclusion.  The sweep-time numbers are kept alongside as ``*_sweep_tflops``
-    precisely so the size of that effect stays visible.
+    conclusion.  The sweep-time numbers stay alongside as ``*_sweep_tflops`` so
+    the size of that effect stays visible.
     """
     peak = PEAK_FLOPS["bf16"] if dtype is torch.bfloat16 else PEAK_FLOPS["fp32"]
     rows = []
@@ -799,21 +793,18 @@ def run_peak_compare(
 
 #: Named knob-set *comparisons*.  A bare knob-set name sweeps that set alone;
 #: these run several sets over the same operands and finish with a single
-#: interleaved head-to-head between their champions, which is the only honest
-#: way to state a before/after: two sweeps minutes apart need not have shared
-#: the device with the same neighbours.
+#: interleaved head-to-head between their champions -- see
+#: :func:`run_peak_compare` for why a before/after needs that.
 _KNOB_SETS: dict[str, tuple[str, ...]] = {
     "compare": ("legacy", "amd"),
     "compare-wide": ("legacy", "amd", "amd-wide"),
 }
 
 
-#: How many of each knob set's fastest configs go into the run-off.
-#: One would be enough if the sweep were noise-free.  It is not: a sweep reports
-#: ``min`` over ~50 noisy samples, so its winner is partly the config that got
-#: the luckiest sample, and re-timing that one config reproduces the luck only
-#: sometimes.  Racing the top few and taking each set's best restores the
-#: like-for-like comparison -- both sides get a best-of, in the same interleaved
+#: How many of each knob set's fastest configs go into the run-off.  One would
+#: be enough if the sweep were noise-free; it is not, so its winner is partly
+#: whichever config drew the luckiest sample.  Racing the top few and taking
+#: each set's best gives both sides a best-of, in the same interleaved
 #: measurement.
 _FINALISTS = 3
 
@@ -897,9 +888,9 @@ def _measure_cell(
                     if cfg.SPLIT_K > 1:
                         c.zero_()
             # Rounds a multiple of the variant count, so each variant occupies
-            # each slot the same number of times -- with 2 variants over 5
-            # rounds one of them gets the post-warmup slot three times and the
-            # other twice, which is worth several percent here.
+            # each slot the same number of times; otherwise one of them takes
+            # the post-warmup slot more often than the others, which is worth
+            # more than the effects being compared.
             meas = interleaved(variants, warmup=3, iters=5, rounds=2 * len(variants))
             out["h2h_best"] = {}
             for name, m_ in meas.items():
@@ -943,9 +934,8 @@ def run_shapes(
     ``prior`` supplies cells a previous run already measured, keyed by
     ``(label, direction)``; they are carried through untouched.  ``flush``, if
     given, is called with the row list after every cell.  Both exist because a
-    full ``compare-wide`` pass over the corpus is ~90 minutes and the JSON used
-    to be written only at the end -- a run interrupted at cell 53 of 60 left
-    nothing behind but a log, twice.
+    full ``compare-wide`` pass over the corpus runs for hours, and one
+    interrupted near the end must not have to start over.
     """
     peak = PEAK_FLOPS["bf16"]
     rows = []
@@ -993,8 +983,8 @@ def run_shapes(
                 except torch.OutOfMemoryError:
                     cell = None
                 if cell is None or not cell["winners"]:
-                    # Shape not runnable in this mode.  For ``dram`` that is the
-                    # finding: materialized im2col does not fit in 128 GiB.
+                    # Shape not runnable in this mode.  For ``dram`` that is
+                    # the finding: a materialized im2col does not fit.
                     row[f"{mode}_ms"] = None
                     row[f"{mode}_skipped"] = "operands exceed budget"
                     continue
@@ -1017,18 +1007,17 @@ def run_shapes(
                         record(f"{mode}_{ks}", cell["headtohead"][ks])
                         row[f"{mode}_{ks}_config"] = str(cell["winners"][ks])
                         row[f"{mode}_{ks}_configs_ran"] = cell["ran"][ks]
-                        # Kept because it is the number the M0 run reported, and
-                        # a large gap between the two is itself a finding about
-                        # how long this device holds its clocks.
+                        # Kept because it is what a sweep alone reports; a gap
+                        # between it and the head-to-head is itself a finding
+                        # about how long this device holds its clocks.
                         row[f"{mode}_{ks}_sweep_tflops"] = (
                             flops / (cell["sweep"][ks] * 1e-3) / 1e12
                         )
-                        # Min over rounds.  This node is shared: a neighbouring
-                        # job on another die drags whole rounds down by 10x and
-                        # shows up as a spread in the hundreds of percent.  The
-                        # median is then a measure of the neighbour, and the
-                        # minimum is the best available estimate of what the
-                        # kernel can actually do.
+                        # Min over rounds.  This node is shared, and a
+                        # neighbouring job on another die drags whole rounds
+                        # down: the median then measures the neighbour, while
+                        # the minimum is the best available estimate of what the
+                        # kernel can do.
                         row[f"{mode}_{ks}_best_tflops"] = (
                             flops / (cell["h2h_best"][ks] * 1e-3) / 1e12
                         )

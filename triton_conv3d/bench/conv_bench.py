@@ -7,32 +7,22 @@ which of its gradients (or none).  ``--operator all --direction all`` measures
 every cell in the project under one methodology, in one process, from one
 command.
 
-Operator and direction are **two axes of one table**, not two values on one
-switch: :data:`_OPERATORS` maps ``(operator, direction)`` to a builder, and each
-of the six builders is a separate function that names its own operands, its own
-control, its own candidate configs and its own reference.  ``_build`` is a
-lookup, so nothing branches on ``problem.transposed`` anywhere, and the four
-things that *are* per-operator rather than per-direction -- the shape form, the
-problem ordering, the config type, whether a direction is sweepable -- sit on
-:class:`_Op` where a reader can see all four at once.
+Operator and direction are two axes of one table, not two values on one switch:
+:data:`_OPERATORS` maps ``(operator, direction)`` to a builder, and each of the
+six builders names its own operands, its own control, its own candidate configs
+and its own reference.  ``_build`` is a lookup, so no builder asks which
+operator it has, and what is per-operator rather than per-direction -- which
+problems it selects, the shape form, the measurement order -- sits on
+:class:`_Op`.  Each builder names the config type its own entry point resolves,
+so it cannot be handed a config for a different kernel; that is what makes the
+transposed backward directions sweepable at all.
 
-That factoring is what makes the transposed backward directions sweepable at
-all.  When the transposed benchmarks lived in a driver of their own, the only
-config object that driver had was the transposed *forward*'s, and passing it to
-a direction served by ``conv3d_forward`` silently benchmarks a tile nothing
-would select -- so those directions dropped ``config=`` on the floor instead.
-With a builder per cell, each one names the config type its own entry point
-resolves and the mistake is not expressible.
-
-Five things this driver is careful about, each because getting it wrong has
-already produced a wrong answer once in this project:
+Five things this driver is careful about:
 
 **The shape.**  One ScaFFold convolution reaches a kernel in three different
 shapes, and they are three different tuning problems -- MIOpen keys its find
 database on the padding, ``bwd_data_config`` derives ``M`` from it, and the
-kernel compiles a different ``PADDED`` body either way.  (``bwd_weight_config``
-also used to change its answer on it; that clause went on 2026-08-05, and the
-forms are still three different measurements without it.)  ``--form`` chooses
+kernel compiles a different ``PADDED`` body either way.  ``--form`` chooses
 which one a run measures, and every row records it:
 
 * ``distconv`` (the default, and every capture on disk): the halo'd, unpadded
@@ -40,15 +30,15 @@ which one a run measures, and every row records it:
   what the profiled MIOpen baseline in ``ConvProblem.measured`` is a timing
   *of*, so it is the right form for a like-for-like MIOpen comparison.
 * ``adapter``: what ``ScaFFold/unet/conv3d.py`` hands the Triton kernels, which
-  is **the form production actually runs** -- a halo on the genuinely split axis
-  only, so ``128^3`` at ``padding = (1,1,1)`` unsharded and
-  ``130x256x256`` at ``(0,1,1)`` at two shards.  Padded at every configuration.
+  is the form production runs -- a halo on the genuinely split axis only, so
+  ``128^3`` at ``padding = (1,1,1)`` unsharded and ``130x256x256`` at
+  ``(0,1,1)`` at two shards.  Padded at every configuration.
 * ``logical``: the module's own statement, unhalo'd and padded.  Identical to
   ``adapter`` wherever nothing is split.
 
-Defaulting to ``distconv`` keeps every stored capture comparable; it does *not*
+Defaulting to ``distconv`` keeps every stored capture comparable; it does not
 mean it is the form to quote a Triton speedup in.  A ``conv`` cell applies the
-chosen form.  **No ``convT`` cell ever differs**, and that is not an oversight:
+chosen form; no ``convT`` cell ever differs, and that is not an oversight:
 DistConv's halo is ``k // 2`` only for an odd kernel and 0 at ``k = 2``, and the
 adapter exchanges nothing there either, so a transposed site is issued in
 exactly the shape the corpus records under all three names.  The choice is a
@@ -58,32 +48,28 @@ field on :class:`_Op` (``form``) rather than a line inside a builder.
 :func:`interleaved` call so that a neighbour arriving on the device hits both
 arms at once and lands in the reported interval instead of in the conclusion.
 ``cudnn.benchmark`` is on, because with it off MIOpen answers from a heuristic
-rather than searching and reports 5-12x worse for the *same* solver -- which
+rather than searching and reports far worse times for the *same* solver -- which
 would fabricate a speedup.
 
 **And the comparison is what a capture costs.**  ``--control none`` drops the
-MIOpen arm and measures the Triton kernels alone.  It is not a corner-cutting
-option, it is where essentially all of the wall clock is: ``cudnn.benchmark =
-True`` puts MIOpen on the Find path, whose disk record cannot be replayed in a
-fresh process, so **every** cell pays a find -- measured on this node at
-92-174 s per cell against 0.3-1.2 s for the Triton compile, the graph capture,
-the calibration and the timed rounds put together.  A Triton-only row therefore
-carries no ``miopen_*`` and no ``speedup`` key at all -- an absent measurement
-stays absent -- and ``--check``, whose reference *is* MIOpen's answer, is refused with
-it.
+MIOpen arm and measures the Triton kernels alone.  ``cudnn.benchmark = True``
+puts MIOpen on the Find path, whose disk record cannot be replayed in a fresh
+process, so every cell pays a find, and that find dwarfs the Triton compile, the
+graph capture, the calibration and the timed rounds put together.  A Triton-only
+row therefore carries no ``miopen_*`` and no ``speedup`` key at all -- an absent
+measurement stays absent -- and ``--check``, whose reference *is* MIOpen's
+answer, is refused with it.
 
 **The control.**  The MIOpen side of a backward direction is a real forward
-graph plus :func:`torch.autograd.grad`, in **all four** backward cells.  Never
-``torch.nn.grad.conv3d_input`` / ``conv3d_weight``: those have no real operand to
-pass for the tensor being differentiated, so they fabricate a zero-strided
+graph plus :func:`torch.autograd.grad`, in all four backward cells.  Never
+``torch.nn.grad.conv3d_input`` / ``conv3d_weight``: those have no real operand
+to pass for the tensor being differentiated, so they fabricate a zero-strided
 placeholder, and ``convolution_backward`` picks its solver from that operand's
-layout.  At the ``k=1x1x1`` head that made MIOpen decline its own NDHWC path and
-run **3.2x** slower than the same call inside a real backward, which is where a
-published 4.51x came from against a true 1.39x.
+layout -- so the control would time a solver production never runs.
 
 **The timed region.**  See :func:`_timed_region`.  The published per-shape number
-is **kernel time**: Python-side dispatch, shape re-validation, tuned-table lookup
-and the launcher itself are outside it, for *both* arms, because both arms are
+is kernel time: Python-side dispatch, shape re-validation, tuned-table lookup and
+the launcher itself are outside it, for *both* arms, because both arms are
 replayed from a CUDA graph.  ``--launcher include`` gives the other number.
 
 **The precision.**  Every speedup is a paired per-round ratio with a 95%
@@ -198,41 +184,35 @@ class _Case:
 
     The tensors are held here rather than in locals so that the caller's
     ``finally`` can drop them all at once; ``triton`` is a factory rather than a
-    launcher because the sweep needs one launcher per config.
-
-    Six of these exist -- two operators by three directions -- and no field is
-    ever computed by asking the *problem* which operator it is.  That is the
-    whole point of the factoring: the branch happens once, in :data:`_OPERATORS`,
-    and never again.
+    launcher because the sweep needs one launcher per config.  No field is
+    computed by asking the *problem* which operator it is: that branch happens
+    once, in :data:`_OPERATORS`, and never again.
     """
 
     triton: Callable[[ConvConfig | None], Callable[[], object]]
     #: The MIOpen control, or ``None`` when the case was built with
-    #: ``control=False``.  Optional because building it is not free and is not
-    #: always wanted: for a *backward* direction the control is a real forward
-    #: graph, and running it once costs MIOpen's find -- measured at 92-174 s
-    #: per cell on this node's corpus, against 0.3-1.2 s for everything else the
-    #: cell does.  A Triton-only capture that still built the control would pay
-    #: all of it.
+    #: ``control=False``.  Optional because it is not free: for a *backward*
+    #: direction the control is a real forward graph, and running it once costs
+    #: MIOpen's find, which dwarfs everything else the cell does.  A Triton-only
+    #: capture that still built the control would pay all of it.
     miopen: Callable[[], object] | None
     #: ``Callable[[], object]`` -- the hoistable weight prep, or ``None`` where
-    #: the direction has none.  **All six cells are now ``None``**: the
-    #: consuming directions read the channels-last parameter in place, and the
-    #: weight-gradient directions *produce* the weight, in the layout the GEMM
-    #: writes natively.  The field stays because the reporting path is the
-    #: record of what a transform would have to be charged if one came back.
+    #: the direction has none, which is all six cells: the consuming directions
+    #: read the channels-last parameter in place, and the weight-gradient
+    #: directions produce the weight in the layout the GEMM writes natively.
+    #: The field stays so that a transform, if one came back, would be charged.
     transform: object
     #: ``Callable[[], list[ConvConfig]]`` -- the configs worth timing.
     candidates: Callable[[], list[ConvConfig]]
     #: ``Callable[[list[ConvConfig]], list[ConvConfig]]`` -- a second, cheap
     #: pass over the finalists on an axis the first pass held fixed.
     refine: Callable[[list[ConvConfig]], list[ConvConfig]]
-    #: The config **this cell's entry point would resolve on its own**, computed
+    #: The config this cell's entry point would resolve on its own, computed
     #: once so that ``--shipped`` measures the shipped kernel without also
-    #: measuring the shipped table lookup.  The two are not the same number: the
-    #: lookup is 0.0164 ms, 39% of the transposed forward kernel.
-    #: ``test_the_shipped_config_is_what_the_entry
-    #: _point_resolves`` pins these six against the entry points.
+    #: measuring the table lookup a shipped call makes.  The two are not the
+    #: same number: at the smallest sites that lookup is a large fraction of the
+    #: kernel.  ``test_the_shipped_config_is_what_the_entry_point_resolves``
+    #: pins these six against the entry points.
     shipped_config: Callable[[], ConvConfig | None]
     #: ``Callable[[], tuple[Tensor, Tensor]]`` -- ``(ours, MIOpen's)`` on this
     #: cell's shape, for ``--check``.  ``None`` without a control, because
@@ -268,22 +248,19 @@ def _bwd_weight_refine(top):
 
 
 def _autograd_control(build_forward: Callable[[], tuple]):
-    """Build a real forward graph **on the capture stream** and keep it alive.
-
-    Two things at once, and both are load-bearing.
+    """Build a real forward graph on the capture stream and keep it alive.
 
     The graph has to be real, because ``torch.nn.grad.conv3d_*`` fabricates a
     zero-strided placeholder for the operand it is differentiating and
-    ``convolution_backward`` chooses its solver from that operand's layout --
-    measured, 3.2x slow at the ``k=1`` head, and the source of a retracted 4.51x.
+    ``convolution_backward`` chooses its solver from that operand's layout: the
+    control would then time a solver production never runs.
 
     It has to be built on :func:`~triton_conv3d.bench.harness.capture_stream`,
     because otherwise the autograd node records the default stream and CUDA
-    graph capture refuses it outright: *"During CUDA graph capture, autograd node
-    ``ConvolutionBackward0`` has a stale reference to the default stream"*.  That
-    refusal is what would push a backward cell back onto the eager path -- i.e.
-    onto a launcher-inclusive number for both arms -- so it is worth the two
-    lines it costs.
+    graph capture refuses it outright ("During CUDA graph capture, autograd node
+    ``ConvolutionBackward0`` has a stale reference to the default stream").  That
+    refusal would push a backward cell back onto the eager path -- a
+    launcher-inclusive number on both arms.
     """
     s = capture_stream()
     s.wait_stream(torch.cuda.current_stream())
@@ -314,9 +291,9 @@ def _conv_fwd(problem: ConvProblem, device: str, control: bool = True) -> _Case:
     def triton(cfg):
         def run():
             # ``w`` itself, not a transform of it: ``_randn`` returns it
-            # channels-last, which is what a ScaFFold parameter is, and the
-            # kernel reads that layout in place.  Passing ``weight_rsck=`` here
-            # would time a path the integration no longer takes.
+            # channels-last, as a ScaFFold parameter is, and the kernel reads
+            # that layout in place.  ``weight_rsck=`` would time a path the
+            # integration does not take.
             conv3d_forward(x, w, b, problem.stride, problem.padding, config=cfg, out=y)
 
         return run
@@ -559,9 +536,8 @@ def _convt_bwd_data(problem: ConvProblem, device: str, control: bool = True) -> 
 
     So the config that runs is :func:`~triton_conv3d.gather_gemm.select_config`'s
     for the *strided* convolution, whose ``(cin, cout)`` are this operator's
-    ``(cout, cin)``.  ``m5_convT_bench`` had no way to say that -- the only
-    config object it held was a ``TransposedConfig`` -- so it dropped ``config=``
-    entirely and could not sweep this direction at all.
+    ``(cout, cin)``.  A ``ConvConfig``, then, not a ``TransposedConfig`` --
+    passing the latter here would benchmark a tile nothing selects.
     """
     dtype = _TORCH_DTYPE[problem.dtype]
     k = tuple(problem.kernel)
@@ -728,21 +704,19 @@ def _sweep_workspace(cands, splits_for, cout, cin, k, device) -> torch.Tensor:
 class _Op:
     """What is per-*operator* rather than per-direction, in one place.
 
-    Four things, and each of them is a way to measure the wrong problem:
+    Each of these is a way to measure the wrong problem:
 
     ``form``
         Which of the module docstring's three shapes a cell measures, as a
         function of the requested form name.  ``conv`` honours the name;
-        ``convT`` must **not** be haloed under any of them, because DistConv's
-        halo is ``k // 2`` for an odd kernel and 0 at ``k = 2`` and the adapter
-        exchanges nothing there either.  Haloing a transposed problem would
-        grow its input by two voxels per axis and measure a convolution the
-        model never runs.
+        ``convT`` must not be haloed under any of them, because DistConv's halo
+        is ``k // 2`` for an odd kernel and 0 at ``k = 2`` and the adapter
+        exchanges nothing there either.  Haloing a transposed problem would grow
+        its input by two voxels per axis and measure a convolution the model
+        never runs.
     ``order``
         The order the cells are measured in, kept per operator so a re-capture
         is comparable with what is already on disk.
-    ``sweepable``
-        Which directions have a candidate list worth racing.
     ``build``
         The six-cell table itself.
     """
@@ -791,8 +765,8 @@ _OPERATORS: dict[str, _Op] = {
         selects=lambda p: p.transposed,
         form=lambda p, form: p,
         form_note=lambda form: "as recorded (no halo in any form at k=2)",
-        # Cheapest first, as ``m5_convT_bench`` ran them, so a re-capture lines
-        # up row for row with ``m5_shipped_*.json``.
+        # Cheapest first, so a re-capture lines up row for row with the
+        # transposed captures already on disk.
         order=lambda p: math.prod(p.spatial) * p.cin,
         build={
             "fwd": _convt_fwd,
@@ -804,7 +778,7 @@ _OPERATORS: dict[str, _Op] = {
 
 
 def operator_of(problem: ConvProblem) -> Operator:
-    """Which operator a problem is.  The **only** place this question is asked."""
+    """Which operator a problem is.  The only place this question is asked."""
     return "convT" if problem.transposed else "conv"
 
 
@@ -822,17 +796,14 @@ def _build(
 
     The Triton launchers exclude allocation, deliberately: MIOpen's time
     excludes its own workspace allocation, so excluding ours keeps the
-    comparison like-for-like.  They no longer exclude a weight transform, for the
-    stronger reason that there is not one -- the weight operand is the
-    channels-last parameter itself in every direction.
+    comparison like-for-like.  No launcher excludes a weight transform, because
+    there is not one -- the weight operand is the channels-last parameter itself
+    in every direction.
 
-    ``control=False`` builds the Triton operands and **nothing else**: no MIOpen
-    launcher and, for a backward direction, no autograd graph -- which is the
-    expensive half.  Building the control does not merely cost the arm's timing;
-    running it once costs MIOpen's *find*, which under ``cudnn.benchmark = True``
-    cannot be replayed from disk and which measures **92-174 s per cell** on
-    this corpus against 0.3-1.2 s for everything else in the cell.  A Triton-only capture is therefore two orders
-    of magnitude cheaper than a comparison, and that is entirely MIOpen's find.
+    ``control=False`` builds the Triton operands and nothing else: no MIOpen
+    launcher and, for a backward direction, no autograd graph -- the expensive
+    half, because running the control once costs MIOpen's *find* (see the module
+    docstring).
     """
     op = _OPERATORS[operator or operator_of(problem)]
     try:
@@ -852,10 +823,9 @@ class _Region:
     """The decision about what every arm of one cell is timed with.
 
     One object for the whole cell, never one per arm.  A per-arm instrument
-    biases a ratio *even when both arms are individually right*, and the version
-    of that mistake available here -- hoisting Triton's config lookup out while
-    leaving PyTorch's dispatch inside the MIOpen arm -- flatters us by up to
-    1.4x on exactly the sub-0.15 ms cells where it is hardest to see.
+    biases a ratio even when both arms are individually right: hoisting Triton's
+    config lookup out while leaving PyTorch's dispatch inside the MIOpen arm
+    flatters us, and most on the shortest cells, where it is hardest to see.
     """
 
     #: ``"kernel"`` (both arms replayed from a graph) or ``"call"`` (both arms
@@ -876,46 +846,31 @@ def _timed_region(
 ) -> _Region:
     """Decide, for one cell, what the published number will contain.
 
-    **Excluded** from a ``kind="kernel"`` measurement, on **every** arm: Python
-    call overhead, PyTorch's dispatcher, autocast and shape re-validation, the
+    Excluded from a ``kind="kernel"`` measurement, on every arm: Python call
+    overhead, PyTorch's dispatcher, autocast and shape re-validation, the
     tuned-table lookup, MIOpen's descriptor construction and find-database
-    probe, the autograd engine's node walk, and the launcher itself.
-    **Included**: the kernels, in the order and with the operands the eager call
-    issues them, back to back on one stream.
+    probe, the autograd engine's node walk, and the launcher itself.  Included:
+    the kernels, in the order and with the operands the eager call issues them,
+    back to back on one stream.
 
-    That boundary is the same on both sides only because the *whole comparison*
-    moves together.  Measured on ``convT 1024->512 @ 8^3``, per call:
-
-    ============================  ========  =======  ============  ===============
-    arm                           eager     kernel   host launch   speedup in->out
-    ============================  ========  =======  ============  ===============
-    ``convT`` fwd Triton          0.0421    0.0282   13.9 us       1.659 -> 2.420
-    ``convT`` fwd MIOpen          0.0699    0.0683   **1.6 us**
-    ``convT`` bwd-data Triton     0.0539    0.0350   18.9 us       1.414 -> 1.130
-    ``convT`` bwd-data MIOpen     0.0761    0.0395   **36.6 us**
-    ``convT`` bwd-weight Triton   0.0712    0.0542   17.0 us       1.176 -> 0.931
-    ``convT`` bwd-weight MIOpen   0.0839    0.0504   33.4 us
-    ============================  ========  =======  ============  ===============
-
-    The host costs differ by **23x** between arms of the *same* cell, so an eager
-    number is not a launcher-neutral number that a graph then "improves": it is a
-    number with a per-arm instrument in it.  Note the last column runs both ways
-    -- excluding the launcher is not a favour to Triton.  It doubles the forward
-    (the Triton arm was paying 13.9 us against a 28 us kernel while MIOpen paid
-    1.6 us) and it turns the weight gradient from a 1.176x win into a **0.931x
-    loss** (the MIOpen arm was paying an autograd-engine walk worth twice the
-    Triton entry point's).
+    That boundary is fair only because the *whole comparison* moves together.
+    The two arms of one cell can differ in host cost by a large factor, so an
+    eager number is not a launcher-neutral number that a graph then "improves":
+    it is a number with a per-arm instrument in it.  Nor is excluding the
+    launcher a favour to Triton -- it enlarges some wins and turns others into
+    losses, depending on which arm was paying the larger host cost.
 
     Three ways this refuses to produce a mixed measurement:
 
-    * if any arm cannot be captured, **no** arm is -- the cell falls back to
-      eager whole and says so in ``note``;
+    * if any arm cannot be captured, no arm is -- the cell falls back to eager
+      whole and says so in ``note``;
     * ``chunk`` comes from the shortest arm's duration alone
       (:func:`~triton_conv3d.bench.harness.common_chunk`), never from a per-arm
       estimate of the replay cost;
-    * above 40 ms per call nothing is captured, because there the largest host
-      cost measured on this node (0.08 ms) is under 0.2% of either arm and the
-      eager number is already launcher-exclusive to within a fifth of the
+    * above the per-call duration
+      :func:`~triton_conv3d.bench.harness.graph_is_worthwhile` allows, nothing
+      is captured: the host cost is a negligible fraction of either arm there,
+      and the eager number is already launcher-exclusive to well inside the
       target precision.
     """
     names = list(variants)
@@ -994,13 +949,12 @@ def _sweep(
             if verbose:
                 print(f"      skip {cfg}: {type(exc).__name__}: {str(exc)[:70]}")
             continue
-        # Adaptive ``iters``, fixed 3 rounds, and no tax probe.  Its old
-        # ``iters=3`` was not neutral between the configs it was ranking: the
-        # first call after a synchronize pays a queue restart worth 3% at 1.4 ms
-        # and 42% at 0.07 ms, so a fixed small ``iters`` charges that restart to
-        # whichever config is fastest -- exactly the config the sweep is trying
-        # to find.  Sizing the block by time makes the restart the same fraction
-        # for every candidate.
+        # Adaptive ``iters``, fixed rounds, no tax probe.  A fixed small
+        # ``iters`` is not neutral between the configs being ranked: the first
+        # call after a synchronize pays a queue restart whose share of the block
+        # grows as the kernel shortens, so it is charged hardest to the fastest
+        # config -- exactly the one the sweep is looking for.  Sizing the block
+        # by time makes the restart the same fraction for every candidate.
         meas = interleaved(
             {"t": run},
             warmup=None,
@@ -1038,29 +992,27 @@ def measure_problem(
     absent number is absent, not zero -- and says so in ``control``.  Everything
     else is unchanged: the same CUDA-graph region, the same adaptive stopping,
     the same 95% interval, the same ``stop`` reason.  What it buys is the whole
-    of MIOpen's find -- 98.3% of a three-cell problem's wall clock on this node;
-    what it costs is the comparison, so use it when the baseline is the
-    deliverable and the ratio is not.
+    of MIOpen's find, which is nearly all of a cell's wall clock; what it costs
+    is the comparison, so use it when the baseline is the deliverable and the
+    ratio is not.
 
-    ``shipped`` skips the sweep and times the config **this cell's entry point
-    would resolve on its own** -- the tuned table plus the heuristic fallback --
-    resolved once, outside the timed region.  That is the kernel a caller
-    actually gets; it is not the same number as the *call* a caller actually
-    makes, which also pays 0.0164 ms of table lookup per call at the transposed
-    sites, and `--launcher include` is how to see that.  Confirming the shipped
-    config's time agrees with the sweep's is what makes the sweep's numbers a
-    claim about the shipped kernel rather than about a config nobody will use.
+    ``shipped`` skips the sweep and times the config this cell's entry point
+    would resolve on its own -- the tuned table plus the heuristic fallback --
+    resolved once, outside the timed region.  That is the kernel a caller gets;
+    it is not the same number as the *call* a caller makes, which also pays the
+    table lookup every time, and `--launcher include` is how to see that.
+    Confirming the shipped config's time agrees with the sweep's is what makes
+    the sweep's numbers a claim about the shipped kernel rather than about a
+    config nobody will use.
 
     ``iters`` and ``rounds`` default to 0, meaning *decide online*: the race
     grows until the paired speedup's 95% interval is inside ``target_rel`` or
     ``budget_s`` of wall clock is gone, and the row records which.  Pinning both
-    to integers restores the old fixed 10x6 exactly, for a capture that has to
-    be byte-comparable with an earlier one.
-
-    A fixed 10x6 is 60 calls whatever the kernel costs.  Over this corpus that
-    is microseconds at the transposed sites and **45 minutes** at the 2 GiB
-    cliff, where one backward-weight call is 45.2 s -- and no amount of
-    averaging is going to change a 2789x ratio.
+    to integers restores a fixed grid exactly, for a capture that has to be
+    byte-comparable with an earlier one -- but a fixed grid issues the same
+    number of calls whatever the kernel costs, and this corpus holds both
+    microsecond kernels and multi-second ones, where averaging cannot change a
+    verdict that is already unambiguous.
     """
     op = operator or operator_of(problem)
     row: dict = {
@@ -1126,8 +1078,8 @@ def measure_problem(
         pinned = bool(iters and rounds)
         # One stream for the whole cell, both policies.  The MIOpen control for
         # a backward direction is an autograd graph built on this stream, and
-        # the engine synchronizes when it is asked to run somewhere else: 35 us
-        # per call, on that arm only.  See :class:`on_capture_stream`.
+        # the engine synchronizes if it is asked to run somewhere else -- a cost
+        # on that arm only.  See :class:`on_capture_stream`.
         with on_capture_stream():
             region = _timed_region(variants, launcher)
             meas = interleaved(
@@ -1177,18 +1129,17 @@ def measure_problem(
             ),
         )
         # Only when there *is* a control.  An absent MIOpen number is left
-        # absent rather than written as zero: every consumer of these rows
-        # reads ``speedup`` straight out, and a zero would read as a 0.000x
-        # result instead of as "not measured here".
+        # absent rather than written as zero: every consumer of these rows reads
+        # ``speedup`` straight out, and a zero would read as a measured result
+        # rather than as "not measured here".
         if "miopen" in meas:
             mio = meas["miopen"]
             # Paired per round, not median-over-median: the two arms of a round
-            # ran seconds apart under the same device state, so a common-mode
-            # excursion divides out of each pair before anything is reduced.
-            # This is also the only quantity here that comes with an interval,
-            # and the interval is the point -- ``speedup`` alone has been quoted
-            # four times in this project's history against a number that could
-            # not support it.
+            # ran under the same device state, so a common-mode excursion
+            # divides out of each pair before anything is reduced.  This is also
+            # the only quantity here that comes with an interval, and the
+            # interval is the point: a ``speedup`` quoted without one is not a
+            # result.
             sp = ratio(mio, best)
             row.update(
                 miopen_ms=mio.median / c,
@@ -1206,17 +1157,15 @@ def measure_problem(
                 speedup_rel_ci=sp.rel_half_width,
                 speedup_significant=sp.significant,
             )
-        # What the launcher is worth, per arm.  A probe estimate (one bracketed
-        # block, no interval) minus the measured kernel; reported because the
+        # What the launcher is worth, per arm: a probe estimate (one bracketed
+        # block, no interval) minus the measured kernel.  Reported because the
         # *difference* between the two arms' launchers is the bias that
         # excluding them removes, and a reader should be able to see it.
         #
-        # Not a measurement, and it shows: where the launcher is already
-        # negligible -- above about 0.3 ms, where an event-free bracket of a
-        # host-paced loop already reaches kernel throughput -- this comes out at
-        # a few microseconds of either sign.  Taking it seriously means running
-        # both launcher policies as full races with intervals, which is a
-        # separate experiment and not this row.
+        # An estimate, not a measurement: on kernels long enough for a host-paced
+        # loop to reach kernel throughput it lands within noise of zero, of
+        # either sign.  Taking it seriously means running both launcher policies
+        # as full races with intervals, which is a separate experiment.
         for arm in ("triton", "miopen"):
             if f"{arm}_ms" not in row:
                 continue
@@ -1269,11 +1218,10 @@ def _correctness(
 def _pick(corpus, args) -> list[tuple[int, ConvProblem]]:
     """``(corpus index, problem)`` pairs, in corpus order.
 
-    Indices are into the **corpus**, for both operators, because that is the
-    only stable name a problem has: ``--problems 1,3,5`` means what it has
-    always meant, and a transposed problem is now nameable the same way
-    (``m5_convT_bench``'s cheapest-first index 0 is corpus index 56).  Every
-    printed row and every stored row carries its index.
+    Indices are into the corpus, for both operators, because that is the only
+    stable name a problem has -- a transposed problem included, which is why
+    ``--problems`` indices are corpus indices and not positions within an
+    operator's own list.  Every printed and stored row carries its index.
     """
     if args.problems:
         return [(int(i), corpus[int(i)]) for i in args.problems.split(",")]
@@ -1408,11 +1356,10 @@ def main() -> None:
             "on ROCm without it, so MIOpen would be handed NCDHW"
         )
     if args.check and args.control == "none":
-        # MIOpen's answer *is* --check's reference, and computing it costs the
+        # MIOpen's answer *is* --check's reference, so computing it costs the
         # same find the run just declined to pay.  Refused rather than silently
-        # made expensive, because a --control none run that quietly took as long
-        # as a comparison would be the worst of both.  The bitwise standard is
-        # triton_conv3d/tests/, which does not need a timing run to hold.
+        # made expensive.  The bitwise standard is triton_conv3d/tests/, which
+        # does not need a timing run to hold.
         raise SystemExit(
             "--check compares against MIOpen's own answer, so it needs "
             "--control miopen; with --control none it would reintroduce the "

@@ -14,25 +14,23 @@
 
 """Tests for the channels-last Triton GroupNorm (``ScaFFold.unet.triton_group_norm``).
 
-The kernel replaces a stock op, so almost every test here is a *parity* test:
-values and gradients against ``F.group_norm``, but with the reference computed
-in **float64** rather than against another fp32 result -- an fp32-vs-fp32
-comparison cannot tell a correct kernel from one that has merely made the same
-mistake, and it cannot see the variance-formula failure the Welford
-implementation exists to fix (``test_welford_survives_large_mean``).  Each
-parity test reports the measured relative error so a regression shows up as a
-number, not just a boolean.
+The kernel replaces a stock op, so almost every test here is a parity test:
+values and gradients against ``F.group_norm``, with the reference computed in
+float64 rather than another fp32 result -- an fp32-vs-fp32 comparison cannot
+tell a correct kernel from one that has merely made the same mistake, and it
+cannot see the variance-formula failure Welford exists to fix
+(``test_welford_survives_large_mean``).
 
 The other three things being pinned down:
 
-* the **contract** -- output dtype exactly matches ``F.group_norm``'s
-  (including its fp32 autocast policy), output *memory format* matches the
-  input's (which is where the kernel deliberately differs from stock, and the
-  entire reason it exists), and ``is_supported`` accepts exactly the inputs the
-  native kernel serves;
-* **determinism** -- the same call twice is bitwise identical, forward and
+* the contract -- output dtype exactly matches ``F.group_norm``'s (including
+  its fp32 autocast policy), output memory format matches the input's (which
+  is where the kernel deliberately differs from stock, and the entire reason
+  it exists), and ``is_supported`` accepts exactly the inputs the native
+  kernel serves;
+* determinism -- the same call twice is bitwise identical, forward and
   backward, because the split count and tiling are pure functions of the shape;
-* **composition** -- the op is a real dispatcher op, so it must survive
+* composition -- the op is a real dispatcher op, so it must survive
   ``torch.compile(fullgraph=True)`` without a graph break and a ``DCTensor``
   round trip through ``__torch_dispatch__`` with the autograd graph intact.
 
@@ -57,11 +55,9 @@ GROUPS = 8
 EPS = 1e-5
 
 #: Relative-error ceilings against a float64 reference, by input dtype.  The
-#: fp32 numbers observed on MI300A at these (small) test shapes are ~2e-07 for
-#: y/dx/dweight/dbias; the ceiling leaves room for the 3e-05 that a 134M-element
-#: fp32 reduction shows at the largest production shape.  The low-precision
-#: ceilings are set just above the output's own rounding: 2^-8 for bf16 and
-#: 2^-11 for fp16, measured 3.3e-03 and 3.8e-04.
+#: fp32 ceiling leaves headroom above the reduction noise a much larger
+#: production-scale fp32 sum accumulates.  The low-precision ceilings sit just
+#: above each dtype's own rounding floor: 2^-8 for bf16, 2^-11 for fp16.
 _TOL = {
     torch.float32: 1e-4,
     torch.bfloat16: 2e-2,
@@ -392,11 +388,11 @@ def test_parity_without_affine_parameters(affine):
 
     reference_weight = weight
     if weight is None and bias is not None:
-        # Upstream limitation, not a difference in this kernel:
-        # ``F.group_norm(x, g, None, bias).backward()`` raises "tensor does not
-        # have a device" on both CPU and CUDA (torch 2.13.0+rocm7.2), so the
-        # float64 reference has to spell the same computation with weight=1.
-        # This kernel handles the combination directly.
+        # Upstream limitation, not a difference in this kernel: on this build,
+        # ``F.group_norm(x, g, None, bias).backward()`` raises "tensor does
+        # not have a device" on both CPU and CUDA, so the float64 reference
+        # has to spell the same computation with weight=1.  This kernel
+        # handles the combination directly.
         reference_weight = torch.ones_like(bias)
     ref = _reference(x, reference_weight, bias, grad_out)
     # ``_assert_parity`` skips outputs this configuration does not produce.
@@ -438,7 +434,7 @@ def test_partial_gradient_requirements():
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 def test_fused_relu_matches_unfused(dtype):
     """The fused store and ``F.relu`` on the unfused output must agree bitwise,
-    forward *and* backward -- the backward recomputes the pre-activation rather
+    forward and backward -- the backward recomputes the pre-activation rather
     than reading it back, so this is the test that recomputation is exact."""
     device = torch.device("cuda")
     x, weight, bias, grad_out = _tensors((2, 64, 6, 7, 8), dtype, device, seed=29)
@@ -484,11 +480,11 @@ def test_bitwise_determinism(activation):
 
 
 def _naive_group_norm(x, num_groups, weight, bias, eps):
-    """The prototype's variance formula, reproduced in fp32 torch ops.
+    """The variance formula this kernel avoids, reproduced in fp32 torch ops.
 
-    ``var = E[x^2] - E[x]^2`` is split-friendly and cheap, and it is what the
-    kernel used before the Welford rewrite; this is the thing the test below
-    must show is broken so that "the new one passes" means something.
+    ``var = E[x^2] - E[x]^2`` is split-friendly and cheap, but it is the
+    formulation the test below must show is broken, so that "the new one
+    passes" means something.
     """
     n, channels = x.shape[0], x.shape[1]
     flat = x.reshape(n, num_groups, -1)
@@ -514,20 +510,11 @@ def _naive_group_norm(x, num_groups, weight, bias, eps):
 def test_welford_survives_large_mean(mean, std, naive_floor):
     """Large-mean / small-variance input: the regression case for the rewrite.
 
-    Measured here on MI300A at ``[1, 256, 24^3]`` (relative error of the output
-    against a float64 reference computed from the same fp32 samples), with the
-    production shape ``[1, 256, 64^3]`` in parentheses:
-
-        mean=0,   std=1     this 1.3e-07 (1.6e-07)  E[x^2]-E[x]^2 1.4e-07 (1.8e-07)
-        mean=1e2, std=1     this 1.1e-06 (8.0e-07)  E[x^2]-E[x]^2 9.5e-04 (5.6e-04)
-        mean=1e3, std=1e-2  this 4.4e-04 (1.1e-04)  E[x^2]-E[x]^2 2.3e+00 (2.3e+00)
-
-    i.e. at ``mean/std = 1e5`` the old formulation loses the variance outright
-    (the difference of the two ~1e6-sized fp32 terms is below one ulp, so
-    ``rstd`` saturates on ``eps`` and the output is meaningless) while Welford
-    is still correct to 4.4e-04 -- itself *5x better* than ATen's own fp32
-    GroupNorm on the same input (2.2e-03), and dominated by the fp32
-    representation of a mean of 1e3 rather than by anything the kernel does.
+    Past a large enough mean/std ratio, the naive formulation loses the
+    variance outright: the difference of two similarly-sized fp32 terms falls
+    below one ulp, so ``rstd`` saturates on ``eps`` and the output is
+    meaningless.  Welford stays correct there, dominated by the fp32
+    representation of the mean rather than by anything the kernel does.
     """
     device = torch.device("cuda")
     x, weight, bias, grad_out = _tensors(
@@ -571,9 +558,10 @@ def test_welford_survives_large_mean(mean, std, naive_floor):
 def test_output_dtype_matches_stock(dtype, autocast_dtype):
     """The dtype contract, including autocast's fp32 policy for GroupNorm.
 
-    Stock behaviour on this build (measured, not assumed): without autocast the
-    output dtype is the input dtype; inside *any* enabled CUDA autocast region
-    it is fp32, because ``at::group_norm`` carries the fp32 cast policy.
+    Without autocast the output dtype is the input dtype; inside any enabled
+    CUDA autocast region it is fp32, because ``at::group_norm`` carries the
+    fp32 cast policy -- confirmed against stock behaviour here rather than
+    assumed.
     """
     device = torch.device("cuda")
     x, weight, bias, _ = _tensors((1, 64, 5, 5, 5), dtype, device, seed=41)
@@ -666,7 +654,7 @@ def test_memory_format_is_preserved(layout):
 def test_int64_switch_flips_at_int32_max():
     """The switch is a pure function of the element count, so pin the boundary.
 
-    ``[2, 64, 256^3]`` is *exactly* 2^31 elements: the shape that made an
+    ``[2, 64, 256^3]`` is exactly 2^31 elements: the shape that made an
     int64 path mandatory before batch>1 or scale 16.
     """
     assert tgn._plan(1, 64, 255**3, 8, 64 * 255**3).int64 is False
@@ -678,11 +666,12 @@ def test_int64_switch_flips_at_int32_max():
 def test_correct_above_int32_max_elements():
     """Correctness at a shape whose linear element count exceeds INT32_MAX.
 
-    ``[2, 64, 256, 256, 257]`` is 2_155_872_256 elements -- 8.4M past 2^31, and
-    non-power-of-two in the fastest spatial dimension so a truncated offset
-    cannot accidentally land on the right address.  fp32 (8.03 GiB per tensor)
-    keeps the comparison sharp; the reference needs an NCDHW copy, so the peak
-    is ~48 GiB and the test skips, loudly, if the device cannot hold that.
+    ``[2, 64, 256, 256, 257]`` clears 2^31 elements while staying
+    non-power-of-two in the fastest spatial dimension, so a truncated offset
+    cannot accidentally land on the right address.  fp32 keeps the comparison
+    sharp; the reference needs an NCDHW copy on top of the channels-last
+    input, so the test skips, loudly, if the device doesn't have enough
+    memory for both.
     """
     device = torch.device("cuda")
     shape = (2, 64, 256, 256, 257)
@@ -762,7 +751,7 @@ def test_custom_op_is_registered_with_a_fake_kernel():
 @pytest.mark.gpu
 @pytest.mark.parametrize("activation", [None, "relu"])
 def test_torch_compile_fullgraph(activation):
-    """``fullgraph=True`` raises on a graph break, so this *is* the no-break
+    """``fullgraph=True`` raises on a graph break, so this is the no-break
     test; the compiled result must additionally be bitwise equal to eager,
     because the op is opaque to Inductor and so cannot be re-associated."""
     device = torch.device("cuda")

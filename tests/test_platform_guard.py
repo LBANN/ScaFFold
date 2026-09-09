@@ -14,25 +14,21 @@
 
 """The hardware guard: ``_rungs._platform_declines`` and both ladders' wiring.
 
-**Every interesting branch here is one this node cannot take.**  The guard's job
-is to keep the Triton rungs off hardware they were not tuned on, and the machine
-running these tests is the hardware they *were* tuned on -- so a suite that only
-exercised the accept path would ship the entire decline path unexecuted, which
-is the opposite of what the change is for.  ``_rungs._device_fingerprint`` exists
-as one small seam for that reason: substituting a tuple for it poses the MI300X,
-the partitioned MI300A, the MI250X and the NVIDIA questions to the *real*
-predicate, the real cache and the real message, rather than to a re-implementation
-of them.
+Every interesting branch here is one this node cannot take: the guard's job
+is to keep the Triton rungs off hardware they were not tuned on, and the
+machine running these tests is the hardware they were tuned on. A suite that
+only exercised the accept path would ship the entire decline path
+unexecuted. ``_rungs._device_fingerprint`` exists as a seam for that reason:
+substituting a tuple for it poses the MI300X, the partitioned MI300A, the
+MI250X and the NVIDIA questions to the real predicate, the real cache and
+the real message, rather than to a re-implementation of them.
 
-Two properties are easy to get wrong and are pinned separately.  The cache is
-process-global, so :func:`_clean_platform_state` clears it around every test --
-without that the first question asked would fix the answer for the rest of the
-session and half these tests would silently be re-asking it.  And the guard must
-be evaluated *once*, which is asserted as a call count on the seam rather than as
-a duration, because a timing assertion on a driver query measures the driver.
-
-Every property here was verified by mutation: breaking it in the guard and
-checking that the test named alongside it notices.
+Two properties are easy to get wrong and are pinned separately. The cache is
+process-global, so :func:`_clean_platform_state` clears it around every
+test -- without that the first question asked would fix the answer for the
+rest of the session. And the guard must be evaluated once, which is asserted
+as a call count on the seam rather than as a duration, since a timing
+assertion on a driver query measures the driver.
 """
 
 from __future__ import annotations
@@ -55,10 +51,10 @@ _CHANNELS_LAST = torch.channels_last_3d
 #: What this node reports, and the only fingerprint the guard accepts.
 _MI300A = ("gfx942", 228, "AMD Instinct MI300A")
 
-#: The parts an arch-only test would wrongly accept.  MI300X and MI325X are
-#: ``gfx942`` too -- discrete GPUs with 304 CUs rather than an APU with 228 --
-#: and a compute-partitioned MI300A reports the same arch with one XCD's worth
-#: of CUs, which makes both the 228 and ``gather_gemm``'s ``GROUP_M = 6``
+#: The parts an arch-only test would wrongly accept. MI300X and MI325X are
+#: ``gfx942`` too -- discrete GPUs with 304 CUs rather than an APU's 228 -- and
+#: a compute-partitioned MI300A reports the same arch with one XCD's worth of
+#: CUs, which makes both the 228 and ``gather_gemm``'s ``GROUP_M = 6``
 #: (MI300A's XCD count) fiction while the arch string never moves.
 _UNTUNED = {
     "mi300x": ("gfx942", 304, "AMD Instinct MI300X"),
@@ -103,14 +99,14 @@ def _clean_platform_state():
 def _fake_device(monkeypatch, fingerprint, *, count=None):
     """Make every device look like ``fingerprint``; optionally count the asks.
 
-    ``count`` is a list the seam appends each asked-about index to, which is how
-    the "evaluated once" tests assert on a call count rather than on a duration.
+    ``count`` is a list the seam appends each asked-about index to, which is
+    how the "evaluated once" tests assert on a call count rather than on a
+    duration.
 
-    The cache is dropped here as well, and that is not tidying: swapping the
-    hardware out from under a memo whose whole purpose is never to ask twice
-    would otherwise leave the *previous* answer in place -- which on this node
-    is "yes, MI300A", so every decline test would quietly become another accept
-    test.  That is exactly the failure this file exists to avoid.
+    The cache is dropped here too, and that is not tidying: swapping the
+    hardware out from under a memo that exists to never ask twice would
+    otherwise leave the previous answer in place -- "yes, MI300A" on this
+    node -- so every decline test would quietly become another accept test.
     """
 
     def fingerprint_of(index):
@@ -132,7 +128,7 @@ def _cuda(index=0):
 
 
 def test_the_tuned_fingerprint_is_the_only_one_accepted(monkeypatch):
-    """Arch *and* CU count, which is what makes this MI300A and not gfx942."""
+    """Arch and CU count, which is what makes this MI300A and not just gfx942."""
     _fake_device(monkeypatch, _MI300A)
     ok, described = _rungs._platform_verdict(_cuda())
     assert ok is True
@@ -152,13 +148,13 @@ def test_every_other_device_is_declined(monkeypatch, name):
 def test_the_arch_feature_suffixes_are_not_part_of_the_comparison(monkeypatch):
     """``gcnArchName`` carries build features; exact equality would be a trap.
 
-    This node reports ``gfx942:sramecc+:xnack-``, and those suffixes describe
-    how the *build* was configured rather than which silicon is present -- so a
-    string comparison against ``"gfx942"`` would decline the very device
-    everything was tuned on, and one against the full string would decline the
-    same chip under a different HIP build.  Driven through a stub property
-    object so the CPU suite exercises it too; the GPU test below pins that the
-    real device really does carry a suffix, i.e. that this is not hypothetical.
+    This node reports ``gfx942:sramecc+:xnack-``; those suffixes describe how
+    the build was configured, not which silicon is present, so a string
+    comparison against ``"gfx942"`` would decline the device everything was
+    tuned on, and one against the full string would decline the same chip
+    under a different HIP build. Driven through a stub property object so the
+    CPU suite exercises it too; the GPU test below confirms the real device
+    does carry a suffix.
     """
 
     class _Props:
@@ -281,7 +277,7 @@ def test_the_default_is_not_an_opt_in(monkeypatch):
     """``None`` means "on wherever it is safe", and this device is not that.
 
     The tri-state is the whole override: an unset ``SCAFFOLD_CONV_TRITON`` and
-    an explicit ``1`` differ *here* and nowhere else.
+    an explicit ``1`` differ here and nowhere else.
     """
     _fake_device(monkeypatch, _UNTUNED["mi300x"])
     assert _rungs._platform_declines(_cuda(), None) is True
@@ -390,10 +386,10 @@ def _gpu_input(shape, dtype=torch.bfloat16):
 def test_this_node_is_the_tuned_platform(caplog):
     """The accept path, against the real driver rather than a stub.
 
-    Also the check that the constants have not drifted away from the machine
-    every measurement in this project was taken on -- and that the suffix strip
-    is load-bearing here rather than defensive, since the raw string this device
-    reports really does carry ``:sramecc+:xnack-``.
+    Also checks that the constants have not drifted from the machine the
+    Triton kernels were tuned on, and that the suffix strip is load-bearing
+    here rather than defensive: the raw string this device reports really
+    does carry ``:sramecc+:xnack-``.
     """
     props = torch.cuda.get_device_properties(0)
     assert ":" in props.gcnArchName, props.gcnArchName
@@ -564,7 +560,7 @@ def test_the_real_model_reports_triton_on_every_site_after_a_forward():
     """The shipped configuration is all-Triton, and the line must say so.
 
     Also pins the placement rule: the same model reports ``Native`` everywhere
-    *before* a forward, because ``_triton_ok`` is a latch. That is why
+    before a forward, because ``_triton_ok`` is a latch. That is why
     ``_log_kernel_selection`` is called after warmup and after the first batch
     rather than at construction.
     """

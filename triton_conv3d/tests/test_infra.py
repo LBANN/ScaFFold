@@ -1,12 +1,9 @@
 # SPDX-License-Identifier: (Apache-2.0)
 """Tests for the measurement infrastructure itself.
 
-No kernels exist yet.  What exists is a shape model, a cost model, a reference
-and a timing harness, and every performance claim we make later is only as good
-as those.  So they get tested first, and mostly by cross-checking them against
-PyTorch rather than against my own arithmetic: :func:`test_output_shape_matches_torch`
-and :func:`test_flops_match_gemm_decomposition` between them caught a real error
-in the transposed-convolution FLOP count, where the tap factor was applied twice.
+Every performance claim rests on the shape model, the cost model, the reference
+and the timing harness, so those are cross-checked against PyTorch rather than
+against the same arithmetic twice.
 
 The GPU tests are skipped without a device; the shape and cost model tests are
 pure Python and always run.
@@ -35,10 +32,10 @@ from triton_conv3d.shapes import (
 
 requires_gpu = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
 
-#: ``include_large=True`` because the shape and cost model tests below are meta
-#: tensors and integer arithmetic -- a 4 GiB activation costs nothing here, and
-#: until this call existed the two int32-boundary cases were never instantiated
-#: by anything at all.  The GPU tests parametrize over ``SMALL`` instead.
+#: ``include_large=True`` because the shape and cost model tests below run on
+#: meta tensors and integer arithmetic, so the largest activations cost nothing
+#: here and nothing else instantiates the two int32-boundary cases.  The GPU
+#: tests parametrize over ``SMALL`` instead.
 ALL = list(scaffold_corpus()) + list(edge_cases(include_large=True))
 SMALL = [p for p in edge_cases() if math.prod(p.spatial) * p.cin <= 1 << 16]
 
@@ -56,10 +53,9 @@ def _ids(problems):
 def test_output_shape_matches_torch(problem: ConvProblem):
     """The derived output shape is what PyTorch actually produces.
 
-    Cross-checking the whole corpus against the operator it models is what makes
-    the extracted shapes trustworthy; an off-by-one in the padding arithmetic
-    would otherwise propagate silently into every FLOP count and every roofline.
-    Run on meta tensors so a 2 GiB scale-8 activation costs nothing.
+    An off-by-one in the padding arithmetic would otherwise propagate silently
+    into every FLOP count and every roofline.  Run on meta tensors, so the
+    largest activations cost nothing.
     """
     x = torch.empty(problem.input_shape, device="meta")
     w = torch.empty(problem.weight_shape, device="meta")
@@ -95,9 +91,9 @@ def test_transposed_flops_have_no_phantom_tap_factor():
     """A ``k == s`` transposed convolution does one MAC per output voxel.
 
     With kernel equal to stride the scatter windows tile the output rather than
-    overlapping, so each output voxel receives exactly one contribution.  Scaling
-    the input volume by the tap count *and* keeping the tap factor would inflate
-    the count eightfold, which is exactly the bug this pins.
+    overlapping, so each output voxel receives exactly one contribution: scaling
+    the input volume by the tap count *and* keeping the tap factor counts the
+    taps twice.
     """
     p = ConvProblem(
         "t", 64, 32, (8, 8, 8), (2, 2, 2), (2, 2, 2), (0, 0, 0), transposed=True
@@ -110,11 +106,8 @@ def test_transposed_flops_have_no_phantom_tap_factor():
 def test_the_int32_edge_cases_bracket_the_element_boundary():
     """The pair has to sit either side of 2**31 elements, or it pins nothing.
 
-    It did not: ``int32_below`` was ``64 -> 64 @ 512^3``, 8.59e9 elements --
-    four times *above* the boundary it is named for, so both cases were above
-    it and the transition was unbracketed.  Asserted on the element count
-    rather than on the predicate so that this fails if either the shape or the
-    predicate moves.
+    Asserted on the element count rather than on the predicate, so that it
+    fails if either the shape or the predicate moves.
     """
     cases = {p.name: p for p in edge_cases(include_large=True)}
     below, above = cases["int32_below"], cases["int32_above"]
@@ -132,20 +125,18 @@ def test_the_int32_edge_cases_bracket_the_element_boundary():
 
     small = ConvProblem("small", 32, 32, (8, 8, 8))
     assert not small.index_exceeds_int32
-    #: ``bench/baseline.py`` records the predicate under its old name.
+    #: ``bench/baseline.py`` reads the predicate under the ``needs_int64`` alias.
     assert small.needs_int64 is small.index_exceeds_int32
 
 
 def test_the_2gib_cliff_is_a_byte_problem_and_not_an_index_problem():
-    """The two int32 predicates are about different quantities, in both senses.
+    """The two int32 predicates are about different quantities.
 
-    ``conv 128->64 @ 130x258x258`` is the shape behind the project's two
-    largest numbers (769x and 2789x): DistConv's halo pushes its activation
-    3.2% past 2 GiB, MIOpen falls off its solver database, and Triton does not.
-    That shape holds 1.11e9 elements -- about half of int32's range -- so an
-    element-counting predicate says nothing about it, and ``needs_int64``
-    used to be read as though it did.  What it exceeds is the *byte* limit on
-    the whole storage, which is what decides buffer-op eligibility.
+    ``conv 128->64 @ 130x258x258`` holds about half of int32's element range,
+    so an element-counting predicate says nothing about it -- but DistConv's
+    halo pushes its activation past the 2 GiB limit on the whole storage, which
+    is what decides buffer-op eligibility and where MIOpen falls off its solver
+    database.
     """
     cliff = next(
         p.halo_variant
@@ -160,9 +151,9 @@ def test_the_2gib_cliff_is_a_byte_problem_and_not_an_index_problem():
         abs=0.002,  # 3.2% past 2 GiB
     )
 
-    # It is the only corpus shape on either side of that line, in either shape
-    # mode -- and *no* corpus shape needs a 64-bit element index.  A test or a
-    # dispatch rule parametrized on the index predicate selects nothing.
+    # The only corpus shape on either side of that line, in either shape mode;
+    # and no corpus shape needs a 64-bit element index, so a test or a dispatch
+    # rule parametrized on the index predicate selects nothing.
     over = [
         p.halo_variant.label
         for p in scaffold_corpus()
@@ -193,14 +184,13 @@ def test_halo_variant_is_the_shape_distconv_actually_issues():
     """The halo'd form is derived, not guessed, and it matches the shape dump.
 
     Upstream DistConv concatenates a ``k // 2`` halo and zeroes the padding on
-    every axis it manages -- including unsplit ones, where the slab is provably
-    zeros -- so a convolution routed through it reaches MIOpen two voxels larger
-    per axis and unpadded.  ``halo_variant`` reconstructs that from ``halo``
-    alone; this pins the reconstruction against ``halo_in_shape``, which the
-    shape dump recorded independently.  If they ever disagree, every profiled
-    number in ``measured`` is attached to the wrong problem.
+    every axis it manages, including unsplit ones, so a convolution routed
+    through it reaches MIOpen two voxels larger per axis and unpadded.
+    ``halo_variant`` reconstructs that from ``halo`` alone; pinning it against
+    the independently recorded ``halo_in_shape`` is what keeps every number in
+    ``measured`` attached to the right problem.
 
-    This is the *incumbent's* form.  What ScaFFold's own Triton rung issues is
+    This is the incumbent's form; ScaFFold's own Triton rung issues
     :meth:`ConvProblem.production_variant`, pinned separately below against a
     census of real calls.
     """
@@ -225,11 +215,9 @@ def test_halo_variant_is_a_distinct_miopen_problem():
     """The two forms must not collide in any table keyed by label.
 
     MIOpen keys its find database on the full descriptor including padding, so
-    ``64-128-128-128-...-1x1x1`` and ``64-130-130-130-...-0x0x0`` tune
-    separately and can land on different kernels.  A baseline that labelled
-    them the same would let a cell measured on one be compared against a
-    profile of the other -- silently, and in whichever direction flatters the
-    kernel under test.
+    the padded and the halo'd form tune separately and can land on different
+    kernels.  A baseline that labelled them the same would silently let a cell
+    measured on one be compared against a profile of the other.
     """
     hot = [p for p in scaffold_corpus() if any(p.halo)]
     assert hot, "corpus has no halo'd problems; the dump lost halo_dhw"
@@ -243,22 +231,19 @@ def test_halo_variant_is_a_distinct_miopen_problem():
 
 
 def test_the_production_variant_is_what_a_real_step_issues():
-    """The one that was wrong, pinned against a measurement.
+    """The production form is what a real step issues, pinned against a census.
 
-    Every published ``conv`` cell in this project measures
-    :meth:`ConvProblem.halo_variant`, on the premise that "DistConv halos them
-    all".  ScaFFold does not route its convolutions through DistConv: the
-    adapter in ``ScaFFold/unet/conv3d.py`` exchanges a halo only on axes with
-    more than one shard, so H and W keep ``padding = 1`` at every configuration
-    and all three axes do at one GPU.  A projection built on the halo'd cells
-    over-credited a tuning commit by 3x before anyone checked.
+    ScaFFold does not route its convolutions through DistConv, so
+    :meth:`ConvProblem.halo_variant` is not the form it issues: the adapter in
+    ``ScaFFold/unet/conv3d.py`` exchanges a halo only on axes with more than
+    one shard, so H and W keep ``padding = 1`` at every configuration and all
+    three axes do at one GPU.
 
-    Checked here against ``census_corpus()`` -- a recording of the shapes and
-    paddings real ``FastConv3d`` calls handed the kernels at all four
-    configurations -- rather than against the same arithmetic twice.  The
-    segmentation head is excluded on ``cout``: its output channel count is
-    ``n_categories + 1``, a dataset knob, and the corpus and the census were
-    taken with different values of it (6 and 3).
+    Checked against ``census_corpus()`` -- a recording of the shapes and
+    paddings real ``FastConv3d`` calls handed the kernels -- rather than
+    against the same arithmetic twice.  The segmentation head is excluded on
+    ``cout``: it is ``n_categories + 1``, a dataset knob, and the corpus and
+    the census were taken with different values of it.
     """
     from triton_conv3d.shapes import census_corpus, production_corpus
 
@@ -296,10 +281,9 @@ def test_the_production_variant_is_what_a_real_step_issues():
 def test_the_three_forms_are_told_apart_by_the_qualified_label():
     """A cell must never be quotable as a form it is not.
 
-    ``label`` carries the extent but not the padding, and the two sharded forms
-    of one site differ in *both* -- while the unsharded production form differs
-    from the DistConv one in the padding alone at some extents.  Any table that
-    mixes forms therefore has to key on ``qualified_label``.
+    ``label`` carries the extent but not the padding, and the forms of one site
+    can differ in either or in both, so any table that mixes forms has to key
+    on ``qualified_label``.
     """
     sharded = [p for p in scaffold_corpus() if any(p.shard_halo)]
     assert sharded, "corpus has no sharded problems; shard_halo_dhw was lost"
@@ -321,16 +305,13 @@ def test_the_three_forms_are_told_apart_by_the_qualified_label():
 
 
 def test_the_production_corpus_is_padded_where_the_halo_corpus_is_not():
-    """The headline of the whole distinction, as a number.
+    """The adapter form is padded at every ``k = 3`` site; the halo form is not.
 
-    If this ever reads "0 padded" again, either the adapter has started haloing
-    every axis or ``shard_halo`` has been confused with ``halo`` -- and the
-    consequence is that every backward-weight kernel silently stops compiling
-    the ``PADDED`` body it compiles at every ``k = 3`` site today, so every
-    number in this project's adapter-form tables would describe a kernel
-    production no longer launches.  (Until 2026-08-05 the consequence was
-    larger still: ``bwd_weight_config`` declined a tuned ``TAP_BLOCK > 1`` row
-    on a padded problem, so this count decided which *tile* eight sites ran.)
+    If the padded count ever falls to zero, either the adapter has started
+    haloing every axis or ``shard_halo`` has been confused with ``halo``, and
+    the backward-weight kernel silently stops compiling the ``PADDED`` body
+    production launches -- so every adapter-form table would describe a kernel
+    that no longer runs.
     """
     from triton_conv3d.shapes import halo_corpus, production_corpus
 
@@ -347,15 +328,10 @@ def test_stored_efficiency_agrees_with_the_cost_model():
     """The corpus's ``pct_roofline`` must be what ``efficiency(ms_per_call)`` says.
 
     They are computed by different code -- one by ``make_corpus.py`` out of the
-    profile's own FLOP and byte counts, one here out of the shape -- so agreement
-    is a real cross-check, and it caught a real error.  ``make_corpus.py`` used
-    to divide the profile's *per-step* FLOP count by the *per-call* time, which
-    multiplies the efficiency by the number of call sites.  Every affected
-    problem is a symmetric ``C -> C`` convolution occurring at two sites, so the
-    artifact read as "MIOpen is excellent on symmetric convolutions and poor on
-    asymmetric ones" and produced the three forward points that appeared to
-    exceed 100% of roofline.  With it fixed, MIOpen's forward spans 21-68%
-    everywhere and the three impossible points are gone.
+    profile's own FLOP and byte counts, one here out of the shape -- so
+    agreement is a real cross-check.  The failure it catches is a per-step FLOP
+    count divided by a per-call time, which scales the efficiency by the number
+    of call sites and pushes the shapes that occur twice past the roof.
     """
     for problem in scaffold_corpus():
         for m in problem.measured:
@@ -364,7 +340,7 @@ def test_stored_efficiency_agrees_with_the_cost_model():
                 f"{problem.label} [{m['direction']}, config {m['config']}]: "
                 f"stored {m['pct_roofline']}%, cost model {got:.3f}%"
             )
-    # And no forward cell exceeds the roof, which is what the artifact implied.
+    # And no forward cell exceeds the roof, which is that bug's symptom.
     fwd = [
         m["pct_roofline"]
         for p in scaffold_corpus()
@@ -403,19 +379,14 @@ def test_reference_agrees_with_miopen_within_tolerance(problem: ConvProblem):
         actual = reference.incumbent(problem, ops, direction)
         # MIOpen's backward-weight is the one direction that is not a single
         # rounding: it reduces with atomics, so two identical calls differ
-        # bitwise and the result carries several roundings rather than the one
-        # ``error_bound`` charges by default.  Measured at ``conv 32->32 k3x3x3
-        # @ 8x8x8``, its error wanders over 0.61-1.05 ulps of the peak from call
-        # to call while the forward sits at a fixed 0.284 -- and a one-ulp bound
-        # therefore does not merely fail it, it fails it *intermittently*, which
-        # is the worse outcome.  ``convT 64->32 k2x2x2 @ 8x8x8`` is the other
-        # cell that reaches past one ulp.  The nondeterminism and the size of
-        # the excess are both pinned by
-        # :func:`test_the_incumbents_extra_roundings_are_the_atomic_ones`, so
-        # this is a measured allowance rather than a tolerance nudged until the
-        # test passed.  Only this direction and only the incumbent get it: our
-        # own backward-weight reduces its split-K partials in fp32 and stores
-        # once, so it is held to ``roundings=1`` like everything else.
+        # bitwise and the error can wander past the one ulp ``error_bound``
+        # charges by default -- intermittently, which is the worse failure.
+        # :func:`test_the_incumbents_extra_roundings_are_the_atomic_ones` pins
+        # both the nondeterminism and the size of the excess, so this is a
+        # motivated allowance rather than a tolerance nudged until the test
+        # passed.  Only the incumbent gets it: our own backward-weight reduces
+        # its split-K partials in fp32 and stores once, so it is held to
+        # ``roundings=1`` like everything else.
         reference.assert_close(
             actual,
             expected,
@@ -460,9 +431,9 @@ def test_error_bound_grows_with_reduction_length_and_shrinks_with_precision():
 def test_error_bound_tracks_peak_not_just_rms():
     """A tensor with a big outlier gets a proportionally bigger absolute bound.
 
-    This is the property whose absence made the bound too tight: the final
-    rounding to bf16 costs an ulp of the *largest* element, so a spiky tensor
-    legitimately admits more absolute error than a flat one of the same RMS.
+    The final rounding to bf16 costs an ulp of the largest element, so a spiky
+    tensor legitimately admits more absolute error than a flat one of the same
+    RMS; a bound that tracked the RMS alone would be too tight.
     """
     problem = ConvProblem("p", 64, 64, (8, 8, 8))
     flat = torch.ones(4096, dtype=torch.float64)
@@ -476,17 +447,15 @@ def test_error_bound_tracks_peak_not_just_rms():
 def test_the_store_term_is_charged_as_one_rounding_not_four():
     """The safety factor belongs on the walk, not on the deterministic store.
 
-    ``error_bound`` used to be ``8 * (accum + store)``, four ulps of the peak
-    for a rounding that is bounded by half an ulp of the *element* outright.
-    There is no random walk in a single store to take a factor against, and the
-    consequence was not academic: the static arm then won
-    :func:`reference.assert_close`'s ``max()`` in 46 of 48 measured cells, so
-    ``test_no_worse_than_miopen`` in all three kernel files was not holding the
-    kernel to the standard its name and docstring claim.
+    A single store is bounded by half an ulp of the element outright and has no
+    random walk to take a factor against.  Inflating it makes the static arm
+    win :func:`reference.assert_close`'s ``max()`` nearly always, which stops
+    ``test_no_worse_than_miopen`` in the kernel files holding the kernel to the
+    standard its name claims.
 
-    Pinned arithmetically rather than by measurement so that it fails on the
-    formula rather than on a GPU: at ``K`` short enough that the accumulation
-    term is negligible, the bound must be one ulp of the peak per rounding.
+    Pinned arithmetically rather than on a GPU: at ``K`` short enough that the
+    accumulation term is negligible, the bound must be one ulp of the peak per
+    rounding.
     """
     problem = ConvProblem("p", 8, 8, (4, 4, 4))  # K = 216
     peak = torch.zeros(4096, dtype=torch.float64)
@@ -502,23 +471,20 @@ def test_the_store_term_is_charged_as_one_rounding_not_four():
 def test_the_incumbents_extra_roundings_are_the_atomic_ones():
     """Why the incumbent gets ``roundings=2`` in exactly one direction.
 
-    The store term models one deterministic rounding into the working dtype.
-    That is what the forward and backward-data do -- both are bitwise
-    reproducible here, and their error lands under one ulp of the peak.
-    MIOpen's backward-weight is not: it reduces with atomics, two identical
-    calls differ, and the extra roundings can carry it past one ulp.  Without
-    this the allowance in
+    The store term models one deterministic rounding into the working dtype,
+    which is what the forward and backward-data do: both are bitwise
+    reproducible here.  MIOpen's backward-weight reduces with atomics instead,
+    so two identical calls differ and the extra roundings can carry it past one
+    ulp.  Without this the allowance in
     :func:`test_reference_agrees_with_miopen_within_tolerance` looks like a
     tolerance that was widened until the test passed.
 
-    ``conv 32->32 k3x3x3 @ 8x8x8`` because it is the cell that measures the
-    excess most clearly; the nondeterminism is a property of the direction, not
-    of the shape.  What is asserted is the *call-to-call spread*, not the error
-    on any one call, and that distinction is the finding: the error itself
-    wanders (0.61 to 1.05 ulps of the peak over eight calls) precisely because
-    the reduction order does, so an assertion on a single call would be as
-    intermittent as the bound it is defending.  A single rounding has a spread
-    of exactly zero, which is what the other two directions measure.
+    What is asserted is the call-to-call spread, not the error on any one call:
+    the error wanders because the reduction order does, so a single-call
+    assertion would be as intermittent as the bound it defends.  A single
+    rounding has a spread of exactly zero, which is what the other two
+    directions measure.  The shape is incidental -- the nondeterminism is a
+    property of the direction.
     """
     problem = ConvProblem("atomic", 32, 32, (8, 8, 8))
     ops = reference.make_inputs(problem, seed=7)
@@ -559,21 +525,16 @@ def test_the_incumbents_extra_roundings_are_the_atomic_ones():
 def test_the_incumbent_clause_binds_more_often_than_the_static_bound():
     """The anti-vacuity guard on ``assert_close``'s ``max()``.
 
-    A ``max()`` is only worth writing if both arms can win.  Under the old
-    four-ulp store term the static arm won essentially always and the "no worse
-    than MIOpen by more than ``margin``" standard was dead code -- documented,
-    named in three test functions, and never applied.  So pin the property that
-    made it live: over these cells the incumbent arm must be the operative one
-    more often than not.
+    A ``max()`` is only worth writing if both arms can win: if the static bound
+    swallows the incumbent arm, the "no worse than MIOpen by more than
+    ``margin``" standard is dead code.  So pin that the incumbent arm is the
+    operative one more often than not.
 
-    A floor rather than a per-cell assertion because which arm wins is a real
-    measurement and does move: it is the incumbent in 12 of these 13 cells, and
-    the one that goes the other way is a shape where MIOpen happens to be
-    unusually accurate -- exactly the case the ``max()`` exists to stop from
-    tightening the test beyond what the numerics justify.  Not parametrized,
-    because a per-case fixture cannot state a floor over the set and this file's
-    whole reason for existing is that a test which reports a pass without
-    testing anything is worse than no test.
+    A floor over the set rather than a per-cell assertion, because which arm
+    wins is a measurement and does move: a shape where MIOpen happens to be
+    unusually accurate is exactly the case the ``max()`` exists to stop from
+    tightening the test beyond what the numerics justify.  Hence not
+    parametrized -- a per-case fixture cannot state a floor over the set.
     """
     binds = []
     for problem in SMALL:
@@ -639,11 +600,9 @@ def test_interleaved_rotates_variants_and_reports_spread():
     # Rotation: the first variant of each round differs from round to round.
     starts = {order[i] for i in range(0, len(order), 1) if i % 3 == 0}
     assert len(starts) > 1, "rounds did not rotate"
-    # The old assertion here was ``m.spread >= 0``, which is true by
-    # construction of ``(max - min) / median`` and could not fail.  What is
-    # worth pinning is that pinning ``warmup``/``iters``/``rounds`` still runs
-    # exactly the calls it says: 1 warmup and 3 rounds of 1 iteration each, per
-    # variant, with no calibration probe smuggled in.
+    # Pinned ``warmup``/``iters``/``rounds`` must still run exactly the calls
+    # they say: 1 warmup and 3 rounds of 1 iteration each, per variant, with no
+    # calibration probe smuggled in.
     assert len(order) == 3 * (1 + 3 * 1)
     assert all(
         m.iters == 1 and m.group == 1 and m.stop == "fixed" for m in result.values()
@@ -653,21 +612,17 @@ def test_interleaved_rotates_variants_and_reports_spread():
 def test_the_round_order_is_position_and_adjacency_balanced():
     """Rotating by one position per round de-biases slots but not neighbours.
 
-    Under the old rule -- ``names[r % n:] + names[:r % n]`` -- variant B ran
-    immediately after variant A in *every* round, so whatever A left in the
-    caches was a constant charged to B and averaged out of nothing.  Measured on
-    the adversarial case (a 1 GiB cache-polluting arm plus two arms doing
-    byte-identical work, 40 replications): cyclic rotation reported the two
-    identical arms **2.8% apart**, this rule 0.2% apart, a random order 0.7%.
-    2.8% is larger than several of the per-cell differences this project
-    publishes, so the design property is worth asserting rather than trusting.
+    Under a cyclic rotation one variant runs immediately after another in every
+    round, so whatever the first leaves in the caches is a constant charged to
+    the second and averaged out of nothing -- an effect larger than several of
+    the per-cell differences this project publishes, so the design property is
+    asserted rather than trusted.
 
-    Pure Python and exhaustive, so it fails on the *rule* rather than on a
+    Pure Python and exhaustive, so it fails on the rule rather than on a
     measurement: over ``2 * n`` rounds every variant must occupy every position
-    equally often **and** every ordered adjacent pair must occur equally often.
-    Reverting :func:`_order` to the cyclic rotation fails the second clause at
-    every ``n >= 3`` (it makes the count of ``(A, B)`` equal to the number of
-    rounds and the count of ``(B, A)`` zero).
+    equally often and every ordered adjacent pair must occur equally often.  A
+    cyclic :func:`_order` fails the second clause at every ``n >= 3``, where it
+    makes the count of ``(B, A)`` zero.
     """
     from triton_conv3d.bench.harness import _order
 
@@ -699,14 +654,10 @@ def test_the_round_order_is_position_and_adjacency_balanced():
 def test_spread_is_a_range_statistic_and_the_interval_is_not():
     """Why ``spread`` cannot support a claim about how much the machine moved.
 
-    ``(max - min) / median`` is a *range*, and the expected range of ``n``
-    samples grows like ``d2(n)`` even on a perfectly stationary device.
-    Measured on this node with one kernel held constant for 14 minutes (47,686
-    blocks) the median of this statistic runs 0.23% at 2 rounds, 0.63% at 6,
-    0.98% at 20 and 2.70% at 100 -- all of it arithmetic, none of it the
-    machine.  Since ``rounds`` is now chosen per cell, two cells' spreads are
-    not comparable to each other at all, and the replacement has to be an
-    interval.
+    ``(max - min) / median`` is a range, and the expected range of ``n``
+    samples grows like ``d2(n)`` even on a perfectly stationary device.  Since
+    ``rounds`` is chosen per cell, two cells' spreads are not comparable to
+    each other at all, and the quotable statistic has to be an interval.
 
     Pinned on a fixed draw so it tests the formulae, not the GPU.
     """
@@ -732,19 +683,16 @@ def test_spread_is_a_range_statistic_and_the_interval_is_not():
 
 @requires_gpu
 def test_a_paired_ratio_of_two_identical_arms_covers_one():
-    """The anti-vacuity guard on the interval: it must be right *and* narrow.
+    """The anti-vacuity guard on the interval: it must be right and narrow.
 
     Two arms that are the same callable have a true ratio of exactly 1, so an
     interval that misses 1 is too narrow and one that spans a factor of two is
-    useless.  Both failures are live: an interval computed on the *mean* of
+    useless.  Both failures are live: an interval computed on the mean of
     per-iteration times rather than on the round medians is too narrow, and one
     taken over two rounds is too wide.
 
-    This also puts a number on what a published ratio has to beat.  At a
-    0.08 ms kernel two identical arms measured the old way -- 6 rounds of 10 --
-    came out **0.941x to 1.058x** over 40 replications (sd 2.5%), so a "1.02x"
-    at that size was never a measurement.  Nothing here asserts that; it is why
-    the interval exists.
+    The interval exists because at a small kernel the run-to-run scatter of a
+    fixed protocol is wider than the differences this project publishes.
     """
     from triton_conv3d.bench.harness import interleaved, ratio
 
@@ -762,15 +710,14 @@ def test_a_paired_ratio_of_two_identical_arms_covers_one():
 def test_the_block_is_sized_from_the_measured_duration():
     """``iters`` is chosen online, and it has to move with the kernel.
 
-    The corpus spans five orders of magnitude -- 0.06 ms at the transposed sites
-    against 45,241 ms for one call at the 2 GiB cliff -- and a fixed
-    ``iters=10, rounds=6`` is 60 calls either way: microseconds for one cell and
-    45 minutes for the other.
+    The corpus spans five orders of magnitude in per-call time, and a fixed
+    ``iters``/``rounds`` issues the same call count either way: too few samples
+    at one end, an unaffordable wait at the other.
 
-    ``torch.cuda._sleep`` rather than a real kernel: it consumes a stated number
-    of device cycles with no memory traffic and no tuning database, so the test
-    asserts the *sizing rule* and cannot fail because MIOpen picked a different
-    solver today.
+    ``torch.cuda._sleep`` rather than a real kernel: it consumes a stated
+    number of device cycles with no memory traffic and no tuning database, so
+    the test asserts the sizing rule and cannot fail because MIOpen picked a
+    different solver today.
     """
     from triton_conv3d.bench.harness import time_callable
 
@@ -792,9 +739,8 @@ def test_a_slow_kernel_stops_on_the_budget_and_says_so():
 
     With an unreachable precision target the only way out is the wall clock, so
     this pins both that the budget is honoured and that ``stop`` reports it.
-    Without the budget check the same call runs to ``max_rounds`` -- 64 rounds
-    of a ~0.5 s kernel, half a minute -- which is what the assertion on elapsed
-    time detects.
+    Without the budget check the same call runs to ``max_rounds``, which is
+    what the assertion on elapsed time detects.
     """
     import time
 
@@ -814,19 +760,17 @@ def test_a_slow_kernel_stops_on_the_budget_and_says_so():
 
 @requires_gpu
 def test_the_instrument_tax_is_measured_and_grouped_away():
-    """The sub-0.15 ms regime, with its own negative control.
+    """Short kernels, with a negative control for the event instrument.
 
-    An ``hipEventRecord`` costs ~9.5 us of host time, and at a 0.017 ms kernel a
-    block with an event between every iteration reports **1.5x** what the same
-    kernel's wall-clock throughput does.  That is not noise, it is not the node,
-    and it does not cancel in a ratio because it is per-arm: measured on
-    ``convT 1024->512 @ 8^3``, the Triton forward pays 10.1 us and the MIOpen
-    weight-gradient control 11.9 us on times of 0.057 and 0.067 ms.
+    An ``hipEventRecord`` costs host time, so at a short kernel a block with an
+    event between every iteration reports materially more than the same
+    kernel's wall-clock throughput.  That is not noise and it does not cancel
+    in a ratio, because the cost is per-arm.
 
-    The grouped block is checked against an event-free wall-clock measurement of
-    the same callable, and against the *ungrouped* harness in the same run.  The
-    second is the control: if grouping ever stops working, the two agree and
-    this fails, rather than both drifting together unnoticed.
+    The grouped block is checked against an event-free wall-clock measurement
+    of the same callable, and against the ungrouped harness in the same run.
+    The second is the control: if grouping ever stops working, the two agree
+    and this fails, rather than both drifting together unnoticed.
     """
     import time
 
@@ -846,17 +790,15 @@ def test_the_instrument_tax_is_measured_and_grouped_away():
         torch.cuda.synchronize()
         return (time.perf_counter() - t0) * 1e3 / n
 
-    # The *minimum* of several wall-clock runs, not the median.  This reference
+    # The minimum of several wall-clock runs, not the median: this reference
     # has no events in it at all, which is the point, but it is therefore
-    # host-throughput-bound: it can only be inflated by contention, never
-    # deflated.  Taking the median made this test fail once inside the full
-    # suite -- reference 0.0214 ms against 0.0167 ms in isolation, while the
-    # harness's own number moved by 9% -- which is the harness's stall rejection
-    # working and the reference's absence of it showing.
+    # host-throughput-bound and can only be inflated by contention, never
+    # deflated.  A median here fails inside a busy suite, where the harness's
+    # own stall rejection holds and the reference's absence of it shows.
     reference = min(wall() for _ in range(5))
     grouped = time_callable(fn, budget_s=10.0)
     # ``tax_budget`` above 1.0 can never be exceeded, which disables grouping
-    # and reproduces the historical instrument exactly.
+    # and gives the ungrouped instrument.
     ungrouped = time_callable(fn, budget_s=10.0, tax_budget=10.0)
 
     assert grouped.group > 1, "a 0.02 ms kernel was left at one event per call"
@@ -874,20 +816,18 @@ def test_the_instrument_tax_is_measured_and_grouped_away():
 
 @requires_gpu
 def test_flush_caches_reuses_one_buffer_and_reaches_only_the_first_sample():
-    """Two defects in one small function, both of which had teeth.
+    """Two properties of ``flush_caches``, both easy to break silently.
 
     ``torch.device("cuda")`` carries no index and a tensor made on it does, so
-    the guard ``_flush_buffer.device != torch.device(device)`` was *always*
-    true: every flush allocated a fresh 512 MiB tensor while the old one was
-    still live, on the critical path of every timed round.
+    a guard comparing the two is always true and every flush allocates a fresh
+    buffer while the old one is still live, on the critical path of every timed
+    round.
 
-    And a flush before a block reaches only the block's **first** call, while
-    the block reports the median over ``iters`` of them -- so at ``iters=10``
-    the one cold sample is precisely the one the median throws away.  Measured
-    ``median_moved_by_flush`` is 0.99-1.01 at every real workload while the
-    first iteration moves 1.02-1.54x.  The adaptive path therefore measures
-    ``iters=1`` when ``flush`` is on, and :attr:`Measurement.cold` records the
-    first sample either way.
+    And a flush before a block reaches only the block's first call, while the
+    block reports the median over ``iters`` of them -- so the one cold sample
+    is precisely the one the median throws away.  The adaptive path therefore
+    measures ``iters=1`` when ``flush`` is on, and :attr:`Measurement.cold`
+    records the first sample either way.
     """
     from triton_conv3d.bench import harness as H
 
@@ -941,15 +881,14 @@ def test_pinning_iters_and_rounds_reproduces_the_fixed_protocol():
 def test_importing_the_baseline_turns_on_the_miopen_find():
     """A baseline taken with ``cudnn.benchmark`` off is not a baseline.
 
-    On ROCm that flag decides whether PyTorch asks MIOpen to *search* for a
+    On ROCm that flag decides whether PyTorch asks MIOpen to search for a
     tuning config or to answer from its AI heuristic.  The heuristic's answer
-    for the corpus' hottest problems is 5-12x slower than the searched one --
-    same solver, same device op, just 16x16 MFMA tiles with 2-element global
-    loads instead of 32x32 with 8-element loads.  The first version of this
-    harness left the flag at its default and overstated MIOpen by up to 12x,
-    which would have become a fabricated speedup for every kernel measured
-    against it.  ScaFFold itself sets it (``worker.py:171``) and so does the
-    profiler the reference numbers come from (``prof_bench.py:125``).
+    for the hottest problems is far slower -- same solver, same device op, but
+    16x16 MFMA tiles with 2-element global loads instead of 32x32 with
+    8-element loads -- so leaving it off understates MIOpen and turns every
+    comparison against it into a fabricated speedup.  ScaFFold sets it in
+    ``worker.py``, and so does the profiler the reference numbers come from,
+    ``prof_bench.py``.
     """
     from triton_conv3d.bench import baseline
 
@@ -980,12 +919,11 @@ def test_measure_one_refuses_to_report_a_heuristic_time():
         torch.backends.cudnn.benchmark = previous
 
 
-#: Corpus cells the harness is anchored to.  Chosen because their isolated and
-#: profiled shapes genuinely match: the halo'd input is 281 MiB, well under the
-#: 2 GiB threshold above which MIOpen abandons its tuned solvers for the naive
-#: non-packed ones and the isolated and profiled numbers legitimately diverge.
-#: The profiled time is read from the corpus rather than copied here so there
-#: is one source of truth for it.
+#: Corpus cells the harness is anchored to.  Chosen because their halo'd input
+#: stays well under the 2 GiB threshold above which MIOpen abandons its tuned
+#: solvers for the naive non-packed ones and the isolated and profiled numbers
+#: legitimately diverge.  The profiled time is read from the corpus rather than
+#: copied here, so there is one source of truth for it.
 ANCHOR_CELLS = ((6, "fwd"), (6, "bwd-data"))
 
 
@@ -996,22 +934,22 @@ ANCHOR_CELLS = ((6, "fwd"), (6, "bwd-data"))
 def test_baseline_reproduces_the_profiled_scaffold_conv(index, direction):
     """An end-to-end anchor: the harness lands on the profiled number.
 
-    The two tests above check the settings; this one checks the thing the
-    settings are for, and would still fail if the harness went wrong in a way
-    nobody anticipated -- a memory-format regression, a dtype regression, a
-    future PyTorch that stops honouring ``benchmark`` on ROCm.
+    The two tests above check the settings; this one checks what they are for,
+    and still fails if the harness goes wrong in a way nobody anticipated -- a
+    memory-format regression, a dtype regression, a future PyTorch that stops
+    honouring ``benchmark`` on ROCm.
 
-    The band is asymmetric and generous.  Isolated *should* come out a little
+    The band is asymmetric and generous.  Isolated should come out a little
     faster than profiled -- no contention for bandwidth, no other kernel in
-    flight, no allocator pressure -- but never much faster, and a run that is
-    slower than the profile has lost the find.
+    flight, no allocator pressure -- but never much faster, and a run slower
+    than the profile has lost the find.
 
-    Judged on the *best* round, not the median: this is a shared node and a
-    neighbouring job can inflate all five rounds at once (observed once while
-    writing this, at 2.1x).  That is a fact about the node, not about the
-    harness, and a test that fails on it teaches people to ignore it.  The
-    failure this test is for -- a lost find, the wrong shape, an inert memory
-    format -- is 5-12x and survives taking the minimum easily.
+    Judged on the best round, not the median: on this shared node a
+    neighbouring job can inflate every round at once, which is a fact about the
+    node rather than the harness, and a test that fails on it teaches people to
+    ignore it.  The failures this test is for -- a lost find, the wrong shape,
+    an inert memory format -- are order-of-magnitude and survive taking the
+    minimum easily.
     """
     from triton_conv3d.bench.baseline import measure_one
 
@@ -1034,11 +972,8 @@ def test_baseline_reproduces_the_profiled_scaffold_conv(index, direction):
 def test_sporadic_host_stall_is_rejected_from_the_median_and_flagged():
     """An occasional slow launch must not be charged to the kernel.
 
-    This is the harness bug that produced last session's 250-2363% spreads,
-    which were then misdiagnosed twice -- first as host jitter, then as a rogue
-    tenant on the GPU -- before turning out to be a duplicate driver process of
-    our own.  The old ``_time_block`` bracketed a whole block of iterations with
-    two events, so any launch gap inside it was silently added to kernel time.
+    Bracketing a whole block of iterations with two events silently adds any
+    launch gap inside it to kernel time.
 
     One stalled launch in ten is the realistic shape of the problem: contention
     is intermittent, so a mean absorbs it and a median rejects it.  The stall
@@ -1051,15 +986,11 @@ def test_sporadic_host_stall_is_rejected_from_the_median_and_flagged():
     a = torch.randn(1024, 1024, device="cuda", dtype=torch.bfloat16)
 
     # The control needs a quiet host and this test cannot assume one: the node
-    # is shared, and a neighbouring job stalls our launches exactly as well as
-    # the duplicate driver of our own did.  When that happens the diagnostic is
-    # firing *correctly* and it is the premise -- "this run is clean" -- that is
-    # false.  Observed at 12.87 against a threshold of 2.0 while a sibling job
-    # was running, passing three times in a row on the same tree once the node
-    # went idle.  So take the quietest of several attempts, and if none of them
-    # is quiet, say the host was loaded rather than assert something this run
-    # cannot decide -- failing here would re-enact the original misdiagnosis in
-    # test form, blaming the measurement for observing real contention.
+    # is shared, and a neighbouring job stalls our launches too.  When that
+    # happens the diagnostic is firing correctly and it is the premise -- "this
+    # run is clean" -- that is false.  So take the quietest of several
+    # attempts, and if none of them is quiet, say the host was loaded rather
+    # than blame the measurement for observing real contention.
     clean = min(
         (
             interleaved({"g": lambda: a @ a}, warmup=3, iters=20, rounds=3)["g"]
@@ -1103,28 +1034,22 @@ def test_sporadic_host_stall_is_rejected_from_the_median_and_flagged():
 # What is inside the timed region
 # ---------------------------------------------------------------------------
 #
-# The published per-shape number is *kernel* time: the Python-side dispatch,
-# the tuned-table lookup and the launcher in front of the kernel are outside it.
-# That is a decision about what to measure, and it has exactly one way to go
-# wrong -- taking the launcher out of one arm and not the other, which at these
-# sizes is worth up to 1.4x in the direction that flatters us.  These tests are
-# the guard on that, and each of them was verified by mutation -- breaking the
-# thing it tests and confirming it fails.
+# The published per-shape number is kernel time: the Python-side dispatch, the
+# tuned-table lookup and the launcher in front of the kernel are outside it.
+# That decision has exactly one way to go wrong -- taking the launcher out of
+# one arm and not the other, which at these sizes is a large difference in
+# whichever direction flatters us.  These tests are the guard on that.
 
 
 def test_the_graph_chunk_is_one_ruler_for_every_arm():
     """``chunk`` is a function of the shortest arm's duration, and nothing else.
 
-    A CUDA graph replay costs 3.9-12.8 us of device time whatever is inside it
-    -- measured by fitting ``per_call(chunk) = kernel + cost / chunk`` to graphs
-    of 1, 2, 4, 8, 16 and 32 calls on four real arms.  At ``chunk = 1`` that is
-    45% of a 0.028 ms kernel and only 19% of a 0.068 ms one, so a per-arm chunk
-    would be a per-arm instrument: exactly the failure ``_common_group`` already
-    documents, one level up, where two byte-identical arms picked different
-    event groups and read 4% apart.
-
-    Hence: the rule reads only ``min(durations)``, so two arms of the same call
-    can never be given different rulers.
+    A CUDA graph replay costs a fixed amount of device time whatever is inside
+    it, so at ``chunk = 1`` it is a much larger share of a short kernel than of
+    a long one and a per-arm chunk would be a per-arm instrument -- the failure
+    ``_common_group`` already documents one level up.  Hence the rule reads
+    only ``min(durations)``, so two arms of the same cell can never be given
+    different rulers.
     """
     from triton_conv3d.bench.harness import _REPLAY_COST_MS, common_chunk
 
@@ -1146,14 +1071,13 @@ def test_the_graph_chunk_is_one_ruler_for_every_arm():
 
 
 def test_no_graph_where_the_launcher_is_already_negligible():
-    """Above 40 ms per call the exclusion is not worth the capture.
+    """Past ``graph_is_worthwhile``'s threshold the capture is not worth it.
 
-    The largest host launch cost measured on this node is 0.08 ms -- the
-    autograd engine's, on the MIOpen backward control.  At 40 ms per call that
-    is 0.2% of either arm, a fifth of the harness's own 2% target, so both arms
-    stay eager and the exclusion is negligible *for both* rather than applied to
-    one.  Below it the same 0.08 ms reaches 190% of the kernel and decides the
-    answer.
+    The largest host launch cost on this node -- the autograd engine's, on the
+    MIOpen backward control -- is a negligible share of a call that long, well
+    inside the harness's own precision target, so both arms stay eager and the
+    exclusion is negligible for both rather than applied to one.  At a short
+    call the same launch cost exceeds the kernel and decides the answer.
     """
     from triton_conv3d.bench.harness import graph_is_worthwhile
 
@@ -1165,18 +1089,13 @@ def test_no_graph_where_the_launcher_is_already_negligible():
 
 @requires_gpu
 def test_an_empty_graph_is_a_capture_failure():
-    """PyTorch only *warns* when a capture caught nothing.
+    """PyTorch only warns when a capture caught nothing.
 
-    "The CUDA Graph is empty.  This usually means that the graph was attempted
-    to be captured on wrong device or stream."  It is a ``UserWarning``, and a
-    caller that ignored it would publish the cost of ``cudaGraphLaunch`` -- a
-    few microseconds -- as a kernel time.  That is the fastest wrong answer
-    available and it looks like a spectacular win, so the warning is promoted to
-    a refusal.
-
-    It is not hypothetical: the first version of this work built the MIOpen
-    backward control's forward graph on the default stream, captured on another,
-    and got an empty graph plus this warning on two of six cells.
+    An empty capture is a ``UserWarning``, and a caller that ignored it would
+    publish the cost of ``cudaGraphLaunch`` as a kernel time -- the fastest
+    wrong answer available, and it looks like a spectacular win.  Building a
+    graph on one stream and capturing it on another is enough to produce one,
+    so the warning is promoted to a refusal.
     """
     from triton_conv3d.bench.harness import CaptureError, capture
 
@@ -1188,13 +1107,11 @@ def test_an_empty_graph_is_a_capture_failure():
 def test_a_captured_ratio_of_two_identical_arms_covers_one():
     """The null experiment for the launcher-exclusion boundary.
 
-    Two arms doing byte-identical work have a true ratio of exactly 1.000, so
-    anything else is the instrument.  Measured over 12 replications on
-    ``convT 1024->512 @ 8^3`` through the shipped decision path: under
-    ``exclude`` the median is 0.9996, the range 0.9982-1.0021, and **12 of 12**
-    intervals cover 1.000.
+    Two arms doing byte-identical work have a true ratio of exactly 1, so
+    anything else is the instrument, and this runs them through the shipped
+    decision path.
 
-    The sibling test for the *event* instrument is
+    The sibling test for the event instrument is
     :func:`test_a_paired_ratio_of_two_identical_arms_covers_one`; this one is
     for the graph.
     """
@@ -1202,27 +1119,21 @@ def test_a_captured_ratio_of_two_identical_arms_covers_one():
     from triton_conv3d.bench.harness import interleaved, ratio
 
     # 512, not a "nicer" 256 or 384: on this torch/ROCm build a bf16
-    # ``a @ a`` is **~600 ms** at 128, 192, 256, 320, 384, 448, 640 and
-    # 768, and 0.019 ms at 512 and 1024.  That is the ``torch.mm`` bf16
-    # pathology this project already owes upstream, measured here from
-    # a second direction; a test that picked one of the slow sizes would
-    # be timing a 600 ms kernel and would correctly be told it does not
-    # need a graph.
+    # ``a @ a`` is pathologically slow at most sizes and fast only at 512
+    # and 1024.  That is the ``torch.mm`` bf16 pathology this project owes
+    # upstream; a test that picked one of the slow sizes would be timing a
+    # kernel long enough that it is correctly told it needs no graph.
     a = torch.randn(512, 512, device="cuda", dtype=torch.bfloat16)
     fn = lambda: a @ a  # noqa: E731
     region = _timed_region({"x": fn, "y": fn}, "exclude")
     assert region.kind == "kernel", region.note
     out = interleaved(region.fns, budget_s=10.0)
     r = ratio(out["y"], out["x"])
-    # A tolerance, not the interval, and deliberately.  At 0.019 ms with a
-    # 64-call graph one race converges to a *within-race* half-width of ~0.04%,
-    # which is narrower than the between-race scatter of the same pair (sd
-    # 0.13%, range 0.9982-1.0021 over 12 replications) -- so an interval that
-    # misses 1 by 0.2% here is the same residual the sequential protocol has
-    # (0.32%), not a biased instrument.  What a biased instrument looks like
-    # is 4% (per-arm event groups) or 45% (a one-call graph), and 1% catches
-    # both.  The coverage claim is the 12-replication
-    # experiment, where 12 of 12 intervals contained 1.
+    # A tolerance, not the interval, and deliberately: one race converges to a
+    # within-race half-width narrower than the between-race scatter of the same
+    # pair, so an interval that just misses 1 here is that residual rather than
+    # a biased instrument.  A biased instrument -- per-arm event groups, or a
+    # one-call graph -- is far larger, and 1% catches both.
     assert abs(r.point - 1.0) < 0.01, (
         f"two byte-identical arms read {r} under the kernel-time definition"
     )
@@ -1233,16 +1144,10 @@ def test_a_captured_ratio_of_two_identical_arms_covers_one():
 def test_an_inflated_launcher_does_not_move_the_reported_kernel_time():
     """The whole point of the exclusion, stated as a property.
 
-    Three arms run the **same kernel** with deliberately different launchers.
-    Under ``exclude`` they must be indistinguishable; under ``include`` they
-    must not be, or the experiment proves nothing and the exclusion is
-    measuring something that was not there.
-
-    That negative control is deliberate.  Measured on the real thing
-    (``launcher_symmetry.py --only inflate``, ``convT 1024->512 @ 8^3``): the
-    entry point's own per-call table lookup reads 1.0003x of the hoisted config
-    under ``exclude`` and **1.404x** under ``include``, and 500 us of Python in
-    front of the launch reads 0.9993x and **13.12x**.
+    Two arms run the same kernel with deliberately different launchers.  Under
+    ``exclude`` they must be indistinguishable; under ``include`` they must not
+    be, or the experiment proves nothing and the exclusion is measuring
+    something that was not there.
     """
     import time
 
@@ -1250,12 +1155,10 @@ def test_an_inflated_launcher_does_not_move_the_reported_kernel_time():
     from triton_conv3d.bench.harness import interleaved, ratio
 
     # 512, not a "nicer" 256 or 384: on this torch/ROCm build a bf16
-    # ``a @ a`` is **~600 ms** at 128, 192, 256, 320, 384, 448, 640 and
-    # 768, and 0.019 ms at 512 and 1024.  That is the ``torch.mm`` bf16
-    # pathology this project already owes upstream, measured here from
-    # a second direction; a test that picked one of the slow sizes would
-    # be timing a 600 ms kernel and would correctly be told it does not
-    # need a graph.
+    # ``a @ a`` is pathologically slow at most sizes and fast only at 512
+    # and 1024.  That is the ``torch.mm`` bf16 pathology this project owes
+    # upstream; a test that picked one of the slow sizes would be timing a
+    # kernel long enough that it is correctly told it needs no graph.
     a = torch.randn(512, 512, device="cuda", dtype=torch.bfloat16)
 
     def plain():
@@ -1273,9 +1176,9 @@ def test_an_inflated_launcher_does_not_move_the_reported_kernel_time():
     k = interleaved(kern.fns, budget_s=10.0)
     rk = ratio(k["slow"], k["plain"])
     # 1%, for the reason given in
-    # ``test_a_captured_ratio_of_two_identical_arms_covers_one``.  300 us in
-    # front of a 0.019 ms kernel is a 16x effect if it is inside the timed
-    # region, so 1% is not a generous threshold here.
+    # ``test_a_captured_ratio_of_two_identical_arms_covers_one``.  The injected
+    # host work is an order of magnitude larger than the kernel, so if it were
+    # inside the timed region 1% would not come close to hiding it.
     assert abs(rk.point - 1.0) < 0.01, (
         f"300 us of host work moved the kernel time: {rk}"
     )
@@ -1295,21 +1198,19 @@ def test_an_inflated_launcher_does_not_move_the_reported_kernel_time():
 def test_the_replay_cost_is_amortized_by_the_chunk():
     """With its own negative control, like the event-tax test.
 
-    One graph replay costs up to 12.8 us of device time whatever is in it, so a
-    one-call graph is 45% instrument at a 0.028 ms kernel.  The chunk divides
-    that away.  The control is the *same* kernel measured at ``chunk = 1`` in
-    the same run: if the replay ever becomes free, the two agree and this fails
+    One graph replay costs a fixed amount of device time whatever is in it, so
+    at a short kernel a one-call graph is largely instrument; the chunk divides
+    that away.  The control is the same kernel measured at ``chunk = 1`` in the
+    same run: if the replay ever becomes free, the two agree and this fails
     rather than both drifting together unnoticed.
     """
     from triton_conv3d.bench.harness import capture, common_chunk, interleaved
 
     # 512, not a "nicer" 256 or 384: on this torch/ROCm build a bf16
-    # ``a @ a`` is **~600 ms** at 128, 192, 256, 320, 384, 448, 640 and
-    # 768, and 0.019 ms at 512 and 1024.  That is the ``torch.mm`` bf16
-    # pathology this project already owes upstream, measured here from
-    # a second direction; a test that picked one of the slow sizes would
-    # be timing a 600 ms kernel and would correctly be told it does not
-    # need a graph.
+    # ``a @ a`` is pathologically slow at most sizes and fast only at 512
+    # and 1024.  That is the ``torch.mm`` bf16 pathology this project owes
+    # upstream; a test that picked one of the slow sizes would be timing a
+    # kernel long enough that it is correctly told it needs no graph.
     a = torch.randn(512, 512, device="cuda", dtype=torch.bfloat16)
     fn = lambda: a @ a  # noqa: E731
     for _ in range(50):
@@ -1336,20 +1237,18 @@ def test_a_capture_failure_takes_the_whole_cell_back_to_eager():
     """Never a mixed measurement.
 
     If one arm cannot be captured, the other must not be either: comparing a
-    launcher-exclusive number against a launcher-inclusive one is worth 1.4x at
-    the transposed sites and 3.0x on the backward controls.  So the fallback is
-    a property of the *cell*, and ``_Region`` is one object for all of its arms.
+    launcher-exclusive number against a launcher-inclusive one is a large
+    unearned difference at the short sites.  So the fallback is a property of
+    the cell, and ``_Region`` is one object for all of its arms.
     """
     from triton_conv3d.bench.conv_bench import _timed_region
     from triton_conv3d.bench.harness import Captured
 
     # 512, not a "nicer" 256 or 384: on this torch/ROCm build a bf16
-    # ``a @ a`` is **~600 ms** at 128, 192, 256, 320, 384, 448, 640 and
-    # 768, and 0.019 ms at 512 and 1024.  That is the ``torch.mm`` bf16
-    # pathology this project already owes upstream, measured here from
-    # a second direction; a test that picked one of the slow sizes would
-    # be timing a 600 ms kernel and would correctly be told it does not
-    # need a graph.
+    # ``a @ a`` is pathologically slow at most sizes and fast only at 512
+    # and 1024.  That is the ``torch.mm`` bf16 pathology this project owes
+    # upstream; a test that picked one of the slow sizes would be timing a
+    # kernel long enough that it is correctly told it needs no graph.
     a = torch.randn(512, 512, device="cuda", dtype=torch.bfloat16)
 
     def fine():
@@ -1381,12 +1280,11 @@ def test_a_capture_failure_takes_the_whole_cell_back_to_eager():
 def test_the_operator_direction_table_is_complete_and_has_six_distinct_cells():
     """Two operators, three directions, six builders, no sharing.
 
-    The driver these replaced argued that a transposed convolution could not be
-    a fourth value of ``--direction`` because it is a different *operator*.  It
-    was right, and the answer is a second axis rather than a fourth case: what
-    is per-operator (the shape form, the ordering) lives on ``_Op``, what is
-    per-cell (operands, control, candidates, shipped config, reference) lives in
-    one function per cell, and nothing is shared by accident.
+    A transposed convolution is a different operator, not a fourth value of
+    ``--direction``, so the table has two axes: what is per-operator (the shape
+    form, the ordering) lives on ``_Op``, what is per-cell (operands, control,
+    candidates, shipped config, reference) lives in one function per cell, and
+    nothing is shared by accident.
     """
     from triton_conv3d.bench.conv_bench import _OPERATORS, OPERATORS
 
@@ -1399,13 +1297,11 @@ def test_the_operator_direction_table_is_complete_and_has_six_distinct_cells():
 
 
 def test_no_builder_asks_a_problem_which_operator_it_is():
-    """The design property, asserted rather than trusted.
+    """The operator is resolved once, in ``operator_of``.
 
-    The objection to folding the transposed driver in was that ``_build`` would
-    "branch on ``problem.transposed`` in every arm to run the same code".  It
-    does not: the operator is resolved **once**, in ``operator_of``, and the
-    builder it selects never asks again.  If a future edit puts the question
-    back inside a builder, this fails.
+    The builder it selects never asks ``problem.transposed`` again; a builder
+    that did would put back the per-arm switch this factoring exists to remove,
+    so the rule is asserted on the builders' source rather than trusted.
     """
     import inspect
 
@@ -1424,16 +1320,12 @@ def test_no_builder_asks_a_problem_which_operator_it_is():
 def test_a_backward_control_is_never_a_fabricated_operand():
     """``torch.nn.grad.conv3d_*`` must appear nowhere in this driver.
 
-    It has no real tensor for the operand being differentiated, so it fabricates
-    ``grad_output.new_empty(1).expand(input_size)`` -- zero-strided, and
-    therefore not channels-last.  ``convolution_backward`` picks its solver from
-    that operand's layout, so at the ``k=1x1x1`` head MIOpen declined its own
-    NDHWC path and ran **3.2x** slower than the same call inside a real
-    backward (0.9649 vs 0.2972 ms).  A published 4.51x for that head came from
-    the fabricated control; against the real one the cell is 1.39x.
-
-    Both drivers that existed before this one used it somewhere, which is why
-    the rule is a grep and not a convention.
+    It has no real tensor for the operand being differentiated, so it
+    fabricates ``grad_output.new_empty(1).expand(input_size)`` -- zero-strided,
+    and therefore not channels-last.  ``convolution_backward`` picks its solver
+    from that operand's layout, so a fabricated control can make MIOpen decline
+    its own NDHWC path and hand back an inflated speedup.  The rule is a grep
+    rather than a convention because it is easy to reach for by accident.
     """
     import inspect
 
@@ -1457,15 +1349,14 @@ def test_the_transposed_problems_are_never_haloed_and_the_others_follow_the_form
     """The one shape decision that is per-operator, and it is silent when wrong.
 
     Upstream DistConv concatenates a ``k // 2`` halo onto every axis it manages
-    and zeroes that axis's padding, so an ordinary convolution reaches MIOpen at
-    ``130^3`` unpadded rather than ``128^3`` padded -- two problems MIOpen tunes
-    independently.  At ``k = 2`` the halo is ``2 // 2 = 1``... which is why the
-    *corpus* is the authority and not the arithmetic: every transposed problem
-    in it records ``halo = (0, 0, 0)``, because ScaFFold's transposed sites are
-    not sharded convolutions at all.  Applying ``halo_variant`` to them anyway
-    would silently grow the input by two voxels per axis and measure a different
-    problem -- **under any of the three ``--form`` names**, which is what this
-    test pins now that there is more than one.
+    and zeroes that axis's padding, giving MIOpen a problem it tunes
+    independently of the padded one.  At ``k = 2`` that arithmetic still yields
+    a halo of 1, which is why the corpus is the authority instead: every
+    transposed problem in it records ``halo = (0, 0, 0)``, because ScaFFold's
+    transposed sites are not sharded convolutions at all.  Haloing them anyway
+    would silently grow the input by two voxels per axis and measure a
+    different problem -- under any of the three ``--form`` names, which is what
+    this test pins.
     """
     from triton_conv3d.bench.conv_bench import _FORMS, _OPERATORS
 
@@ -1516,13 +1407,13 @@ def test_the_transposed_problems_are_never_haloed_and_the_others_follow_the_form
 
 @requires_gpu
 def test_the_shipped_config_is_the_one_the_entry_point_resolves():
-    """``--shipped`` must measure the shipped *kernel*, not a lookalike.
+    """``--shipped`` must measure the shipped kernel, not a lookalike.
 
-    The launcher-exclusive definition means the config cannot be resolved inside
-    the timed region, so the driver resolves it outside and passes it in.  That
-    is only honest if the two agree, and nothing except this test makes them:
-    the six cells reach four different resolvers across three modules, with the
-    channel widths swapped on three of them.
+    The launcher-exclusive definition means the config cannot be resolved
+    inside the timed region, so the driver resolves it outside and passes it
+    in.  That is only honest if the two agree, and nothing except this test
+    makes them: the six cells reach four different resolvers across three
+    modules, with the channel widths swapped on some of them.
 
     Checked by spying on the resolver each entry point actually calls, rather
     than by re-deriving the answer here -- which would be the same arithmetic
@@ -1584,14 +1475,14 @@ def test_the_shipped_config_is_the_one_the_entry_point_resolves():
 def test_the_published_time_is_per_call_and_never_exceeds_the_eager_call():
     """``chunk`` calls sit behind one replay; the row must report one call.
 
-    The division happens in the driver rather than in the harness, because every
-    *relative* quantity the harness computes -- the half-widths, the convergence
-    test, the paired ratio -- is scale-invariant and only the absolute times need
-    it.  That is easy to forget, and forgetting it multiplies every published
-    time by up to 128 while leaving every interval and every speedup looking
-    perfectly healthy.
+    The division happens in the driver rather than in the harness, because
+    every relative quantity the harness computes -- the half-widths, the
+    convergence test, the paired ratio -- is scale-invariant and only the
+    absolute times need it.  That is easy to forget, and forgetting it
+    multiplies every published time by the chunk while leaving every interval
+    and every speedup looking perfectly healthy.
 
-    The invariant that catches it: kernel time is the eager call *minus* its
+    The invariant that catches it: kernel time is the eager call minus its
     launcher, so it can never exceed the eager call.
     """
     from triton_conv3d.bench.conv_bench import measure_problem
@@ -1615,21 +1506,18 @@ def test_the_published_time_is_per_call_and_never_exceeds_the_eager_call():
 
 @requires_gpu
 def test_a_control_free_row_omits_the_control_rather_than_zeroing_it():
-    """``--control none`` must leave MIOpen *absent*, not present and zero.
+    """``--control none`` must leave MIOpen absent, not present and zero.
 
-    Two failures this pins, and they are opposite ones.
-
-    A row that carried ``miopen_ms = 0.0`` and ``speedup = 0.0`` would be read
-    by every consumer of these captures -- the report generator, the aggregate
-    scripts, a human scanning a table -- as a measured 0.000x result rather than
-    as "no control ran here".  Absence has to be representable.
+    A row carrying ``miopen_ms = 0.0`` and ``speedup = 0.0`` reads to every
+    consumer of these captures -- the report generator, the aggregate scripts,
+    a human scanning a table -- as a measured 0.000x result rather than as "no
+    control ran here", so absence has to be representable.
 
     And a case built with ``control=False`` must not construct the control
-    either.  For a backward direction the control is a real ``F.conv3d`` forward
-    graph, and *running* it once is where MIOpen's find is paid -- 92-174 s per
-    cell on this corpus.  Dropping the arm from the timing while still building
-    it would save the timing and none of the cost, which is the whole point of
-    the flag.
+    either: for a backward direction the control is a real ``F.conv3d`` forward
+    graph, and running it once is where MIOpen's find is paid, which dominates
+    the cell.  Dropping the arm from the timing while still building it would
+    save the timing and none of the cost.
     """
     from triton_conv3d.bench.conv_bench import _build, measure_problem
 

@@ -48,15 +48,14 @@ def _conv3d(in_channels, out_channels, **kwargs):
     unaffected in either direction.  It falls back to MIOpen for anything the
     kernel does not serve, and it serves the sharded configurations too: it
     performs the halo exchange itself, above autograd, rather than leaving it to
-    the one DistConv does below.  Note what that means for the *shape* the
-    kernel sees -- only the split axis is halo'd, so ``padding=1`` survives on
-    the other two and these convolutions are padded at every configuration; see
-    :mod:`ScaFFold.unet.conv3d`.
+    the one DistConv does below.  Only the split axis is halo'd, so ``padding=1``
+    survives on the other two and these convolutions are padded at every
+    configuration; see :mod:`ScaFFold.unet.conv3d`.
 
-    The four ``nn.ConvTranspose3d`` in ``Up`` do not come through here: they are
-    a different operator, with the weight's channel axes the other way round and
-    a different set of kernels behind them, so they have a factory of their own
-    (:func:`_conv_transpose3d`) rather than a flag on this one.
+    The ``nn.ConvTranspose3d`` in ``Up`` do not come through here: they are a
+    different operator, with the weight's channel axes the other way round and a
+    different set of kernels behind them, so they have a factory of their own
+    (:func:`_conv_transpose3d`).
     """
     return FastConv3d(in_channels, out_channels, **kwargs)
 
@@ -67,9 +66,9 @@ def _conv_transpose3d(in_channels, out_channels, **kwargs):
     ``FastConvTranspose3d`` is ``nn.ConvTranspose3d`` plus a Triton GPU kernel;
     it holds the same parameters (``weight`` *and* ``bias``, which these sites
     have and the ordinary convolutions mostly do not) under the same names and
-    adds no buffers, so checkpoints are unaffected in either direction.  It falls
-    back to MIOpen for anything the kernel does not serve, which is everything
-    except the ``kernel == stride``, no-padding upsample built below.
+    adds no buffers, so checkpoints are unaffected in either direction.  The
+    kernel serves only the ``kernel == stride``, no-padding upsample built
+    below; anything else falls back to MIOpen.
     """
     return FastConvTranspose3d(in_channels, out_channels, **kwargs)
 
@@ -79,11 +78,11 @@ def _consumer_dtype(*tensors):
 
     Inside an enabled autocast region the answer is autocast's dtype, because
     ``aten::convolution`` carries the ``lower_precision_fp`` cast policy and
-    casts whatever it is handed.  Producing that dtype from the concatenation
-    is *bitwise identical* to producing ATen's promoted dtype and letting the
+    casts whatever it is handed.  Producing that dtype from the concatenation is
+    *bitwise identical* to producing ATen's promoted dtype and letting the
     convolution narrow it -- the promoted tensor holds exact widenings of both
     sources, so narrowing before or after the copy rounds the same values once
-    -- while writing and reading back half the bytes.
+    -- while moving half the bytes.
 
     Outside autocast the answer is ``torch.cat``'s ordinary promotion, so eval,
     ``inference_mode`` and pure-fp32 runs are unchanged.
@@ -108,14 +107,14 @@ def _consumer_dtype(*tensors):
 def _skip_concat(skip, upsampled):
     """``torch.cat([skip, upsampled], dim=1)`` at the consumer's dtype.
 
-    Under ``torch.autocast`` the two halves do not share a dtype: the skip
-    comes from a GroupNorm, an fp32-policy op, while the upsampled half comes
-    from a ``ConvTranspose3d`` and is bf16.  ``torch.cat`` carries the
-    ``promote`` policy, so it widens the bf16 half to fp32, concatenates at
-    fp32, and the following convolution narrows the whole double-width result
-    straight back down -- three full-resolution passes to deliver one.  Casting
-    the inputs first collapses that to one, and the convolution reads the same
-    bits either way (see :func:`_consumer_dtype`).
+    Under ``torch.autocast`` the two halves do not share a dtype: the skip comes
+    from a GroupNorm, an fp32-policy op, while the upsampled half comes from a
+    ``ConvTranspose3d`` and is bf16.  ``torch.cat`` carries the ``promote``
+    policy, so it widens the bf16 half to fp32, concatenates at fp32, and the
+    following convolution narrows the whole double-width result straight back
+    down -- three full-resolution passes to deliver one.  Casting the inputs
+    first collapses that to one, and the convolution reads the same bits either
+    way (see :func:`_consumer_dtype`).
     """
     dtype = _consumer_dtype(skip, upsampled)
     return torch.cat([skip.to(dtype), upsampled.to(dtype)], dim=1)
@@ -126,10 +125,9 @@ class DoubleConv(nn.Module):
 
     The ReLU lives *inside* the GroupNorm (``activation="relu"``), because the
     Triton GroupNorm kernel folds it into its forward store for free and thereby
-    removes an entire streaming pass -- 38% of the forward at the shapes that
-    dominate the step.  ``FastGroupNorm`` applies the ReLU on every path,
-    including eager, so the network's function is unchanged; only the number of
-    memory passes differs.
+    removes an entire streaming pass.  ``FastGroupNorm`` applies the ReLU on
+    every path, including eager, so the network's function is unchanged; only
+    the number of memory passes differs.
 
     The ``nn.ReLU`` slots are held open by ``nn.Identity`` rather than removed:
     ``nn.Sequential`` names its children by position, so deleting them would
@@ -180,16 +178,9 @@ class Up(nn.Module):
     ``torch.cat`` directly, so that it emits the dtype the following
     convolution will use instead of ``torch.cat``'s promoted one.  The tensor
     that convolution reads is bitwise unchanged either way; it is written and
-    read back at half the width.  This rests on ``self.conv`` beginning with a
-    convolution, which the constructor below guarantees on either branch.
-
-    Measured at scale 7: 1.09 ms of a 92.8 ms step, and 0.50 GiB of peak
-    memory.  A channels-last-native Triton concatenation kernel was built and
-    measured too -- ``cat``'s *backward* is a narrowed view that consumers force
-    contiguous, at 51-63% of this device's streaming roofline against the
-    kernel's 90-103% -- but it was worth a further 0.08 ms of the step, which
-    did not justify a second hand-written kernel in a benchmark other people
-    have to trust.
+    read back at half the width, saving both time and peak memory.  This rests
+    on ``self.conv`` beginning with a convolution, which the constructor below
+    guarantees on either branch.
     """
 
     def __init__(self, in_channels, out_channels, group_norm_groups, trilinear=True):
@@ -233,8 +224,8 @@ class Up(nn.Module):
         # if you have padding issues, see
         # https://github.com/HaiyongJiang/U-Net-Pytorch-Unstructured-Buggy/commit/0e854509c2cea854e247a9c615f175f76fbb2e3a
         # https://github.com/xiaopeng-liao/Pytorch-UNet/commit/8ebac70e633bac59fc22bb5195e513d5832fb3bd
-        # torch.cat([x2, x1], dim=1) with the dtype and the layout the
-        # convolution below actually wants; see the class docstring.
+        # torch.cat([x2, x1], dim=1) at the dtype the convolution below
+        # actually wants; see the class docstring.
         x = _skip_concat(x2, x1)
         return self.conv(x)
 

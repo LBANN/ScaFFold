@@ -1,21 +1,19 @@
 # SPDX-License-Identifier: (Apache-2.0)
 """Reference implementations and the tolerance policy.
 
-The hard part of testing a reduced-precision kernel is deciding what "correct"
-means.  Three standards are used here, in decreasing order of strictness:
+Three standards, in decreasing order of strictness:
 
-1. **Exact.**  Inputs drawn so that every partial sum is exactly representable in
-   the working dtype (small integers, bounded reduction length).  The kernel must
-   then match the reference *bitwise*.  This is the standard that catches
-   indexing, masking and boundary bugs, which a tolerance would hide -- a kernel
-   that reads the wrong voxel usually reads a plausible one.
+1. Exact.  Inputs drawn so that every partial sum is exactly representable in
+   the working dtype (small integers, bounded reduction length); the kernel must
+   then match the reference bitwise.  This is the standard that catches
+   indexing, masking and boundary bugs, which a tolerance hides -- a kernel that
+   reads the wrong voxel usually reads a plausible one.
 
-2. **No worse than the incumbent.**  Error against an fp64 reference must not
-   exceed MIOpen's error on the same problem by more than a small factor.  This
-   is the honest bar for a replacement: we do not have to be better, but we must
-   not be worse, and it adapts automatically to shape and reduction length.
+2. No worse than the incumbent.  Error against an fp64 reference must not exceed
+   MIOpen's error on the same problem by more than a small factor.  It adapts
+   automatically to shape and reduction length.
 
-3. **Absolute tolerance.**  A dtype- and K-derived bound, used where an fp64
+3. Absolute tolerance.  A dtype- and K-derived bound, used where an fp64
    reference is impractical.  Weakest, and only a backstop.
 
 Everything takes and returns NCDHW tensors in PyTorch's usual convention; the
@@ -80,22 +78,22 @@ def make_inputs(
     :func:`exact_density` for the knob that makes it possible at real widths.
 
     ``density`` thins the *activations* -- ``input`` and ``grad_output`` -- to
-    that fraction of nonzeros, and only has an effect under ``exact=True``.  It
-    exists because at a real ScaFFold channel width the dense ``{-1,0,1}`` draw
-    is not exactly representable in bf16 at all: the forward reduces over
-    ``Cin * taps``, which is 27 648 terms at ``Cin = 1024`` regardless of how
-    small the volume is made, and a sum of that many random signs runs to a few
-    hundred while bf16 holds integers only to 256.  Thinning is the one lever
-    that shortens the *realized* reduction without touching the shape, so the
-    channel widths, the tile selection and the 512-byte row strides under test
-    all stay exactly as ScaFFold runs them.
+    that fraction of nonzeros, and only has an effect under ``exact=True``.  At
+    a real ScaFFold channel width the dense ``{-1,0,1}`` draw is not exactly
+    representable in bf16: the forward reduces over ``Cin * taps``, which is
+    27 648 terms at ``Cin = 1024`` however small the volume is made, and a sum
+    of that many random signs runs to a few hundred while bf16 holds integers
+    only to 256.  Thinning is the one lever that shortens the *realized*
+    reduction without touching the shape, so the channel widths, the tile
+    selection and the 512-byte row strides under test stay exactly as ScaFFold
+    runs them.
 
     The weight is deliberately left dense.  Every one of the ``K`` gather
     addresses then contributes to every output element, so a wrong address is
-    masked only by the sparsity of the value it happens to read -- independently
-    per element, over millions of them.  Thinning the weight instead would
-    multiply whole ``(tap, Cin)`` rows by an exact zero for a whole output
-    channel, which is a hole in precisely the coverage this draw exists for.
+    masked only by the sparsity of the value it happens to read, independently
+    per element.  Thinning the weight instead would multiply whole
+    ``(tap, Cin)`` rows by an exact zero for a whole output channel -- a hole in
+    precisely the coverage this draw exists for.
     """
     dtype = dtype or torch_dtype(problem)
     device = torch.device(device)
@@ -113,9 +111,9 @@ def make_inputs(
             ).to(dtype)
             if thin and activation:
                 # A separate stream, offset far enough that it cannot collide
-                # with any operand's *value* stream: those are seed + 0..3, and
-                # a mask drawn from one of them would correlate the zeros with
-                # the signs of another tensor.
+                # with any operand's *value* stream (those are seed + 0..3): a
+                # mask drawn from one of them would correlate the zeros with the
+                # signs of another tensor.
                 gm = torch.Generator(device=device).manual_seed(
                     seed + offset + (1 << 20)
                 )
@@ -149,27 +147,23 @@ def exact_density(
 ) -> float:
     """Activation density that keeps the realized result inside the mantissa.
 
-    The arithmetic.  Draw the activations from ``{-1,0,1}`` and then zero all
-    but a fraction ``q`` of them, against a dense ``{-1,0,1}`` weight.  Each
-    product then has variance ``(4/9) q``, so a reduction over ``K`` terms has
-    standard deviation ``(2/3) sqrt(qK)``, and the largest of ``M*N`` such sums
-    is about ``sqrt(2 ln(M*N))`` deviations out.  Setting that equal to
+    Draw the activations from ``{-1,0,1}`` and then zero all but a fraction
+    ``q`` of them, against a dense ``{-1,0,1}`` weight.  Each product then has
+    variance ``(4/9) q``, so a reduction over ``K`` terms has standard deviation
+    ``(2/3) sqrt(qK)``, and the largest of ``M*N`` such sums is about
+    ``sqrt(2 ln(M*N))`` deviations out.  Setting that equal to
     ``2**mantissa / headroom`` and solving for ``q`` gives what is returned.
 
-    Two things fall out that are worth stating.  ``q*K`` -- the number of terms
-    that actually contribute to an output element -- comes out at a few hundred
-    and is nearly independent of ``K``, so the draw is not "mostly zeros" in the
-    sense that matters: every output element is still a sum of hundreds of
-    genuine gathers, and 96% of them are nonzero.  And the shape is untouched,
-    which is the whole point -- this is what lets the forward's bitwise standard
-    run at ``Cin = 1024`` instead of skipping there, which is where it had no
-    coverage at all.
+    ``q*K`` -- the terms that actually contribute to an output element -- comes
+    out at a few hundred and is nearly independent of ``K``, so the draw is not
+    "mostly zeros" in the sense that matters: every output element is still a
+    sum of hundreds of genuine gathers.  The shape is untouched, which is what
+    lets the forward's bitwise standard run at the real channel widths rather
+    than skipping them.
 
-    ``headroom`` is against the order-statistic estimate, which is an estimate:
-    measured over the eleven corpus forward shapes the realized maxima land at
-    58-71 against bf16's limit of 256, so 4.0 buys a genuine 3.6-4.4x rather
-    than a nominal 4x.  Returns 1.0 -- no thinning at all -- wherever the dense
-    draw already fits, so a caller can pass this unconditionally.
+    ``headroom`` guards an order-statistic estimate rather than a bound.
+    Returns 1.0 -- no thinning at all -- wherever the dense draw already fits,
+    so a caller can pass this unconditionally.
     """
     dtype = dtype or torch_dtype(problem)
     m, n, k = problem.gemm_shape(direction)
@@ -185,12 +179,12 @@ def is_exactly_representable(result: torch.Tensor, dtype: torch.dtype) -> bool:
 
     With operands in ``{-1, 0, 1}`` every product is exact and every partial sum
     is an integer, so the only question is whether the *realized* magnitudes fit
-    in the mantissa.  Asking that of the actual result rather than of the
-    worst-case reduction length matters a great deal: bf16 has 8 mantissa bits,
-    so a worst-case bound rejects any reduction longer than 256 and would skip
-    almost the whole corpus, while a sum of a few hundred random signs is in
-    practice tens.  The bitwise standard is the only one that reliably catches an
-    off-by-one gather, so it is worth keeping applicable.
+    in the mantissa.  That is asked of the actual result rather than of the
+    worst-case reduction length: bf16 has 8 mantissa bits, so a worst-case bound
+    rejects any reduction longer than 256 and would skip almost the whole
+    corpus, while a sum of a few hundred random signs is in practice tens.  The
+    bitwise standard is the only one that reliably catches an off-by-one gather,
+    so it is worth keeping applicable.
     """
     finite = result[torch.isfinite(result)]
     if finite.numel() == 0:
@@ -219,11 +213,11 @@ def reference(
 ) -> torch.Tensor:
     """The trusted answer, computed in ``dtype`` (fp64 by default).
 
-    fp64 3-D convolution has no fast path on any backend, so this is slow by
-    construction -- it is for correctness, not for benchmarking.  Callers that
-    need it at ScaFFold's real sizes should reach for ``direction``-specific
-    tiling or simply use a smaller problem; every bug we are trying to catch
-    reproduces at small sizes.
+    Good to the bitwise standard: with operands from :func:`make_inputs` under
+    ``exact=True`` this is the exact answer, and otherwise it is the fp64 result
+    the other two standards measure error against.  fp64 3-D convolution has no
+    fast path on any backend, so use a small problem -- every bug this suite is
+    trying to catch reproduces at small sizes.
     """
     device = torch.device(device) if device is not None else operands["input"].device
     x = operands["input"].to(device=device, dtype=dtype)
@@ -235,9 +229,8 @@ def reference(
         return _conv(problem, x, w, b)
 
     gy = operands["grad_output"].to(device=device, dtype=dtype)
-    # Ask for only the gradient wanted.  fp64 convolution has no fast path on
-    # any backend, so the unwanted one is not a rounding error in the test
-    # suite's runtime -- differentiating both roughly doubled it.
+    # Ask for only the gradient wanted: fp64 convolution has no fast path on any
+    # backend, so the unwanted one is real time in the test suite.
     x = x.detach().requires_grad_(direction == "bwd-data")
     w = w.detach().requires_grad_(direction != "bwd-data")
     y = _conv(problem, x, w, b)
@@ -250,7 +243,11 @@ def incumbent(
     operands: dict[str, torch.Tensor],
     direction: Direction = "fwd",
 ) -> torch.Tensor:
-    """What MIOpen produces today -- the thing we have to be no worse than."""
+    """The same convolution in the working dtype, as MIOpen computes it.
+
+    The second standard's baseline: error measured against :func:`reference` is
+    what a kernel has to be no worse than.
+    """
     x = operands["input"]
     w = operands["weight"]
     b = operands["bias"]
@@ -324,45 +321,35 @@ def error_bound(
 
     Two error sources, and they do not scale with the same quantity:
 
-    - **Accumulation** in fp32 over ``K`` terms.  Rounding there behaves like a
+    - Accumulation in fp32 over ``K`` terms.  Rounding there behaves like a
       random walk rather than a worst case, so ``u * sqrt(K)``, and it scales
       with the *typical* magnitude of the result -- its RMS.  A random walk is
       an average, not a bound, so this term carries the 8x safety factor.
-    - **The final store** down to bf16, which is up to one ulp of each element
-      and so scales with the *largest* element, not the typical one.
+    - The final store down to the working dtype, up to one ulp of each element,
+      which scales with the *largest* element and not the typical one.
 
-    Conflating the two is a real trap, and one this code fell into: measuring
-    error relative to the RMS while bounding it in per-element ulps understates
-    the bound by the tensor's peak-to-RMS ratio, which for a convolution result
-    is comfortably 5x.  MIOpen itself failed that bound on the transposed
-    backward-weight, which is how the mistake surfaced -- the tolerance was
-    wrong, not the incumbent.
+    Conflating the two is a trap: measuring error relative to the RMS while
+    bounding it in per-element ulps understates the bound by the tensor's
+    peak-to-RMS ratio, which for a convolution result is comfortably 5x.
 
-    The 8x used to sit on *both* terms, and that was the opposite mistake.  The
-    store is a single deterministic rounding, bounded by half an ulp of the
-    element and so by ``u_dtype * peak`` outright -- there is no walk to take a
-    safety factor against, and charging four ulps of the peak for it made the
-    static bound 12-17x MIOpen's measured error and left the "no worse than the
-    incumbent" clause of :func:`assert_close` dead in 46 of 48 cells.  Measured
-    here over 78 (problem, direction) cells, MIOpen's own ``max_abs`` in bf16
-    and fp16 lands at **0.24-0.66 ulps of the peak** in the forward and
-    backward-data -- both of which are bitwise reproducible, i.e. genuinely one
-    rounding -- so ``roundings=1`` (a full ulp of the peak) covers a
-    single-store kernel with 1.5-4x to spare.  fp32 is the exception and is
-    covered by the other term: there ``u_dtype`` is 2**16 smaller, the
-    accumulation dominates, and MIOpen sits at 7-8 ulps of a very small ulp.
+    The store term takes no safety factor of its own: it is a single
+    deterministic rounding, bounded by half an ulp of the element and so by
+    ``u_dtype * peak`` outright.  Charging several ulps of the peak instead
+    inflates the static bound until the "no worse than the incumbent" clause of
+    :func:`assert_close` never applies.  fp32 is the exception and is covered by
+    the other term: there ``u_dtype`` is 2**16 smaller and the accumulation
+    dominates.
 
     ``roundings`` is the number of times a value is rounded into the working
     dtype on its way out, and it is a knob because the incumbent is not always
     1: MIOpen's backward-weight reduces with atomics, so two identical calls
-    differ bitwise (verified) and its error *wanders* -- over eight calls on one
-    cell it ranged 0.61-1.05 ulps of the peak, disagreeing with itself by 0.72,
-    where a single rounding would repeat exactly.  Our backward-weight reduces
-    its split-K partials in fp32 and stores once, so it stays at 1.
+    differ bitwise and its error wanders, where a single rounding would repeat
+    exactly.  Our backward-weight reduces its split-K partials in fp32 and
+    stores once, so it stays at 1.
 
-    What this bound still does not cover, and no tolerance can: a ``tl.dot``
-    silently running at ~10-11 mantissa bits sits *under* one bf16 ulp of the
-    peak and passes.  Only the bitwise standard rejects that.
+    What this bound cannot cover, and no tolerance can: a ``tl.dot`` silently
+    running at a reduced mantissa width sits *under* one ulp of the peak and
+    passes.  Only the bitwise standard rejects that.
     """
     dt = _TORCH_DTYPE[problem.dtype]
     k = problem.gemm_shape(direction)[2]
@@ -387,19 +374,16 @@ def assert_close(
     """Apply the strictest standard the situation supports.
 
     If ``incumbent_error`` is supplied, the bar is "no worse than MIOpen by more
-    than ``margin``"; otherwise :func:`error_bound` applies.  The two are combined
-    with ``max`` so that a shape where MIOpen happens to be unusually accurate
-    cannot make the test stricter than the numerics justify.
+    than ``margin``"; otherwise :func:`error_bound` applies.  The two are
+    combined with ``max`` so that a shape where MIOpen happens to be unusually
+    accurate cannot make the test stricter than the numerics justify.
 
-    That ``max`` is only worth writing if both arms can win, and for a long time
-    only one could: with four ulps of the peak charged for the final store the
-    static bound won 46 of 48 cells and the documented standard was never the
-    one applied.  With the store term at one ulp (see :func:`error_bound`)
-    ``margin * incumbent`` is operative in 71 of the 75 bf16/fp16 cells
-    measured.  Which arm wins is closest to a coin toss in fp32, where
-    ``u_dtype`` is 2**16 smaller: the store term stops dominating, the bound
-    collapses onto MIOpen's own accumulation error, and the two arms come out
-    within about 1.2x of each other in either direction.
+    That ``max`` is only worth writing if both arms can win.  With the store
+    term at one ulp (see :func:`error_bound`) ``margin * incumbent`` is the
+    operative arm across most bf16 and fp16 shapes.  Which arm wins is closest
+    to a coin toss in fp32, where ``u_dtype`` is 2**16 smaller: the store term
+    stops dominating and the bound collapses onto MIOpen's own accumulation
+    error.
     """
     report = compare(actual, expected)
     bound = error_bound(problem, expected, direction, roundings=roundings)

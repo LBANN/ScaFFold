@@ -1,12 +1,9 @@
 # SPDX-License-Identifier: (Apache-2.0)
 """Triton 3-D convolution kernels for NDHWC (``channels_last_3d``) tensors.
 
-This package is deliberately **self-contained**: it imports nothing from
-ScaFFold or DistConv, so it can be vendored into either (or released on its own)
-unchanged.  ScaFFold plugs in through a thin adapter that lives on the ScaFFold
-side.
-
-What exists today:
+Self-contained by design: it imports nothing from ScaFFold or DistConv, so it
+can be vendored into either unchanged.  ScaFFold plugs in through a thin adapter
+that lives on the ScaFFold side.
 
 - :mod:`triton_conv3d.gather_gemm` -- the forward implicit-GEMM convolution,
   ``k>=1`` with ``stride=1``, bf16 / fp16 / fp32.
@@ -14,49 +11,44 @@ What exists today:
   contains no kernel of its own: at ``stride=1`` backward-data *is* the forward
   contraction on a flipped, channel-transposed weight.
 - :mod:`triton_conv3d.reduce_gemm` -- the gradient with respect to the weight,
-  which is the one direction that needs a kernel of its own: a tiny output
-  reduced over the whole volume, so split-K is mandatory rather than optional.
-  It is also where reproducibility is decided, and its deterministic path is the
-  default.
+  the one direction that needs a kernel of its own: a tiny output reduced over
+  the whole volume, so split-K is mandatory rather than optional.  It is also
+  where reproducibility is decided, and its deterministic path is the default.
 - :mod:`triton_conv3d.transposed` -- ``ConvTranspose3d`` at ``kernel == stride``
-  and no padding, all three directions.  Only its *forward* is a kernel: with
-  the windows tiling rather than overlapping, both backward directions are the
-  ordinary strided convolution seen from the other side, and the two modules
-  above serve them unchanged.
-- :mod:`triton_conv3d.shapes` -- the convolution problems that actually occur,
-  extracted from real ScaFFold runs, plus synthetic edge cases.
+  and no padding.  Only its *forward* is a kernel: the windows tile rather than
+  overlap, so both backward directions are the ordinary strided convolution seen
+  from the other side, served by the two modules above.
+- :mod:`triton_conv3d.shapes` -- the convolution problems that occur in real
+  ScaFFold runs, plus synthetic edge cases.
 - :mod:`triton_conv3d.reference` -- reference implementations and the tolerance
   policy used to decide whether a kernel is correct.
 - :mod:`triton_conv3d.bench` -- interleaved A/B timing, MIOpen baseline capture,
   the ``tl.dot`` ceiling probe, and the forward benchmark.
 
-The public entry point takes and returns ``channels_last_3d`` tensors; the
-autograd registration and the ScaFFold adapter live in a later milestone, so a
-caller today drives :func:`conv3d_forward` directly and checks a gate first.
+The entry points take and return ``channels_last_3d`` tensors, and a caller asks
+a gate before calling one.
 
-**The gates say nothing about the GPU, deliberately.**  They are *capability*
-predicates -- "will this call be computed correctly here" -- and the answer to
-that does not depend on which AMD part is running: the kernels compute the right
-convolution wherever Triton lowers them.  What *is* device-specific is every
-number that decides how they launch (the tile tables, ``matrix_instr_nonkdim``,
-and the ``GROUP_M`` default of 6, which is MI300A's XCD count), all of which was
-raced on one MI300A -- and a launch configuration that is merely wrong for the
-hardware raises nothing: see :mod:`triton_conv3d.gather_gemm`'s "Configuration
-constraints are hard".  Deciding whether *this* machine is one whose numbers are
-trustworthy is therefore the embedder's routing question, not this package's
-capability question, and putting a device allowlist inside the gates would lock
+The gates say nothing about the GPU, deliberately.  They are *capability*
+predicates -- "will this call be computed correctly here" -- and the kernels
+compute the right convolution wherever Triton lowers them.  What *is*
+device-specific is every number that decides how they launch (the tile tables,
+``matrix_instr_nonkdim``, and the ``GROUP_M`` default of 6, which is MI300A's
+XCD count), all of it tuned on one MI300A -- and a launch configuration that is
+merely wrong for the hardware raises nothing; see
+:mod:`triton_conv3d.gather_gemm`'s "Configuration constraints are hard".
+Whether *this* machine is one whose numbers are trustworthy is therefore the
+embedder's routing question, and a device allowlist inside the gates would lock
 out a consumer who has retuned for their own part.  ScaFFold makes that decision
-in ``ScaFFold/unet/_rungs.py`` (``_platform_declines``); a consumer that has not
-retuned should do the same thing there.
+in ``ScaFFold/unet/_rungs.py`` (``_platform_declines``).
 
-**Which gate depends on what the caller will do with the answer.**  The three
+Which gate to ask depends on what the caller will do with the answer.  The three
 directions do not accept the same problems -- ``stride > 1`` is served by the
 forward and by backward-weight and refused by backward-data -- so a caller that
 will differentiate the result must ask :func:`is_supported_all`, which is all
-three at once.  :func:`is_supported` alone gates the forward alone, which is
-what an inference caller wants and a training caller must not settle for: a
-forward this package serves and a backward it cannot is discovered inside
-``backward()``, where the caller's fallback kernel is no longer reachable.
+three at once.  :func:`is_supported` gates the forward alone, which is what an
+inference caller wants and a training caller must not settle for: a forward this
+package serves and a backward it cannot is discovered inside ``backward()``,
+where the caller's fallback kernel is no longer reachable.
 """
 
 from __future__ import annotations
@@ -84,10 +76,9 @@ __all__ = [
     "__version__",
 ]
 
-#: The public names live in :mod:`triton_conv3d.gather_gemm`, which imports
-#: torch and triton.  They are re-exported lazily so that
-#: ``import triton_conv3d.shapes`` stays free of both: the shape and cost model
-#: is pure Python by design, and it drives test parametrization at collection
+#: The public names live in modules that import torch and triton, so they are
+#: re-exported lazily: ``import triton_conv3d.shapes`` must stay free of both,
+#: because the shape and cost model drives test parametrization at collection
 #: time on machines that have no GPU and may have no triton.
 _LAZY = {
     "ConvConfig": "gather_gemm",

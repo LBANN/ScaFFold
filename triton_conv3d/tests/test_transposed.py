@@ -3,7 +3,7 @@
 
 Three directions, one new kernel, so these tests split unevenly on purpose.
 
-**The forward** is a new ``@triton.jit`` function with a *scatter* store, which
+The forward is a new ``@triton.jit`` function with a *scatter* store, which
 is the one addressing pattern nothing else in this package has.  Its failure
 mode is a permutation: write tap ``(kd,kh,kw)`` into the wrong sub-lattice and
 the result is the right shape, the right magnitude, smooth, and wrong -- a
@@ -13,7 +13,7 @@ vacuous (:func:`test_a_transposed_tap_permutation_is_detected` and
 :func:`test_bitwise_standard_rejects_a_shifted_scatter`), because this project
 has shipped a vacuous exact test before.
 
-**Both backward directions** are re-expressions: backward-data is
+Both backward directions are re-expressions: backward-data is
 ``conv3d_forward`` at ``stride = k`` and backward-weight is
 ``conv3d_backward_weight`` with the two activations swapped.  There is no new
 arithmetic in either, so what is tested is the *re-expression* -- above all the
@@ -21,11 +21,11 @@ swap, which is the single most plausible mistake in the file and which produces
 a correctly shaped gradient when it is wrong (:func:`test_backward_weight_
 operand_swap_is_not_reversible`).
 
-**The FLOP count** is checked in its own right.  ``k == s`` makes the per-tap
-factor illusory (the windows tile rather than overlap) and this project once
-counted it anyway, 8x too high.  ``shapes.py`` has it right; here it is checked
-against the elementary MAC count of the reference implementation rather than
-against another formula.
+The FLOP count is checked in its own right.  ``k == s`` makes the per-tap
+factor illusory (the windows tile rather than overlap), and applying it
+anyway overcounts by a factor of ``taps``.  ``shapes.py`` accounts for this
+correctly; here it is checked against the elementary MAC count of the
+reference implementation rather than against another formula.
 """
 
 from __future__ import annotations
@@ -230,10 +230,9 @@ def test_transposed_flops_have_no_phantom_tap_factor():
 
     The trap: the general transposed FLOP count carries a per-tap factor, and at
     ``k == s`` it does not apply, because the windows tile rather than overlap.
-    Applying it anyway overstates the count by ``taps`` -- 8x at ``k=2`` -- which
-    this project did once, and a wrong FLOP count is invisible: it produces a
-    plausible roofline percentage and a wrong conclusion about where the
-    opportunity is.
+    Applying it anyway overstates the count by a factor of ``taps``, and a
+    wrong FLOP count is invisible: it produces a plausible roofline percentage
+    and a wrong conclusion about where the opportunity is.
 
     So the count is derived here from first principles: one MAC per (output
     voxel, output channel, input channel), times two.
@@ -262,9 +261,8 @@ def test_the_gemm_decomposition_matches_the_kernels_grid():
 
     ``gemm_shape`` reports ``N = Cout * taps`` and the kernel tiles that as
     ``(taps // TAP_BLOCK)`` groups of ``TAP_BLOCK * BLOCK_NC`` columns.  If the
-    two ever disagree the cost model is describing a different kernel from the
-    one that runs, which is the class of error that produced this project's
-    largest published mistake.
+    two ever disagree the cost model describes a kernel that is not the one
+    that runs.
     """
     for p in CORPUS_PAIRS + EDGE:
         m, n, k = p.gemm_shape("fwd")
@@ -325,12 +323,12 @@ def test_every_candidate_config_is_legal(problem: ConvProblem):
 
 
 def test_the_fp32_config_fits_lds():
-    """fp32 operands are twice the bytes, and that hole has bitten before.
+    """fp32 operands are twice the bytes, against a fixed 64 KiB LDS budget.
 
-    ``more_determinism`` runs the model in fp32, and the gather kernel shipped a
-    ``default_config`` that asked for 128 KiB there -- reachable from a real
-    ScaFFold configuration.  This kernel's tile is *wider* than that one's
-    (``TAP_BLOCK`` multiplies the column count), so the same hole is closer.
+    ``more_determinism`` runs the model in fp32, a real ScaFFold configuration,
+    and the sibling gather kernel has exceeded the LDS budget there before.
+    This kernel's tile is *wider* than that one's (``TAP_BLOCK`` multiplies the
+    column count), so the same hole is closer.
     """
     for cin, cout, taps in [
         (1024, 512, 8),
@@ -538,8 +536,9 @@ def test_the_ordinary_forward_gate_would_not_have_served_these():
     The ordinary ``is_supported`` takes no ``transposed`` parameter, so a caller
     holding a ``ConvTranspose3d`` has no way to ask it the right question: it
     answers about the *non*-transposed convolution with the same tensors, whose
-    output shape is 8x smaller.  Asking it and believing the answer is precisely
-    the bug the adapter's ``module.transposed`` check exists to prevent.
+    output shape is smaller in every spatial dimension.  Asking it and
+    believing the answer is precisely the bug the adapter's
+    ``module.transposed`` check exists to prevent.
     """
     x = torch.zeros(1, 128, 4, 4, 4)
     w = torch.zeros(128, 64, 2, 2, 2)
@@ -601,9 +600,9 @@ def test_corpus_channel_pairs_match_bitwise(problem: ConvProblem, direction: str
     ``exact_density`` is what makes this reachable at ``Cin = 1024``: it thins
     the activations so the *realized* sums stay inside bf16's mantissa while the
     shape -- and so the tile, ``TAP_BLOCK`` and the 512-byte row strides -- is
-    exactly what the model runs.  Asserted rather than skipped, so this cannot
-    quietly become a wall of passes that tests nothing, which is how a sibling
-    file lost its whole real-shape coverage once.
+    exactly what the model runs.  Asserted rather than skipped, so a corpus
+    case that stopped being representable would fail loudly instead of
+    silently dropping out of the suite.
     """
     ops = _ops(problem, seed=11, direction=direction)
     expected = _reference(problem, ops, direction)
@@ -685,7 +684,7 @@ def test_backward_weight_operand_swap_is_not_reversible():
     slot.  The swap is checked twice, because it has two regimes and only one of
     them is dangerous:
 
-    * at ``k > 1`` the swap is **not shape-legal** -- the strided convolution's
+    * at ``k > 1`` the swap is not shape-legal -- the strided convolution's
       input is the ``k``-times-larger volume, so ``is_supported_bwd_weight``
       refuses it.  That is worth pinning as a fact rather than assumed: it is
       the reason the swap cannot silently produce a wrong gradient at any real
@@ -910,11 +909,9 @@ def test_output_matches_torchs_shape_and_layout():
 def test_no_worse_than_miopen():
     """Error against fp64, held to the incumbent's own error where possible.
 
-    ``assert_close``'s policy, unchanged and not reinvented: it once failed on
-    MIOpen's *transposed* backward-weight, and the resolution was that the
-    tolerance was wrong -- it charged the final store like an accumulation.
-    ``roundings`` is 2 for MIOpen's backward-weight because that direction
-    reduces with atomics and disagrees with itself bitwise between two calls.
+    ``assert_close``'s policy is used unchanged: ``roundings`` is 2 for
+    MIOpen's backward-weight because that direction reduces with atomics and
+    disagrees with itself bitwise between two calls.
     """
     for problem in [
         _problem("mi", 64, 32, (4, 5, 6), bias=True),

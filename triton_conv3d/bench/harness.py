@@ -1,88 +1,47 @@
 # SPDX-License-Identifier: (Apache-2.0)
 """Timing that survives this machine -- and says how well it survived it.
 
-**What this node does.**  Measured on GPU 2 on 2026-08-03 -- 47,686 consecutive
-10-call blocks of ``conv 64->64 k3 @ 130^3`` over 14 minutes, with ``rocm-smi``
-sampled concurrently from a sibling process:
+What threatens a comparison on this node is not the clock, and not the elapsed
+time between two measurements in one process; it is a foreign tenant on the
+device.  That is common-mode within a round -- every arm pays it at once -- so
+:func:`interleaved` measures every arm in every round and pairs them there,
+which a between-run comparison cannot do.  It is not a substitute for an error
+bar.
 
-* steady-state dispersion is **CoV 0.56%**, IQR/median 0.39%, p99/p01 = 1.022;
-* the *sequential* protocol -- measure A for a while, then B -- simulated out of
-  that stream, where both windows are the same kernel and the true ratio is
-  therefore exactly 1, has a **worst error of 0.32%** over 206 replications at
-  2 s separation, and 0.14 / 0.24 / 0.18% at 5 / 15 / 60 s;
-* a deliberate **90-second idle gap** moves the measured time by **0.13%**, so
-  there is no thermal ramp to catch;
-* ``sclk`` under load stays in 1396-1451 MHz and junction temperature rises
-  49 -> 66 C, and neither correlates with the time (r = -0.10 and -0.05).  The
-  device is power-capped at 550 W and clocks *stably* at that cap.
+The instrument is the other hazard, twice over.
 
-So the clock is not what threatens a comparison here, and neither is elapsed
-time between two measurements in one process.  What does threaten one is a
-**neighbour**: a foreign tenant on the device inflated three cells **2.6x**,
-with per-cell spreads 20-100x their quiet-device values.  That is common-mode
-within a round -- every arm pays it at once -- so :func:`interleaved` survives it
-where a between-run comparison does not.  It costs nothing, so it stays.  It is
-not, however, a substitute for an error bar.
-
-**What actually goes wrong here is the instrument, twice.**
-
-1. Below about 0.15 ms the per-iteration event pair is a material part of what
-   it reports.  Measured: ``hipEventRecord`` costs **9.5 us of host time**, and
-   a block with an event between every iteration reports **16-26% more** than
-   the same kernel's wall-clock throughput (``convT 1024->512 @ 8^3`` forward:
-   0.0718 ms with events, 0.0617 bracketed, 0.0568 by wall clock).  The tax is
-   per-arm, not common-mode, so it does *not* cancel in a ratio.  This harness
-   now widens the event interval to cover several calls whenever the kernel is
-   short enough for that to matter -- one common width for every arm of a
-   comparison, from a rule that depends only on the measured duration -- and
-   reports the residual it measures against an event-free bracket.  Checked
-   against a wall-clock throughput reference at 512^2 / 1024^2 / 2048^2 / 4096^2
-   bf16 GEMM: the harness now reads 0.96-1.08x of it across three orders of
-   magnitude, where at the smallest of those it used to read **1.52x**.
-2. ``iters`` was never a neutral knob.  The first call after a synchronize pays
-   a queue restart, so ``iters=1`` over-reports by 3% at 1.4 ms and by **42%**
-   at 0.07 ms.  The adaptive path picks ``iters`` from the measured duration and
+1. For a short kernel the per-iteration event pair is a material part of what
+   it reports, and that tax is per-arm rather than common-mode, so it does
+   *not* cancel in a ratio.  Iterations are therefore grouped behind one event
+   interval -- one common width for every arm of a comparison, from a rule that
+   depends only on the measured duration (:func:`_common_group`) -- and
+   :attr:`Measurement.tax_ms` reports the residual against an event-free
+   bracket.
+2. ``iters`` is not a neutral knob: the first call after a synchronize pays a
+   queue restart, so ``iters=1`` over-reports, the more so the shorter the
+   kernel.  The adaptive path picks ``iters`` from the measured duration and
    never leaves it at 1 for a small kernel.
 
-**What the timed region contains, and what it does not.**  Below about 0.15 ms
-the *host* is the pacer: a launch costs 2-37 us of Python and dispatch on this
-node, against kernels of 28-68 us, so an event-timed loop of ``fn()`` measures
-the launcher and the kernel together and cannot separate them.  :func:`capture`
-puts ``chunk`` back-to-back calls behind one CUDA graph, which contains the
-device work and none of the host work, so replaying it measures the kernel
-alone.  Measured, per call, on ``convT 1024->512 @ 8^3``:
+What the timed region contains.  For a short kernel the host is the pacer, so
+an event-timed loop of ``fn()`` measures the launcher and the kernel together
+and cannot separate them.  :func:`capture` puts ``chunk`` back-to-back calls
+behind one CUDA graph, which contains the device work and none of the host
+work, so replaying it measures the kernel alone.  Host launch costs differ
+widely between arms -- the MIOpen control for a backward direction pays an
+autograd-engine walk the Triton arm does not, and the Triton arm pays a
+tuned-table lookup MIOpen does not -- so *leaving* the launcher in is as much a
+per-arm instrument as taking it out asymmetrically would be.  Hence the rule
+this module enforces: a graph is chosen for the whole comparison or for none of
+it, and ``chunk`` -- like ``group`` -- is a function of the shortest arm's
+duration alone, never of a per-arm measurement.  Above :data:`_GRAPH_MAX_MS`
+per call the host cost is negligible against either arm and no graph is used.
 
-=============================  =======  ========  =============
-arm                            eager    kernel    host launch
-=============================  =======  ========  =============
-``convT`` fwd, Triton          0.0421   0.0282    13.9 us
-``convT`` fwd, MIOpen          0.0699   0.0683    **1.6 us**
-``convT`` bwd-data, Triton     0.0539   0.0350    18.9 us
-``convT`` bwd-data, MIOpen     0.0761   0.0395    **36.6 us**
-``convT`` bwd-weight, Triton   0.0712   0.0542    17.0 us
-``convT`` bwd-weight, MIOpen   0.0839   0.0504    33.4 us
-=============================  =======  ========  =============
-
-Those six host costs differ by **23x**, so *leaving* the launcher in is as much
-a per-arm instrument as taking it out asymmetrically would be: the MIOpen
-control for a backward direction pays an autograd-engine walk the Triton arm
-does not, and the Triton arm pays a tuned-table lookup MIOpen does not.  At
-these sizes the two do not cancel -- the same three cells read 1.659x / 1.414x /
-1.176x with the launcher in and **2.420x / 1.130x / 0.931x** without it, i.e.
-the launcher-inclusive number is 1.5x too *low* on the forward and 1.3x too
-*high* on the weight gradient.  Hence the rule this module enforces: a graph is
-chosen for the whole comparison or for none of it, and ``chunk`` -- like
-``group`` -- is a function of the shortest arm's duration alone, never of a
-per-arm measurement.  Above ~40 ms per call the host cost is under 0.2% of
-either arm and no graph is used.
-
-**And every number now carries its precision.**  ``rounds`` and ``iters`` are
-chosen online from what has already been observed, stopping when the reported
-statistic reaches a stated relative precision or when a wall-clock budget is
-exhausted, and :class:`Measurement` says which of the two happened.  A cell that
-stopped on the budget with a wide interval is visibly different from one that
-converged.  That distinction is worth more than the time saved: four of this
-project's five retracted results were numbers quoted without one.
+Every number carries its precision.  ``rounds`` and ``iters`` are chosen online
+from what has already been observed, stopping when the reported statistic
+reaches a stated relative precision or when a wall-clock budget is exhausted,
+and :class:`Measurement` says which of the two happened, so a cell that stopped
+on the budget with a wide interval is visibly different from one that
+converged.
 
 Everything here is in-process.  Sub-process benchmarking adds interpreter start,
 allocator state and MIOpen database warmth as confounders, none of which the
@@ -106,7 +65,7 @@ _flush_buffer: torch.Tensor | None = None
 
 #: Fraction of a kernel's own time the event instrument is allowed to add before
 #: :func:`interleaved` starts grouping iterations behind one event interval.
-#: 2% because the smallest published per-cell differences are around 3%.
+#: Set below the smallest per-cell difference this corpus reports.
 _TAX_BUDGET = 0.02
 
 #: Wall time one timed block should aim for.  Large enough that the queue-restart
@@ -152,9 +111,9 @@ _T975 = (
 
 #: Asymptotic ratio of the standard error of a sample median to that of the
 #: sample mean, for normally distributed data: ``sqrt(pi/2)``.  Round values are
-#: already medians over ``iters`` calls, so they are close to normal; where they
-#: are heavier-tailed this factor is conservative (the median's true SE is then
-#: smaller than the formula says), which is the direction to err in.
+#: medians over ``iters`` calls and so close to normal; on heavier tails the
+#: factor is conservative (the median's true SE is smaller than the formula
+#: says), which is the direction to err in.
 _MEDIAN_SE_FACTOR = 1.2533141373155003
 
 
@@ -167,11 +126,10 @@ def _t975(n: int) -> float:
 def _half_width(values: Sequence[float]) -> float:
     """95% half-width for the *median* of ``values``, in the same units.
 
-    Closed form rather than a bootstrap: it is deterministic (this project
-    re-runs its numbers and compares them), it needs no RNG seed to be
-    reproducible, and at the round counts in use (4-16) a percentile bootstrap
-    of a median cannot produce an interval wider than the observed range, which
-    understates exactly when it matters most.
+    Closed form rather than a bootstrap: it is reproducible without an RNG
+    seed, and at the round counts in use a percentile bootstrap of a median
+    cannot produce an interval wider than the observed range, which understates
+    exactly when it matters most.
     """
     n = len(values)
     if n < 2:
@@ -183,25 +141,22 @@ def _half_width(values: Sequence[float]) -> float:
 def flush_caches(device: torch.device | str = "cuda") -> None:
     """Evict the cache hierarchy so a measurement starts cold.
 
-    Matters for the memory-bound directions: a 16 MiB working set measured hot
-    reports bandwidth the same kernel will never see inside a real step, where
-    everything upstream has already flushed it.
+    Matters for the memory-bound directions: a working set small enough to stay
+    resident, measured hot, reports bandwidth the same kernel will never see
+    inside a real step, where everything upstream has already flushed it.
 
-    Two things to know before trusting it.  It **works** -- the first iteration
-    after a flush is 1.50-1.54x the hot time at ``2048^2`` bf16 GEMM and at the
-    transposed sites -- but a caller that flushes once per block and then reports
-    the *median* over ``iters`` calls throws that one cold sample away: measured
-    ``median_moved_by_flush`` is 0.99-1.01 at every real workload.  Use
-    ``iters=1`` (what the adaptive path does when ``flush=True``) or read
-    :attr:`Measurement.cold`, which this module records for exactly this reason.
+    The trap: only a block's first sample is cold, so a caller that flushes
+    once per block and then reports the *median* over ``iters`` calls throws
+    that one sample away.  Use ``iters=1`` (what the adaptive path does when
+    ``flush=True``) or read :attr:`Measurement.cold`, which this module records
+    for exactly this reason.
     """
     global _flush_buffer
     want = torch.device(device)
     if want.index is None and want.type == "cuda":
         # ``torch.device("cuda")`` carries no index but a tensor created on it
-        # does, so a naive ``!=`` is always true and this function used to
-        # reallocate 512 MiB on every call -- one extra 512 MiB block live at a
-        # time, and an allocation on the critical path of every timed round.
+        # does, so without this a naive ``!=`` is always true and every call
+        # reallocates the buffer on the critical path of a timed round.
         want = torch.device("cuda", torch.cuda.current_device())
     if _flush_buffer is None or _flush_buffer.device != want:
         _flush_buffer = torch.empty(_FLUSH_BYTES, dtype=torch.uint8, device=want)
@@ -212,19 +167,19 @@ def flush_caches(device: torch.device | str = "cuda") -> None:
 class Measurement:
     """Per-round times for one variant, in milliseconds per call.
 
-    The headline statistic is still :attr:`median`.  What is new is that it
-    comes with :attr:`half_width` -- a 95% interval -- and with :attr:`stop`,
-    which says whether the measurement reached its precision target or ran out
-    of wall clock.  Print it; do not quote the median alone.
+    The headline statistic is :attr:`median`, and it comes with
+    :attr:`half_width` -- a 95% interval -- and :attr:`stop`, which says whether
+    the measurement reached its precision target or ran out of wall clock.
+    Print it; do not quote the median alone.
     """
 
     name: str
     rounds: tuple[float, ...]
     #: Per round, ``block mean / per-iteration median``.  See :func:`_time_block`:
     #: greater than 1 means the host failed to keep the queue full and the GPU
-    #: idled between launches.  Reported rather than hidden, because the previous
-    #: version of this harness folded that idle time into the kernel time and
-    #: produced spreads of up to 2363% that were then misdiagnosed twice.
+    #: idled between launches, so the number is not kernel time.  Reported
+    #: rather than hidden, because folding that idle time into the kernel time
+    #: hides it in a plausible-looking result.
     #:
     #: It is a *skew* statistic and it is blind to the uniform case: if every
     #: iteration is inflated by the same launch gap it reads exactly 1.00.  Use
@@ -264,15 +219,13 @@ class Measurement:
 
     @property
     def spread(self) -> float:
-        """Relative range across rounds.  **Grows with** ``rounds`` by construction.
+        """Relative range across rounds.  Grows with ``rounds`` by construction.
 
         Kept because every recorded result JSON has it, but it is not a measure
         of how much the machine moved: the expected range of ``n`` samples grows
-        like ``d2(n)`` even on a perfectly stationary device.  Measured on this
-        node with one kernel held constant for 14 minutes, the median of this
-        statistic runs 0.23% at 2 rounds, 0.63% at 6, 0.98% at 20 and 2.70% at
-        100 -- all of it arithmetic.  Compare :attr:`rel_half_width` instead,
-        which is an interval and does not have that defect.
+        like ``d2(n)`` even on a perfectly stationary device, and ``rounds`` is
+        chosen per cell.  Compare :attr:`rel_half_width` instead, which is an
+        interval and does not have that defect.
         """
         return (
             (max(self.rounds) - min(self.rounds)) / self.median if self.rounds else 0.0
@@ -303,9 +256,9 @@ class Measurement:
     def tax_frac(self) -> float:
         """Instrument cost as a fraction of the reported time.
 
-        Independent of the numbers the median came from -- it is the gap between
-        an event-per-iteration block and an event-free bracket of the same
-        kernel -- which is precisely what :attr:`stall_ratio` cannot see.
+        The gap between an event-per-iteration block and an event-free bracket
+        of the same kernel, so it is independent of the numbers the median came
+        from -- which is precisely what :attr:`stall_ratio` cannot see.
         """
         m = self.median
         return self.tax_ms / m if m > 0 else 0.0
@@ -330,11 +283,11 @@ class Measurement:
 class Ratio:
     """A paired ratio of two variants, with the interval that makes it a claim.
 
-    Paired **per round**, not median-over-median: the two arms of a round were
+    Paired per round, not median-over-median: the two arms of a round were
     measured seconds apart under the same device state, so a common-mode
-    excursion divides out of every pair before anything is averaged.  That is
-    the property :func:`interleaved` exists to buy, and taking a ratio of two
-    independently-reduced medians throws it away.
+    excursion divides out of every pair before anything is averaged.  A ratio
+    of two independently-reduced medians throws away the property
+    :func:`interleaved` exists to buy.
     """
 
     numerator: str
@@ -395,25 +348,21 @@ def _time_block(
     clock measures the host's ability to enqueue until something forces a
     synchronize, and the forced synchronize is then part of the measurement.
 
-    But bracketing the *whole block* with two events, as this used to, has the
-    same disease one level up: if the host cannot keep the queue full the GPU
-    goes idle between launches, and that idle time is silently attributed to the
-    kernel.  On a contended node it produced per-round spreads of 250-2363% that
-    were diagnosed as host jitter, then as a rogue tenant, before turning out to
-    be a duplicate driver process of our own.
+    But bracketing the *whole block* with two events has the same disease one
+    level up: if the host cannot keep the queue full the GPU goes idle between
+    launches, and that idle time is silently attributed to the kernel.
 
-    So time each iteration separately and return the **median**, which rejects a
-    stalled launch instead of averaging it in, alongside the ratio of the old
-    block-mean to that median.  A ratio near 1 means the queue stayed full and
-    the two agree; a large ratio means the measurement is launch-bound and the
-    number should not be read as kernel time.
+    So time each iteration separately and return the median, which rejects a
+    stalled launch instead of averaging it in, alongside the ratio of the block
+    mean to that median.  A ratio near 1 means the queue stayed full and the two
+    agree; a large ratio means the measurement is launch-bound and the number
+    should not be read as kernel time.
 
-    ``group`` widens the event interval to ``group`` calls.  An event costs
-    ~9.5 us of host time and shows up in the reported number below ~0.15 ms of
-    kernel, where it inflated ``convT`` sites by 16-26%; grouping divides that
-    by ``group`` while keeping enough samples per block for the median to still
-    reject a stall.  ``group=1`` is the historical behaviour and is what a large
-    kernel gets, because there the tax is already under a tenth of a percent.
+    ``group`` widens the event interval to ``group`` calls.  An event costs host
+    time that lands in the reported number for a short kernel; grouping divides
+    that by ``group`` while keeping enough samples per block for the median to
+    still reject a stall.  ``group=1`` is what a large kernel gets, because
+    there the tax is negligible.
     """
     marks = _blocked_events(fn, iters, group)
     n = len(marks) - 1
@@ -475,27 +424,24 @@ class Plan:
     tax_ms: float
 
 
-#: Above this per-call time the event instrument is provably under 1%, so the
-#: tax probe -- ten extra blocks -- is not worth running.  It would cost 450 s
-#: on the 45 s cliff cell alone.
+#: Above this per-call time the event instrument is a negligible fraction of
+#: the kernel, so the tax probe -- ten extra blocks -- is not worth its wall
+#: clock on an expensive cell.
 _TAX_PROBE_MAX_MS = 1.0
 
-#: Floor on the cost of one event interval, in ms.  Measured on this device with
-#: ``torch.cuda._sleep`` at four durations spanning 10 us to 285 us per call:
-#: **2.85, 2.85, 2.85 and 3.09 us**, i.e. flat in the kernel size, which is what
-#: makes it a property of the instrument rather than of the workload.  A real
-#: kernel can cost *more* than this, because the host also pays ~9.5 us per
-#: ``record()`` and a launch path expensive enough to make the host the pacer
-#: turns that into device idle -- so this is a floor, and the per-arm probe
-#: raises it.  It exists so that a probe which happens to measure near zero
-#: cannot leave a tiny kernel ungrouped.
+#: Floor on the cost of one event interval, in ms.  A measurement chose it;
+#: it is flat in the kernel size, which is what makes it a property of the
+#: instrument rather than of the workload.  A real kernel can cost *more*,
+#: because the host also pays per ``record()`` and a launch path expensive
+#: enough to make the host the pacer turns that into device idle -- so this is
+#: a floor, which the per-arm probe raises.  It exists so that a probe which
+#: happens to measure near zero cannot leave a tiny kernel ungrouped.
 _EVENT_INTERVAL_MS = 0.00285
 
-#: Group only once the instrument is worth more than twice its budget, i.e. more
-#: than 4% of the kernel by default.  The band below that is left alone because
-#: grouping is not free: it averages ``group`` calls behind one event interval,
-#: so it also *reduces* the median's ability to reject a stalled launch.  At
-#: 0.08 ms, forcing a group of 2 moved the reported time 7% the wrong way.
+#: Group only once the instrument is worth more than twice ``tax_budget``.  The
+#: band below that is left alone because grouping is not free: it averages
+#: ``group`` calls behind one event interval, so it also *reduces* the median's
+#: ability to reject a stalled launch.
 _GROUP_TRIGGER = 2.0
 
 
@@ -504,11 +450,11 @@ def _measure_tax(
 ) -> float:
     """Per-call cost of the event instrument: events minus an event-free bracket.
 
-    Measured as a *paired* difference -- ev, br, ev, br, ... -- rather than as a
-    difference of two separately-collected medians.  The two arms of each pair
-    are adjacent in time, so a device-wide excursion cancels inside the pair
-    instead of landing in the estimate; taken unpaired, this estimate was noisy
-    enough to pick wildly different groups for byte-identical work.
+    A *paired* difference -- ev, br, ev, br, ... -- rather than a difference of
+    two separately-collected medians: the two arms of each pair are adjacent in
+    time, so a device-wide excursion cancels inside the pair instead of landing
+    in the estimate.  Unpaired, it is noisy enough to pick different groups for
+    byte-identical work.
     """
     diffs = []
     for _ in range(reps):
@@ -532,9 +478,8 @@ def _probe(
 ) -> tuple[float, int]:
     """Warm one variant and return ``(per-call ms, warmup calls issued)``.
 
-    The first call absorbs whatever one-off the variant has -- MIOpen's find is
-    **8.2 s** on ``conv 64->64 k3 @ 130^3`` against a 1.65 ms steady state, and
-    Triton's JIT is a compile -- so it is never the call that decides anything.
+    The first call absorbs whatever one-off the variant has -- MIOpen's find,
+    Triton's JIT compile -- so it is never the call that decides anything.
 
     A pinned ``warmup`` issues exactly that many calls and nothing else, so a
     caller that also pins ``iters`` gets precisely the pre-adaptive call
@@ -556,9 +501,8 @@ def _probe(
     torch.cuda.synchronize()
     rough = max((time.perf_counter() - t0) * 1e3, 1e-4)
 
-    # Warm to a settled state.  Measured: Triton needs ~5 calls to come within
-    # 0.5% of steady, MIOpen ~4 after its find; both are cheap when the kernel
-    # is small and unaffordable when it is 45 s, which is what the hard cap is.
+    # Warm to a settled state: a handful of calls, which is cheap for a small
+    # kernel and unaffordable for a very expensive one -- hence the hard cap.
     n = min(warmup_max, max(warmup_min, int(warmup_s * 1e3 / rough)))
     if n * rough > warmup_hard_s * 1e3:
         n = max(0, int(warmup_hard_s * 1e3 / rough))
@@ -566,12 +510,11 @@ def _probe(
         fn()
     torch.cuda.synchronize()
 
-    # ``rough`` is one call bracketed by two synchronizes and it over-states a
-    # small kernel badly -- 0.37 ms for a 0.017 ms GEMM, because the sync and
-    # the queue restart are most of it.  Sizing ``iters`` off that number gave
-    # blocks 20x too short and left the instrument tax at 6.9% instead of 2%.
-    # So re-estimate from an event-free bracket, which is the same quantity the
-    # tax is measured against.
+    # ``rough`` is one call bracketed by two synchronizes, which over-states a
+    # small kernel badly: the sync and the queue restart are most of it, and
+    # sizing ``iters`` off it leaves the block far too short and the instrument
+    # tax far above its budget.  So re-estimate from an event-free bracket, the
+    # same quantity the tax is measured against.
     d = rough
     if rough < block_ms:
         probe = max(4, min(max_iters, round(block_ms / rough)))
@@ -599,14 +542,13 @@ def per_call_ms(
     first, and that decision has to be made from a quantity measured the same
     way for every arm.
 
-    With one difference, and it cost an afternoon: :func:`_probe` absorbs *one*
-    one-off call before it estimates anything, and one is not always enough.
-    The first ``256^2`` bf16 ``matmul`` in a fresh process measured **653 ms** on
-    its *second* call, because rocBLAS/hipBLASLt loads its kernel library
-    lazily and does it after the first launch.  A decision made from that number
-    puts a 0.02 ms kernel on the eager path with ``iters=1``.  So this settles
-    first, bounded by time rather than by a call count so that a 45-second
-    kernel is called once and a 20-microsecond one five times.
+    With one difference: :func:`_probe` absorbs *one* one-off call before it
+    estimates anything, and one is not always enough.  rocBLAS/hipBLASLt loads
+    its kernel library lazily, on the call *after* the first launch, and a
+    decision made from that call puts a tiny kernel on the eager path with
+    ``iters=1``.  So this settles first, bounded by wall clock rather than by a
+    call count, so that a very expensive kernel is called once and a cheap one
+    several times.
 
     It is a probe, not a measurement: one bracketed block, no rounds, no
     interval.  Do not publish it.
@@ -633,24 +575,22 @@ def per_call_ms(
 def _common_group(
     durations: Sequence[float], *, tax_budget: float, max_iters: int
 ) -> int:
-    """One event-interval width for **every** arm of a comparison.
+    """One event-interval width for every arm of a comparison.
 
-    Two things are load-bearing here and both were bought with a wrong answer.
+    Two things are load-bearing here.
 
     *The group is a function of the duration alone*, not of a per-arm
-    measurement of the instrument tax.  A group derived from a per-arm probe
-    made two byte-identical arms pick 12 and 2 in the same call -- a 4%
-    difference in residual instrument cost, and therefore a 4% bias in a ratio
-    whose true value was exactly 1.000.  That is the failure this whole
-    exercise is about, reintroduced by the fix for it;
-    ``test_a_paired_ratio_of_two_identical_arms_covers_one`` caught it.
+    measurement of the instrument tax: a per-arm probe lets two byte-identical
+    arms pick different groups, and the difference in residual instrument cost
+    is then a bias in a ratio whose true value is exactly 1.
+    ``test_a_paired_ratio_of_two_identical_arms_covers_one`` pins that.
 
-    *And it is common to the whole call*, taken from the **shortest** arm, so
-    that even when two arms are far apart in duration -- or merely far enough
-    apart to straddle a power-of-two boundary, which byte-identical arms did --
-    they are measured with the same ruler.  ``iters`` stays per-arm, because
-    that is what the five orders of magnitude in this corpus need; the *width
-    of the event interval* is what has to match.
+    *And it is common to the whole call*, taken from the shortest arm, so that
+    arms far apart in duration -- or merely far enough apart to straddle a
+    power-of-two boundary, which byte-identical arms can -- are measured with
+    the same ruler.  ``iters`` stays per-arm, because that is what the corpus's
+    range of durations needs; the *width of the event interval* is what has to
+    match.
     """
     d = min(durations)
     need = _EVENT_INTERVAL_MS / (tax_budget * d)
@@ -688,15 +628,10 @@ def _williams(n: int) -> list[int]:
 def _order(names: list[str], r: int) -> list[str]:
     """A position- and adjacency-balanced order for round ``r``.
 
-    The old rule rotated by one position per round.  That balances *positions*
-    but it preserves *adjacency*: with three or more variants, B always ran
-    immediately after A, so whatever A left in the caches was a constant charged
-    to B and averaged out of nothing.  Measured on the adversarial case -- a
-    1 GiB cache-polluting arm plus two arms doing byte-identical work, 40
-    replications -- cyclic rotation reported the two identical arms **2.8%
-    apart** (sd 4.3%), while this rule reported them 0.2% apart and a uniformly
-    random order 0.7%.  2.8% is larger than several of the per-cell differences
-    this project publishes.
+    Rotating by one position per round balances *positions* but preserves
+    *adjacency*: with three or more variants B always runs immediately after A,
+    so whatever A leaves in the caches is a constant charged to B and averaged
+    out of nothing -- enough to separate two byte-identical arms.
 
     Rotating a Williams row every *second* round and reversing it on odd rounds
     gives, over ``2 * len(names)`` rounds, every variant in every position
@@ -717,40 +652,29 @@ def _order(names: list[str], r: int) -> list[str]:
 # Taking the launcher out of the timed region
 # ---------------------------------------------------------------------------
 
-#: Cost of one ``cudaGraphLaunch``, in ms per replay, measured on this device by
-#: fitting ``per_call(chunk) = kernel + cost / chunk`` to graphs of 1, 2, 4, 8,
-#: 16 and 32 calls at ``convT 1024->512 @ 8^3``:
-#:
-#: ===========================  ============
-#: arm                          fitted cost
-#: ===========================  ============
-#: ``convT`` fwd, Triton        3.9 us
-#: ``convT`` fwd, MIOpen        **12.8 us**
-#: ``convT`` bwd-data, Triton   4.4 us
-#: ``convT`` bwd-data, MIOpen   4.1 us
-#: ===========================  ============
-#:
-#: The constant below is the **worst** of those, not their mean, because the
+#: Cost of one ``cudaGraphLaunch``, in ms per replay, from fitting
+#: ``per_call(chunk) = kernel + cost / chunk`` over graphs of increasing
+#: ``chunk``.  It is the *worst* arm measured, not the mean, because the
 #: quantity that has to be bounded is the residual on whichever arm pays most --
 #: and because a per-arm estimate is exactly the mistake :func:`_common_group`
-#: exists to document: two byte-identical arms picked different instruments and
-#: read 4% apart.  It is a property of the launcher, not of the workload.
+#: exists to prevent.  It is a property of the launcher, not of the workload.
 _REPLAY_COST_MS = 0.0128
 
 #: Fraction of the *shortest* arm's per-call time the residual replay cost is
-#: allowed to reach.  1% because the smallest published per-cell differences are
-#: around 3% and the target precision is 2%.
+#: allowed to reach.  Set below both the smallest per-cell difference this
+#: corpus reports and the harness's target precision.
 _REPLAY_BUDGET = 0.01
 
-#: A graph holding this many calls is already 128 x 0.0128 us = 0.1 us per call,
-#: below the event instrument's own floor; more would only cost capture time.
+#: At this many calls the residual replay cost is already below the event
+#: instrument's own floor (:data:`_EVENT_INTERVAL_MS`); more would only cost
+#: capture time.
 _MAX_CHUNK = 128
 
-#: Above this per-call time no graph is used: the largest host launch cost
-#: measured on this node is 0.08 ms (the autograd engine's, on the MIOpen
-#: backward control), which at 40 ms per call is 0.2% of either arm -- smaller
-#: than the harness's own target precision, so the exclusion is not worth the
-#: capture.  Below it the host cost reaches 190% of the kernel and decides the
+#: Above this per-call time no graph is used: the largest host launch cost on
+#: this node (the autograd engine's, on the MIOpen backward control) is then a
+#: smaller fraction of either arm than the harness's own target precision, so
+#: eager timing is already launcher-exclusive and the capture is not worth its
+#: wall clock.  Below it the host cost can exceed the kernel and decide the
 #: answer.
 _GRAPH_MAX_MS = 40.0
 
@@ -762,8 +686,8 @@ class CaptureError(RuntimeError):
 
     Raised rather than swallowed: a caller that silently fell back to eager for
     *one* arm would be comparing a launcher-exclusive number against a
-    launcher-inclusive one, which at these sizes is worth up to 1.4x.  The
-    decision to fall back belongs to the comparison, not to an arm.
+    launcher-inclusive one.  The decision to fall back belongs to the
+    comparison, not to an arm.
     """
 
 
@@ -792,16 +716,12 @@ class on_capture_stream:  # noqa: N801 - a context manager, spelled like one
     :func:`torch.autograd.grad` over a forward graph that had to be built on the
     capture stream (see :func:`capture_stream`), and the autograd engine
     synchronizes when the node's recorded stream is not the caller's current
-    one.  Measured, ``convT`` backward at ``1024->512 @ 8^3``: the MIOpen arm
-    read **0.148 ms** when timed from the default stream and **0.113 ms** from
-    the stream its graph was built on -- a **35 us** cross-stream tax that the
-    Triton arm, which has no autograd graph, does not pay.  At those sizes that
-    alone is worth 1.3x, and it is per-arm.
+    one.  That cross-stream tax is per-arm -- the Triton arm has no autograd
+    graph and does not pay it -- and it decides the answer for a short kernel.
 
     So the stream is a property of the *comparison*, exactly like ``group`` and
     ``chunk``: one stream, entered once, for every arm and both launcher
-    policies.  Above ~0.3 ms the tax is under 1% and the two agree, which is why
-    it was invisible until the transposed cells.
+    policies.
     """
 
     def __enter__(self):
@@ -847,16 +767,13 @@ def capture(fn: Callable[[], object], chunk: int = 1, *, warmup: int = 3) -> Cap
     for the autograd reason given there.
 
     The warmup is not optional and it is not only PyTorch's lazy-init
-    requirement: with ``cudnn.benchmark`` on, MIOpen's find is **8.2 s** and
-    happens on the first call, and a find inside a capture would synchronize and
-    abort it.  Three calls are enough (measured: MIOpen settles by call ~4,
-    Triton by ~5, and the JIT compile is on call 1).
+    requirement: with ``cudnn.benchmark`` on MIOpen's find happens on the first
+    call, and a find inside a capture would synchronize and abort it.
 
     An *empty* graph is treated as a failure.  PyTorch only warns -- "The CUDA
     Graph is empty.  This usually means that the graph was attempted to be
     captured on wrong device or stream" -- and a caller that ignored the warning
-    would publish the cost of ``cudaGraphLaunch`` as a kernel time, which is the
-    fastest wrong answer available.
+    would publish the cost of ``cudaGraphLaunch`` as a kernel time.
     """
     if chunk < 1:
         raise ValueError(f"chunk must be >= 1, got {chunk}")
@@ -894,14 +811,14 @@ def common_chunk(
     budget: float = _REPLAY_BUDGET,
     max_chunk: int = _MAX_CHUNK,
 ) -> int:
-    """Calls per graph, for **every** arm of a comparison.
+    """Calls per graph, for every arm of a comparison.
 
     Same shape and same reasoning as :func:`_common_group`, one level up: a
     function of the shortest arm's measured duration alone, so that two arms are
-    never measured with two different rulers.  A graph replay costs 3.9-12.8 us
-    of device time whatever is inside it, which is 45% of a 0.028 ms kernel at
-    ``chunk = 1``; dividing it by ``chunk`` brings it under ``budget`` of the
-    arm it hurts most.
+    never measured with two different rulers.  A replay costs the same device
+    time whatever is inside it, so at ``chunk = 1`` it is a large part of a
+    short kernel; dividing it by ``chunk`` brings it under ``budget`` of the arm
+    it hurts most.
     """
     d = min(durations)
     if d <= 0:
@@ -917,10 +834,9 @@ def graph_is_worthwhile(
 ) -> bool:
     """Is the host launch cost big enough to be worth capturing away?
 
-    Above :data:`_GRAPH_MAX_MS` the measured worst-case host launch cost
-    (0.08 ms, the autograd engine's) is under 0.2% of either arm, so eager
-    timing is already launcher-exclusive to within a fifth of the target
-    precision and the capture would only cost wall clock.
+    Above :data:`_GRAPH_MAX_MS` the worst-case host launch cost is small against
+    the harness's target precision, so eager timing is already
+    launcher-exclusive and the capture would only cost wall clock.
     """
     return min(durations) <= max_ms
 
@@ -969,17 +885,15 @@ def interleaved(
     a neighbour process -- which inflates every arm of a round at once -- divides
     out of the comparison instead of deciding it.
 
-    **Online sizing.**  With ``iters`` and ``rounds`` left at ``None`` this
-    picks both from what it has already measured, per variant:
+    Online sizing.  With ``iters`` and ``rounds`` left at ``None`` this picks
+    both from what it has already measured, per variant:
 
-    * ``iters`` so a block lasts about ``block_ms``.  The corpus spans five
-      orders of magnitude -- 0.06 ms at the transposed sites, 45,241 ms at the
-      2 GiB cliff -- and a fixed ``iters=10, rounds=6`` means 60 calls either
-      way: microseconds for one cell and **45 minutes** for another.
+    * ``iters`` so a block lasts about ``block_ms``.  Per-call times in this
+      corpus span orders of magnitude, so a fixed ``iters`` and ``rounds`` is a
+      handful of microseconds for one cell and unaffordable for another.
     * ``group``, the number of calls behind one event interval, so the
-      instrument costs under ``tax_budget`` of the *shortest* arm -- **one width
-      for every arm**, never per-arm; see :func:`_common_group` for the ratio
-      that got biased by 4% when it was per-arm.
+      instrument costs under ``tax_budget`` of the *shortest* arm -- one width
+      for every arm, never per-arm; see :func:`_common_group`.
     * ``rounds``, growing until the 95% half-width on every reported quantity --
       each variant's median and each variant's paired ratio against the first --
       is within ``target_rel``, or until ``budget_s`` of wall clock is spent, or
@@ -991,15 +905,14 @@ def interleaved(
       completing a design it cannot afford.  ``Measurement.balanced`` then says
       the design did not close.
 
-    **Arms are never stopped individually.**  If one arm's interval tightens
-    first, it keeps running: dropping it would leave the other arm measured
-    against a different stretch of wall clock, which is precisely the sequential
+    Arms are never stopped individually.  If one arm's interval tightens first,
+    it keeps running: dropping it would leave the other arm measured against a
+    different stretch of wall clock, which is precisely the sequential
     comparison this function exists to avoid.  Stopping is a property of the
     block, not of an arm.
 
     Passing ``iters`` and/or ``rounds`` as integers pins them exactly, which is
-    what every existing caller does and what a deliberately reproducible capture
-    should keep doing.  ``warmup`` likewise.
+    what a deliberately reproducible capture should do.  ``warmup`` likewise.
     """
     names = list(variants)
     if not names:
@@ -1073,10 +986,9 @@ def interleaved(
         if fixed:
             continue
         elapsed = time.perf_counter() - t0
-        # The hard cap is checked every round, not only on a block boundary:
-        # a cell whose single round costs minutes must be able to stop without
-        # first completing a balanced design it cannot afford.  When it does,
-        # ``balanced`` says so.
+        # Checked every round, not only on a block boundary, so a cell whose
+        # single round costs minutes can stop without first completing a
+        # balanced design it cannot afford.  ``balanced`` then says so.
         if elapsed > hard_budget_s and r >= floor_rounds:
             stop = "budget"
             break

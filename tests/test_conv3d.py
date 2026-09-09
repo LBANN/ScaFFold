@@ -14,17 +14,16 @@
 
 """``FastConv3d``: the rung ladder, the sharding gate, and the numerics.
 
-The single most important test in this file is
-:func:`test_halo_plan_refuses_a_split_dim_whose_arithmetic_it_has_not_checked`.
-Every other property here fails loudly; that one fails silently, as a plausible
-wrong gradient at every shard boundary of a large run, because the halo DistConv
-adds below autograd is invisible to a module-level adapter and the halo this one
-adds instead is only right where the plan says it is.  The exchange itself
-needs real ranks and is exercised by a separate multi-rank harness.
+:func:`test_halo_plan_refuses_a_split_dim_whose_arithmetic_it_has_not_checked`
+is the test to trust most: every other property here fails loudly, but a
+wrong halo plan produces a plausible wrong gradient at every shard boundary,
+since the halo DistConv adds below autograd is invisible to a module-level
+adapter. The exchange itself needs real ranks and lives in a separate
+multi-rank harness.
 
-Tolerances come from ``triton_conv3d.reference``'s policy (an fp64 reference and
-a dtype/K-derived bound, or MIOpen's own error where that is looser).  Nothing
-here invents one.
+Tolerances come from ``triton_conv3d.reference``'s policy: an fp64 reference
+and a dtype/K-derived bound, or MIOpen's own error where that is looser.
+Nothing here invents one.
 """
 
 from __future__ import annotations
@@ -53,14 +52,14 @@ class _StubStrategy:
 
     A real ``distconv.ParallelStrategy`` calls ``dist.get_rank()`` and builds a
     device mesh, so it cannot describe a >1 shard count in a one-rank test
-    process at all -- ``ddp_ranks`` would be ``1 // 2 == 0``.  The gate reads
-    exactly ``num_shards``, ``shard_dim`` and ``shard_ind``, so a stub can pose
-    the sharded question that the environment otherwise cannot.
+    process at all. The gate reads exactly ``num_shards``, ``shard_dim`` and
+    ``shard_ind``, so a stub can pose the sharded question the real strategy
+    cannot.
 
-    ``shard_ind`` is here so that the *MIOpen* rung -- which takes a DCTensor
-    through DistConv's own dispatch -- still runs, which is what makes "the
-    sharded call went to the other rung" an assertion about routing rather than
-    about which stub attribute is missing.
+    ``shard_ind`` is here so the MIOpen rung -- which takes a DCTensor through
+    DistConv's own dispatch -- still runs, making "the sharded call went to
+    the other rung" an assertion about routing rather than about a missing
+    stub attribute.
     """
 
     def __init__(self, num_shards, shard_dim=(2, 3, 4)):
@@ -97,10 +96,10 @@ def _gpu_conv(cin=16, cout=32, dtype=torch.bfloat16, **kwargs):
     """The same, on GPU and in the layout ``worker.py`` puts the model in.
 
     ``dtype`` defaults to bf16 because outside an autocast region the operands
-    have to agree: an fp32 parameter against a bf16 activation is a call neither
-    rung serves.  The autocast tests pass fp32 on purpose -- that is the state
-    ``worker.py`` actually leaves the model in, and reproducing the dispatcher's
-    cast is what makes it work.
+    must agree: an fp32 parameter against a bf16 activation is a call neither
+    rung serves. The autocast tests pass fp32 on purpose, since that is the
+    state ``worker.py`` actually leaves the model in, and reproducing the
+    dispatcher's cast is the point.
     """
     conv = _seeded_conv(cin, cout, **kwargs).cuda().to(memory_format=_CHANNELS_LAST)
     return conv.to(dtype)
@@ -199,9 +198,8 @@ def test_halo_plan_exchanges_only_the_dims_that_are_actually_split():
 
     ScaFFold ships ``dc_shard_dims: [2, 3, 4]`` with only D ever divided, so
     DistConv's halo on H and W is two ``cat`` copies of a slab that is provably
-    zeros.  Dropping it is measured bitwise inert; this pins that the plan does
-    drop it, and that the split dim -- and only the split dim -- trades its
-    padding for a wider extent.
+    zeros. Dropping it is bitwise inert; this pins that the plan drops it, and
+    that only the split dim trades its padding for a wider extent.
     """
 
     class _Input:
@@ -257,7 +255,7 @@ def test_halo_plan_refuses_a_split_dim_whose_arithmetic_it_has_not_checked():
         conv_mod._halo_plan(ok, split, x, weight, (1, 1, 1), (1, 1, 1), (2, 1, 1))
         is None
     )
-    # ... but the same stride on an *unsplit* dim is nothing to do with the halo.
+    # ... but the same stride on an unsplit dim is nothing to do with the halo.
     assert (
         conv_mod._halo_plan(ok, split, x, weight, (1, 2, 1), (1, 1, 1), (1, 1, 1))
         is not None
@@ -278,17 +276,16 @@ def test_halo_plan_refuses_a_split_dim_whose_arithmetic_it_has_not_checked():
 def test_the_gate_asks_the_predicates_about_the_tensor_the_kernel_will_see():
     """Widened, but still checked from both ends.
 
-    Both halves matter.  A test that only checked the refusal would pass just as
-    well against a gate that refuses everything -- and the sharding check sits
-    behind the ``is_cuda`` test, so on CPU it is never even reached.  So the
-    same module and the same tensor are asked twice, differing only in
-    ``num_shards``.
+    A test that only checked the refusal would pass against a gate that
+    refuses everything, and the sharding check sits behind the ``is_cuda``
+    test, so on CPU it is never reached. The same module and tensor are asked
+    twice here, differing only in ``num_shards``.
 
-    The sharded answer is ``False`` here for one reason and one reason only:
-    this process has no process group to exchange over.  The plan is made, and
-    the predicates are asked about the halo'd extent -- ``8 -> 10`` on D -- at
-    the padding the exchange leaves behind.  The multi-rank half of this lives
-    in a separate harness that needs real ranks.
+    The sharded answer is ``False`` only because this process has no process
+    group to exchange over: the plan is still made, and the predicates are
+    asked about the halo'd extent -- ``8 -> 10`` on D -- at the padding the
+    exchange leaves behind. The multi-rank half needs real ranks and lives in
+    a separate harness.
     """
     conv = _gpu_conv()
     x = _gpu_input((1, 16, 8, 8, 8))
@@ -320,12 +317,12 @@ def test_the_gate_asks_the_predicates_about_the_tensor_the_kernel_will_see():
 def test_a_sharded_dctensor_forward_goes_to_miopen_without_a_process_group(monkeypatch):
     """End to end, not just the predicate: the rung must not fire.
 
-    Routing is asserted from both ends -- the Triton rung is not entered *and*
-    DistConv's halo exchange is, which is the path that supplies the neighbours'
+    Routing is asserted from both ends: the Triton rung is not entered, and
+    DistConv's halo exchange is -- the path that supplies the neighbours'
     voxels the Triton rung would otherwise have to supply itself.
     ``forward_halo_exchange`` is stubbed to the identity so the MIOpen rung
-    completes without a process group; it is the call count that is being
-    measured, not the values.
+    completes without a process group; the call count is what is checked, not
+    the values.
     """
     import distconv.distconv as dc
 
@@ -346,8 +343,8 @@ def test_a_sharded_dctensor_forward_goes_to_miopen_without_a_process_group(monke
         """What the real exchange does when nothing has to be received.
 
         Concatenating zero slabs is exactly ``forward_halo_exchange``'s
-        behaviour at one shard; spelling it out here lets the MIOpen rung run to
-        completion for a *sharded* strategy too, without a process group.
+        behaviour at one shard; spelling it out here lets the MIOpen rung run
+        to completion for a sharded strategy too, without a process group.
         """
         halo_calls.append(dim_index)
         if halo_size == 0:
@@ -375,20 +372,20 @@ def test_a_kernel_failure_after_the_halo_falls_back_without_exchanging_twice(
 
     The halo goes on the wire before the kernel compiles, so a ``TritonError``
     arrives with this rank's sends and receives already matched against its
-    peers'.  Re-running the whole call would take it to ``_miopen_forward`` and
-    therefore through ``distconv_forward``, which exchanges *again* -- one more
-    collective on this rank than on a peer whose kernel compiled, which hangs the
-    mesh or pairs this convolution's slabs with the next one's.  Raising instead
-    made a broken Triton install **fatal** at ``num_shards > 1`` while costing
-    only speed at 1.
+    peers'. Re-running the whole call would reach ``_miopen_forward`` and
+    therefore ``distconv_forward``, which exchanges again -- one more
+    collective on this rank than on a peer whose kernel compiled, which hangs
+    the mesh or pairs this convolution's slabs with the next one's. Raising
+    instead makes a broken Triton install fatal at ``num_shards > 1``, and
+    costs only speed at 1.
 
-    So the count is the assertion, not the absence of an exception: exactly one
-    exchange, the adapter's, and none of DistConv's.  Both are stubbed to the
-    "nothing to receive" form so a one-rank process can run a two-shard strategy;
-    it is which of them is *called* that is being measured.  And because
-    ``cat(zeros, x, zeros)`` at padding 0 is the same arithmetic as the module's
-    own padding on the unexchanged shard, the answer has an independent
-    reference: what ``nn.Conv3d`` computes on the original input.
+    The assertion is a count, not the absence of an exception: exactly one
+    exchange, the adapter's, and none of DistConv's. Both are stubbed to the
+    "nothing to receive" form so a one-rank process can run a two-shard
+    strategy; which of them is called is what is checked. Because
+    ``cat(zeros, x, zeros)`` at padding 0 is the same arithmetic as the
+    module's own padding on the unexchanged shard, the result has an
+    independent reference: what ``nn.Conv3d`` computes on the original input.
 
     The multi-rank half, with real slabs on a real mesh, needs real ranks and
     lives in a separate harness.
@@ -491,16 +488,17 @@ def test_cpu_input_never_reaches_the_triton_rung():
     ],
 )
 def test_the_block_list_is_empty_at_the_shapes_it_used_to_hold(kwargs, why):
-    """Each of these was kept on MIOpen until 2026-08-04; all three now route.
+    """None of these three shapes is on the block list; all three route to Triton.
 
-    Parametrized on the three retired rules rather than asserting
-    ``_policy_declines`` is empty, because what matters is the *routing* answer:
-    a rule could return ``False`` while some other clause of :func:`_use_triton`
-    still declined, and then the block would be gone in name only.
+    Parametrized on the retired rules rather than asserting
+    ``_policy_declines`` is empty, because what matters is the routing answer:
+    a rule could return ``False`` while some other clause of
+    :func:`_use_triton` still declined, and the block would be gone in name
+    only.
 
-    ``cout=512`` also covers the small-``M`` predicate's real defect -- it read
-    the forward GEMM's row count and then kept all three directions on MIOpen,
-    including a backward-data that wins 1.31-2.47x. See
+    ``cout=512`` also covers the small-``M`` predicate's defect: it read the
+    forward GEMM's row count and then kept all three directions on MIOpen,
+    including a backward-data direction that is faster on Triton. See
     :func:`~ScaFFold.unet.conv3d._policy_declines`.
     """
     conv = _gpu_conv(**kwargs)
@@ -512,10 +510,10 @@ def test_the_block_list_is_empty_at_the_shapes_it_used_to_hold(kwargs, why):
 def test_ladder_falls_back_on_a_shape_the_kernel_does_not_serve():
     """``stride=2``: the forward predicate accepts it, both backwards reject it.
 
-    This is the concrete witness for why all three directions are gated, not
-    just the forward: taking the rung here would build a graph node whose
-    backward ``triton_conv3d`` cannot answer, and by then MIOpen is no longer an
-    option for it.
+    The concrete witness for why all three directions are gated, not just the
+    forward: taking the rung here would build a graph node whose backward
+    ``triton_conv3d`` cannot answer, and by then MIOpen is no longer an option
+    for it.
     """
     conv = _gpu_conv(kernel_size=3, padding=1, stride=2)
     x = _gpu_input((1, 16, 8, 8, 8))
@@ -873,10 +871,10 @@ def test_bias_gradient_is_correct_even_though_the_head_is_blocklisted():
 def test_autocast_runs_the_kernel_at_the_dtype_aten_would_have_chosen():
     """The cast ATen does in the dispatcher, reproduced above it.
 
-    Without this the module's fp32 parameters and GroupNorm's fp32 output would
-    be handed straight to the kernel and the whole network's convolutions would
-    quietly run in fp32 -- a different computation from the benchmark's, and a
-    much slower one.
+    Without this the module's fp32 parameters and GroupNorm's fp32 output
+    would reach the kernel unchanged, and the whole network's convolutions
+    would quietly run in fp32 instead of bf16 -- a different, much slower
+    computation, with nothing raising to say so.
     """
     conv = _gpu_conv(16, 32, dtype=torch.float32)  # as worker.py builds them
     x = _gpu_input((1, 16, 8, 8, 8), dtype=torch.float32).requires_grad_(True)
@@ -936,10 +934,10 @@ def test_a_checkpointed_block_recomputes_on_the_same_rung():
     """``activation_checkpointing`` is a shipped config key.
 
     The recompute runs inside the backward pass and its saved tensors are
-    compared against the original forward's.  What this pins is that a module
-    stays on one rung across the two, which is what the ``proven`` flag exists
-    for: a flip is invisible to torch's metadata check and fails later, inside
-    DistConv, with a message about neither checkpointing nor the rung.
+    compared against the original forward's. This pins that a module stays on
+    one rung across the two -- what the ``proven`` flag exists for: a flip is
+    invisible to torch's metadata check and fails later, inside DistConv,
+    with a message about neither checkpointing nor the rung.
     """
     import torch.utils.checkpoint as cp
 
@@ -1085,11 +1083,11 @@ def test_backward_names_a_rung_flip_instead_of_dying_inside_distconv():
 def test_the_triton_rung_performs_no_halo_exchange_at_one_shard():
     """Not merely correct without the halo -- it must not pay for one either.
 
-    ``forward_halo_exchange`` has no ``num_shards == 1`` early-out, so today
-    every convolution concatenates two zero slabs onto each of the three
-    sharded dims: 54 calls and 3.797 ms/step of pure copying at
-    ``dc_num_shards=(1,1,1)``.  Taking the Triton rung removes all of them, and leaves the caller's ``_tensor``
-    un-narrowed and still channels-last for the consumers downstream of it.
+    ``forward_halo_exchange`` has no ``num_shards == 1`` early-out, so every
+    convolution otherwise concatenates two zero slabs onto each of the three
+    sharded dims for no reason. Taking the Triton rung removes all of them,
+    and leaves the caller's ``_tensor`` un-narrowed and still channels-last
+    for the consumers downstream of it.
     """
     import distconv
     import distconv.distconv as dc
@@ -1189,17 +1187,17 @@ _UPSAMPLER_SITES = [
 def test_the_transposed_block_list_is_empty_at_every_decoder_site():
     """No decoder site is blocked, in either ladder.
 
-    Both block-lists are empty as of 2026-08-04, so this asserts the routing
-    answer rather than the shape of a rule.  It is still worth a test: emptiness
-    is a claim about *measurements*, and a future entry in either function has to
-    re-establish it here.
+    Both block-lists are currently empty, so this asserts the routing answer
+    rather than the shape of a rule -- a future entry in either function has
+    to re-establish it here.
 
-    The reason the two functions stay separate survives the emptying, and is
-    recorded in :func:`~ScaFFold.unet.conv3d._transposed_policy_declines`: every
-    term the ordinary rule used reads a different quantity for this operator --
-    ``w_shape``'s channel axes are reversed, and ``M`` from ``_out_spatial`` is
-    the input volume over 8 at ``k == s == 2``.  The retired small-``M`` rule
-    answered ``True`` for ``up1`` on numbers that do not describe it.
+    The two functions stay separate because every term the ordinary rule used
+    reads a different quantity for this operator: ``w_shape``'s channel axes
+    are reversed, and ``M`` from ``_out_spatial`` is the input volume over 8
+    at ``k == s == 2``. See
+    :func:`~ScaFFold.unet.conv3d._transposed_policy_declines`. The retired
+    small-``M`` rule answered ``True`` for ``up1`` using numbers that do not
+    describe it.
     """
     for x_shape, w_shape in _UPSAMPLER_SITES:
         assert conv_mod._transposed_policy_declines(x_shape, w_shape) is False
@@ -1264,11 +1262,11 @@ def test_the_transposed_gate_answers_for_the_four_sites_and_refuses_the_rest():
 def test_the_transposed_gate_asked_is_the_one_that_covers_the_backward(monkeypatch):
     """``is_supported_transposed_all``, not the forward's gate alone.
 
-    The three transposed predicates accept the same problems today, so no shape
-    can tell them apart -- which is exactly why *which one is called* has to be
-    pinned directly.  A forward this package serves and a backward it cannot is
-    discovered inside ``backward()``, where MIOpen is no longer reachable, and
-    the ordinary convolution has a live witness for that (``stride > 1``).
+    The three transposed predicates accept the same problems today, so no
+    shape can tell them apart -- which is why which one is called has to be
+    pinned directly. A forward this package serves and a backward it cannot
+    is discovered inside ``backward()``, where MIOpen is no longer reachable,
+    and the ordinary convolution has a live witness for that (``stride > 1``).
     """
     conv = _gpu_convT(16, 8)
     x = _gpu_input((1, 16, 8, 8, 8))
@@ -1368,12 +1366,12 @@ def test_transposed_forward_and_gradients_match_nn_convtranspose3d(cin, cout, sp
 def test_autocast_runs_the_transposed_kernel_at_the_dtype_aten_would_have_chosen():
     """``conv_transpose3d`` carries the same ``lower_precision_fp`` policy.
 
-    Verified two ways here: that the operands reaching the node are bf16 when the
-    module's own parameters are fp32 (which is the state ``worker.py`` leaves the
-    model in), and that the stock op under the same region produces the same
-    dtype.  Without this the four upsamplers would quietly run in fp32 -- a
-    different computation from the benchmark's, several times slower, and
-    nothing failing.
+    Checked two ways: the operands reaching the node are bf16 even though the
+    module's own parameters are fp32 (the state ``worker.py`` leaves the model
+    in), and the stock op under the same autocast region produces the same
+    dtype. Without this the four upsamplers would quietly run in fp32 instead
+    of bf16 -- a different, much slower computation, with nothing raising to
+    say so.
     """
     conv = _gpu_convT(16, 8, dtype=torch.float32)  # as worker.py builds them
     x = _gpu_input((1, 16, 8, 8, 8), dtype=torch.float32).requires_grad_(True)
@@ -1430,7 +1428,7 @@ def test_a_checkpointed_upsampler_recomputes_on_the_same_rung():
 
     The hazard is wider here than for ``FastConv3d``: this ladder never adds a
     halo, so the tensor the Triton rung saves and the ``DCTensor`` the MIOpen
-    rung saves agree on shape, dtype and device at *every* shard count, and a
+    rung saves agree on shape, dtype and device at every shard count, and a
     flip would pass ``_default_meta_extractor``'s check silently.
     """
     import torch.utils.checkpoint as cp
@@ -1513,11 +1511,11 @@ def test_transposed_backward_falls_back_to_miopen_when_a_direction_fails(
         "bias": conv.bias.detach(),
         "grad_output": gy,
     }
-    # The incumbent's own error is the bar, and it has to be: MIOpen's
-    # transposed backward-weight exceeds the static bound at this shape (0.76
-    # against 0.64), which is the observation ``error_bound``'s docstring
-    # records.  What this direction is being asked is whether the fallback ran
-    # the right operator with the right operands, not whether MIOpen is accurate.
+    # The incumbent's own error is the bar because MIOpen's transposed
+    # backward-weight exceeds the static bound at this shape -- the case
+    # ``error_bound``'s docstring describes.  This direction only asks whether
+    # the fallback ran the right operator with the right operands, not
+    # whether MIOpen is accurate.
     for name, actual, incumbent in (
         ("bwd-data", fast_x.grad, plain_x.grad),
         ("bwd-weight", conv.weight.grad, plain.weight.grad),
@@ -1544,9 +1542,9 @@ def test_the_transposed_halo_plan_exchanges_nothing_and_refuses_what_it_cannot_r
     """The plan is "exchange nothing" -- at every shard count, or not at all.
 
     The first assertion is the one that matters at scale: ``num_shards > 1``
-    must produce a plan with an *empty* ``exchanges``, not merely a plan.  If it
-    silently produced one at 1 shard and ``None`` at 2, the four sites would go
-    back to MIOpen on every multi-GPU run and nothing would say so.
+    must produce a plan with an empty ``exchanges``, not merely a plan. If it
+    silently produced one at 1 shard and ``None`` at 2, the four sites would
+    go back to MIOpen on every multi-GPU run and nothing would say so.
     """
     x = torch.empty(1, 8, 8, 8, 8)
     weight = torch.empty(8, 4, 2, 2, 2)

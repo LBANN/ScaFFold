@@ -19,8 +19,8 @@ state dict as a stock ``nn.GroupNorm`` model (checkpoints stay interchangeable
 in both directions), the same numbers within reduction-order noise, and a
 fallback for every input the fast kernels cannot or should not take (CPU,
 unknown tensor subclasses, a broken Triton or Inductor install).  The ladder is
-Triton -> compiled -> eager, and a failure at any rung latches that rung off and
-drops to the next, never to the bottom.
+Triton -> compiled -> eager, and a failure at any rung latches that rung off
+and drops to the next, never to the bottom.
 
 DistConv's ``DCTensor`` is not in the rejection list: ``forward`` unwraps it to
 its local shard around both fast kernels, so the wrapped production path is
@@ -29,7 +29,7 @@ dispatch does -- dispatch runs below autograd, where a bare read is safe, while
 ``forward`` runs above it and must go through DistConv's
 ``_ToTensor``/``_FromTensor`` pair to keep the graph connected.
 
-The ReLU that used to follow every GroupNorm now lives inside it
+The ReLU that once followed every GroupNorm now lives inside it
 (``activation="relu"``), fused into the Triton store and applied explicitly on
 the other two paths.  ``DoubleConv`` keeps an ``nn.Identity`` in the vacated
 ``nn.Sequential`` slot, so the state dict does not move by one key -- which is
@@ -88,13 +88,13 @@ def _make_plain_unet(seed: int):
     """The pre-fusion build: stock ``nn.GroupNorm`` followed by ``nn.ReLU``.
 
     Built by *converting* a normal UNet rather than by patching the norm class
-    at construction time, because the fusion moved the ReLU into the norm: a
+    at construction time: since the fusion moved the ReLU into the norm, a
     class swap alone would leave ``DoubleConv``'s ``nn.Identity`` placeholders
-    in place and produce a model with no activations at all, which would make
-    every numeric comparison below vacuous.  Converting reproduces exactly the
-    module graph this branch replaced -- ``nn.GroupNorm`` where the fast norm
-    sits, an in-place ``nn.ReLU`` where the placeholder sits -- and consumes no
-    RNG (``nn.GroupNorm`` initializes to ones/zeros), so the parameters are
+    in place and produce a model with no activations at all, making every
+    numeric comparison below vacuous.  Converting reproduces the pre-fusion
+    module graph -- ``nn.GroupNorm`` where the fast norm sits, an in-place
+    ``nn.ReLU`` where the placeholder sits -- and consumes no RNG
+    (``nn.GroupNorm`` initializes to ones/zeros), so the parameters stay
     bit-identical to what ``_make_unet(seed)`` draws.
     """
     model = _make_unet(seed)
@@ -195,9 +195,9 @@ def test_unet_uses_fast_group_norm():
 def test_state_dict_bytes_identical_to_plain_groupnorm_model():
     """Not just the same keys: the serialized checkpoint must be byte identical.
 
-    ``test_state_dict_matches_plain_groupnorm_model`` compares names, shapes and
-    dtypes; this compares the actual bytes ``torch.save`` writes, which is the
-    thing that has to stay interchangeable.  It is the direct guard on the
+    ``test_state_dict_matches_plain_groupnorm_model`` compares names, shapes
+    and dtypes; this compares the actual bytes ``torch.save`` writes, which is
+    the thing that has to stay interchangeable.  It directly guards the
     ``nn.ReLU`` -> ``nn.Identity`` swap: ``nn.Sequential`` names its children by
     position, so *removing* the activation slot rather than holding it open
     would renumber ``3.weight`` and ``4.weight``/``4.bias`` and silently
@@ -348,8 +348,8 @@ def test_tensor_subclass_input_stays_eager():
 
     Dynamo cannot trace ``__torch_dispatch__`` wrappers, so the predicate must
     reject anything that is not exactly ``torch.Tensor`` before a compile is
-    attempted.  DistConv's ``DCTensor`` is handled separately -- ``forward``
-    unwraps it before consulting the predicate -- but any other wrapper has
+    attempted.  DistConv's ``DCTensor`` is handled separately (``forward``
+    unwraps it before consulting the predicate), but any other wrapper has
     unknown semantics and keeps the stock kernel.
     """
 
@@ -364,10 +364,11 @@ def test_tensor_subclass_input_stays_eager():
 def test_compile_failure_falls_back_to_eager(monkeypatch, caplog):
     """A broken compiler degrades to the stock kernel instead of killing the run.
 
-    Simulated by making the compiled callable raise the real thing Dynamo and
-    Inductor raise (``BackendCompilerFailed``/``Unsupported`` share the
-    ``TorchDynamoException`` root the ladder allowlists); the module must return
-    the eager result, warn once, and stop trying for the rest of the process.
+    Simulated by making the compiled callable raise what Dynamo and Inductor
+    actually raise (``BackendCompilerFailed``/``Unsupported`` share the
+    ``TorchDynamoException`` root the ladder allowlists); the module must
+    return the eager result, warn once, and stop trying for the rest of the
+    process.
     """
     import torch._dynamo.exc
 
@@ -395,10 +396,11 @@ def test_compile_failure_falls_back_to_eager(monkeypatch, caplog):
 def test_triton_failure_falls_back_to_the_compiled_kernel(monkeypatch, caplog):
     """A broken Triton install drops to *compiled*, not all the way to eager.
 
-    The distinction is worth 10x on the shapes that dominate the step, so the
-    ladder must have three rungs and not two.  Simulated by forcing the Triton
-    predicate on and making its kernel raise; the compiled stand-in must then be
-    the one that answers, exactly once, with the Triton path latched off.
+    Triton is far faster than the compiled path on the shapes that dominate
+    the step, so the ladder must have three rungs and not two.  Simulated by
+    forcing the Triton predicate on and making its kernel raise; the compiled
+    stand-in must then be the one that answers, exactly once, with the Triton
+    path latched off.
     """
     from ScaFFold.unet.triton_group_norm import TritonKernelError
 
@@ -441,13 +443,12 @@ def test_triton_failure_falls_back_to_the_compiled_kernel(monkeypatch, caplog):
 def test_checkpoint_recompute_stop_is_re_raised(monkeypatch, rung):
     """``_StopRecomputationError`` is control flow, not a kernel failure.
 
-    ``torch.utils.checkpoint``'s non-reentrant recompute stops itself by raising
-    it from a saved-tensor *pack hook*, i.e. from inside whichever op is saving
-    a tensor at that moment -- which, now that the ReLU is fused and nothing
-    follows GroupNorm in a ``DoubleConv``, is this module.  A blanket
-    ``except Exception`` would swallow it, latch the fast kernel off and drop the
-    whole model to eager mid-run.  (Observed exactly that on
-    ``test_gpu_activation_checkpointing_matches_eager`` before the re-raise.)
+    ``torch.utils.checkpoint``'s non-reentrant recompute stops itself by
+    raising it from a saved-tensor *pack hook* -- from inside whichever op is
+    saving a tensor at that moment, which, now that the ReLU is fused and
+    nothing follows GroupNorm in a ``DoubleConv``, is this module.  A blanket
+    ``except Exception`` would swallow it, latch the fast kernel off and drop
+    the whole model to eager mid-run.
     """
     import torch.utils.checkpoint as checkpoint_mod
 
@@ -701,18 +702,17 @@ def test_the_compiled_region_carries_its_own_recompile_limit(monkeypatch):
     """The global limit is thread-local, so the region must carry one too.
 
     ``torch._dynamo.config`` keeps user overrides in a ``ContextVar``
-    ("User overrides are thread-local", ``torch/utils/_config_module.py``), so
-    what :func:`_raise_recompile_limit` writes is invisible from every *other*
-    thread -- and one of those threads matters: ``torch.utils.checkpoint``'s
-    non-reentrant recompute runs inside the backward pass, i.e. on the autograd
-    engine's device worker thread.  On a ``DCTensor`` that recompute has to
-    compile (it reaches this module with ``__torch_function__`` subclass
-    handling disabled, which is part of Dynamo's ``GLOBAL_STATE`` guard, so it
-    misses every entry the forward built), and there the limit read the stock 8
-    however large the global had been set -- ``FailOnRecompileLimitHit``, run
-    over.  ``torch.compile``'s ``recompile_limit=`` is applied by Dynamo around
-    the compile itself, on whichever thread that compile happens on, which is
-    the only spelling that reaches the worker; this pins that we ask for it.
+    (``torch/utils/_config_module.py``), so what :func:`_raise_recompile_limit`
+    writes is invisible from every *other* thread -- and one of those threads
+    matters: ``torch.utils.checkpoint``'s non-reentrant recompute runs on the
+    autograd engine's device worker thread.  On a ``DCTensor`` that recompute
+    has to compile (it reaches this module with ``__torch_function__``
+    subclass handling disabled, part of Dynamo's ``GLOBAL_STATE`` guard, so it
+    misses every entry the forward built), and there the limit would still
+    read the stock 8 no matter how large the global was set.
+    ``torch.compile``'s ``recompile_limit=`` is instead applied by Dynamo
+    around the compile itself, on whichever thread that compile happens on --
+    the only spelling that reaches the worker, which is what this pins.
     """
     seen = {}
 
@@ -750,12 +750,12 @@ def test_a_recompile_limit_hit_is_a_kernel_failure_not_a_crash(monkeypatch, capl
     """``FailOnRecompileLimitHit`` has to land in the ladder, not in the run.
 
     It is what ``fullgraph=True`` raises when a frame needs more cache entries
-    than the recompile limit allows, and -- unlike every other Dynamo failure --
-    it derives straight from ``Exception`` rather than from
-    ``TorchDynamoException``, so an allowlist that names only the latter lets it
-    escape and kill the step (observed at ``5943389``).  It is raised while
-    compiling, before the callable has run or saved anything, so the eager
-    retry underneath it is safe.
+    than the recompile limit allows, and -- unlike every other Dynamo failure
+    -- it derives straight from ``Exception`` rather than from
+    ``TorchDynamoException``, so an allowlist that names only the latter would
+    let it escape and kill the step.  It is raised while compiling, before the
+    callable has run or saved anything, so the eager retry underneath it is
+    safe.
     """
     import torch._dynamo.exc
 
@@ -807,8 +807,8 @@ def dc_cpu(gloo_group_1rank):
 
 
 def _seeded_norm(channels=16):
-    """A FastGroupNorm with non-default affine params (the defaults are 1/0,
-    which would let a kernel that drops weight/bias slip through)."""
+    """A FastGroupNorm with non-default affine params (the defaults are ones
+    and zeros, which would let a kernel that drops weight/bias slip through)."""
     fast = FastGroupNorm(_GROUPS, channels)
     generator = torch.Generator().manual_seed(97)
     with torch.no_grad():
@@ -1018,9 +1018,9 @@ def test_gpu_dctensor_matches_eager_dctensor(dc_cuda, autocast, layout):
     """The compiled unwrap path matches today's eager wrapped path on GPU.
 
     This is the production configuration: worker.py wraps every activation in
-    a DCTensor (even at dc_num_shards=[1,1,1]), which used to force the eager
-    kernel.  Values and gradients must agree within reduction-order noise, the
-    output must still be a DCTensor, and the compile must actually engage.
+    a DCTensor, even at ``dc_num_shards=[1,1,1]``.  Values and gradients must
+    agree within reduction-order noise, the output must still be a DCTensor,
+    and the compile must actually engage.
 
     Both layouts are covered because production requests ``channels_last_3d``
     (worker.py) and, with ``PYTORCH_MIOPEN_SUGGEST_NHWC=1`` set as it is there,
@@ -1176,40 +1176,32 @@ def test_gpu_steady_state_does_not_recompile():
 #
 # Two tests below run the whole UNet twice, changing only which rung serves
 # GroupNorm, and ask whether the gradients agree.  *How* that is asked matters
-# more than it looks, and both tests used to ask it in a way that could only
-# pass by luck.
+# more than it looks.
 #
-# **Per-parameter relative L2 under bf16 autocast is not a bounded quantity for
-# this model.**  Against an fp64 reference, every arm -- eager, compiled and
-# Triton alike -- is 12.1-12.5% off on the bottleneck's parameters, whose
-# gradients are 170x smaller than the largest in the network.  The difference
-# between two arms is therefore the difference of two ~12% errors, and it is
-# small only when they happen to cancel.  Whether they cancel is settled
-# *outside the source tree*: two of this model's 33 convolution problems have
-# MIOpen algorithms whose benchmark times tie to within 11%, so which one wins
-# is frozen into the machine-local find database, and rewriting only those two
-# recorded times moves "compiled vs. eager" from 5.3e-3 to 5.4e-2 with nothing
-# else changed.  Three of the four algorithm combinations land at 5.3-6.7e-3
-# and the fourth at 5.4e-2 -- which is exactly the history of this file, an
-# assertion that was intermittent and then, once a cache went warm, failed
-# deterministically at a bit-identical value.
+# Per-parameter relative L2 under bf16 autocast is not a bounded quantity for
+# this model: against an fp64 reference, every arm -- eager, compiled and
+# Triton alike -- is far off on the bottleneck's parameters, whose gradients
+# are tiny relative to the largest in the network.  The difference between two
+# arms is therefore the difference of two large errors, small only when they
+# happen to cancel.  Whether they cancel is settled *outside the source tree*:
+# some of this model's convolution problems have MIOpen algorithms whose
+# benchmark times tie closely enough that which one wins is frozen into the
+# machine-local find database, and a different algorithm choice moves the
+# per-parameter figure by an order of magnitude with nothing else changed. It
+# is not a gate either: injecting a small relative error into the compiled
+# rung barely moves the per-parameter figure, because both are already
+# saturated by the bf16 floor.
 #
-# It is not a gate either: injecting a 1e-4 relative error into the compiled
-# rung moves the per-parameter figure only from 5.4e-2 to 1.1e-1, because both
-# are already saturated by the bf16 floor.
-#
-# So rung equivalence is asserted where it is measurable -- **without
-# autocast**, where the same comparison reads 1.3e-6 and that same injected
-# 1e-4 error reads 1.9e-4, a 154x separation -- while the bf16 autocast run,
-# which is the production combination and the one the checkpoint machinery has
-# to survive, is asserted on the *aggregate* gradient.  That is stable
-# (5.0e-3 against a 3.2e-3 run-to-run floor, across every algorithm combination
-# measured) and still catches a wrong eps (6.9e-2) or a wrong group count
-# (5.2e-1).
+# So rung equivalence is asserted where it is measurable -- *without
+# autocast*, where cross-rung agreement is tight and an injected error is
+# still clearly separable -- while the bf16 autocast run, which is the
+# production combination and the one the checkpoint machinery has to survive,
+# is asserted on the *aggregate* gradient.  That is stable against the model's
+# own run-to-run floor and still catches a wrong eps or a wrong group count.
 
-#: Cross-rung agreement without autocast.  Measured 1.3e-6 (compiled vs. eager)
-#: and 2.2e-6 (Triton vs. compiled); 1e-4 leaves ~50x headroom and still fails
-#: on a 1e-4 relative kernel error, which reads 1.9e-4 here.
+#: Cross-rung agreement without autocast: wide enough to clear normal
+#: reduction-order noise between rungs, tight enough to still fail on a
+#: genuine relative kernel error.
 _FP32_RUNG_TOLERANCE = 1e-4
 
 #: Aggregate agreement under bf16 autocast, and per-parameter agreement between
@@ -1248,14 +1240,14 @@ def test_gpu_activation_checkpointing_matches_eager():
     "Whole-network gradient comparisons" note above for why that distinction is
     the whole point here:
 
-    * checkpointed vs. non-checkpointed **on the same rung**, per parameter.
+    * checkpointed vs. non-checkpointed *on the same rung*, per parameter.
       This is the one the test is named for, and it is well posed because the
-      bf16 error is common-mode: it reads 3.9e-3, the model's own run-to-run
-      floor, under every convolution algorithm measured.
-    * compiled vs. eager under bf16 autocast, on the *aggregate* gradient
-      (5.0e-3 measured, against the same 3.2e-3 floor).
-    * compiled vs. eager **without autocast**, per parameter -- the sharp one,
-      1.3e-6 measured against a 1e-4 tolerance.
+      bf16 error is common-mode, sitting on the model's own run-to-run floor
+      under every convolution algorithm.
+    * compiled vs. eager under bf16 autocast, on the *aggregate* gradient,
+      against that same floor.
+    * compiled vs. eager *without autocast*, per parameter -- the sharp one,
+      held to ``_FP32_RUNG_TOLERANCE``.
     """
     device = torch.device("cuda")
     x = _make_input(seed=9).to(device).requires_grad_(True)
@@ -1297,13 +1289,12 @@ def test_gpu_the_recompile_limit_holds_on_a_worker_thread():
     ``torch._dynamo.config``'s user overrides live in a ``ContextVar``, so the
     limit :func:`_raise_recompile_limit` writes on the main thread is not the
     limit another thread reads -- and the compiles that matter happen on
-    another thread, because ``torch.utils.checkpoint``'s recompute runs inside
-    the backward pass, on the autograd engine's device worker.  This drives the
-    same shape of traffic directly: entries live on ``_group_norm``'s code
-    object and are shared between threads, so a worker that pushes the count
-    past 8 is exactly the situation the recompute creates.  Before the
-    per-region ``recompile_limit=``, the ninth compile raised
-    ``FailOnRecompileLimitHit`` here.
+    another thread, because ``torch.utils.checkpoint``'s recompute runs on the
+    autograd engine's device worker.  This drives the same shape of traffic
+    directly: entries live on ``_group_norm``'s code object and are shared
+    between threads, so a worker that pushes the count past 8 is exactly the
+    situation the recompute creates; without the per-region
+    ``recompile_limit=`` the ninth compile raises ``FailOnRecompileLimitHit``.
 
     ``torch._dynamo.reset()`` first because those entries also accumulate
     across the whole test session, which would otherwise decide the outcome.
@@ -1343,24 +1334,24 @@ def test_gpu_the_recompile_limit_holds_on_a_worker_thread():
 
 @pytest.mark.gpu
 def test_gpu_checkpointed_dctensor_recompute_keeps_the_compiled_rung(dc_cuda):
-    """The three-way combination that used to die: ckpt + compiled rung + DCTensor.
+    """The fatal three-way combination: checkpointing + compiled rung + DCTensor.
 
     ``activation_checkpointing: true`` with ``SCAFFOLD_GROUPNORM_TRITON=0`` on
-    DistConv activations is a supported configuration and it crashed: the
-    recompute reaches this module with ``__torch_function__`` subclass handling
+    DistConv activations is a supported configuration, but the recompute
+    reaches this module with ``__torch_function__`` subclass handling
     *disabled* (DistConv's backward runs below it), which is part of Dynamo's
-    ``GLOBAL_STATE`` guard, so it misses every cache entry the forward built and
-    compiles a second set beside them -- twice the shapes, past 8 -- on the
-    autograd worker thread, where the module's raised limit was invisible.  Each
-    pair of the three is fine on its own; all three together raised
-    ``FailOnRecompileLimitHit`` (at ``5943389``) or, once the ladder caught it
-    and dropped a *proven* module to eager mid-recompute, ``CheckpointError``.
+    ``GLOBAL_STATE`` guard, so it misses every cache entry the forward built
+    and compiles a second set beside them -- twice the shapes, past 8 -- on
+    the autograd worker thread, where the module's raised limit was invisible.
+    Each pair of the three is fine on its own; all three together raise
+    ``FailOnRecompileLimitHit`` or, once the ladder catches it and drops a
+    *proven* module to eager mid-recompute, ``CheckpointError``.
 
     Five norms is the smallest count that reproduces it: 5 forward entries plus
-    5 recompute entries is 10, and the ninth compile is the one that overflows.
-    The convolutions are what make the block's backward run below torch-function
-    (a bare unwrap does not), and the loss is taken on the ``DCTensor`` for the
-    same reason the trainer's is.
+    5 recompute entries is 10, one past the limit the compiled region raises.
+    The convolutions are what make the block's backward run below
+    torch-function (a bare unwrap does not), and the loss is taken on the
+    ``DCTensor`` for the same reason the trainer's is.
     """
     import threading
 
@@ -1586,9 +1577,9 @@ def test_gpu_unet_keeps_the_channels_last_chain(monkeypatch):
     """The whole point: GroupNorm stops breaking the layout chain in the model.
 
     Before this kernel, every one of the model's GroupNorms consumed
-    ``channels_last_3d`` and emitted contiguous, forcing the next convolution to
-    convert back -- 22 breaks per scale-8 forward.  A hook census asserts that
-    every ``FastGroupNorm`` invocation now takes NDHWC in *and* hands NDHWC out.
+    ``channels_last_3d`` and emitted contiguous, forcing every convolution
+    after it to convert back.  A hook census asserts that every
+    ``FastGroupNorm`` invocation now takes NDHWC in *and* hands NDHWC out.
 
     Needs ``PYTORCH_MIOPEN_SUGGEST_NHWC=1`` in the environment for the
     convolutions to emit channels-last at all; without it there is nothing to
@@ -1628,15 +1619,14 @@ def test_gpu_unet_triton_matches_the_compiled_build(monkeypatch):
 
     Asked twice, on the two quantities the "Whole-network gradient comparisons"
     note above establishes are bounded: the *aggregate* gradient under bf16
-    autocast (1.9e-3 measured, against a 3.2e-3 run-to-run floor) and the
-    per-parameter gradient **without** autocast, which is the sharp one --
-    2.2e-6 measured, and the same 1e-4 tolerance the compiled rung is held to.
-    Per-parameter under autocast, which this test used to assert, reads 1.5e-2
-    against its 5e-2 tolerance here for reasons that have nothing to do with
-    either kernel; see the note.
+    autocast, against the model's run-to-run floor, and the per-parameter
+    gradient *without* autocast -- the sharp one, held to the same
+    ``_FP32_RUNG_TOLERANCE`` the compiled rung is held to.  Per-parameter
+    *under* autocast is not asserted here; see the note for why that
+    comparison is unbounded regardless of either kernel.
 
-    Skips (rather than passing vacuously) when the convolutions are not emitting
-    channels-last, since the Triton kernel would then never engage.
+    Skips (rather than passing vacuously) when the convolutions are not
+    emitting channels-last, since the Triton kernel would then never engage.
     """
     device = torch.device("cuda")
     x = _make_input(seed=9).to(device).contiguous(memory_format=torch.channels_last_3d)

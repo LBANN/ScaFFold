@@ -3,26 +3,24 @@
 
 Three things are tested here that the other two directions do not have:
 
-* **the split-K decomposition**, which is not an optimization but the only way
-  this GEMM fills the device -- ``M = Cout`` is one or two tile rows.  Its
-  correctness lives in :func:`split_count` agreeing with what the kernel and the
-  reduction pass assume about each other, so the tests pin the arithmetic (every
-  voxel in exactly one split) as well as the answer;
-* **determinism**, tested the way the package's determinism claim is worded:
-  bitwise identical run to run *and process to process*, for the
-  same input, dtype, shape, device and tuning config.  There are three tests --
-  in-process repetition, three separate interpreters, and a negative control on
-  the atomic path -- because a determinism test that cannot fail is the most
-  comfortable kind to write and the least useful;
-* **the reuse that was checked and rejected.**
+* the split-K decomposition, the only way this GEMM fills the device --
+  ``M = Cout`` is one or two tile rows.  Correctness is :func:`split_count`
+  agreeing with what the kernel and the reduction pass assume about each other,
+  so the arithmetic (every voxel in exactly one split) is pinned as well as the
+  answer;
+* determinism as the package words it: bitwise identical run to run *and*
+  process to process, for one input, dtype, shape, device and tuning config.
+  Three tests cover it -- in-process repetition, separate interpreters, and a
+  negative control on the atomic path that must fail;
+* the reuse that was checked and rejected:
   :func:`test_the_forward_kernel_can_express_backward_weight` runs the algebraic
-  identity that would have made this file unnecessary, and passes; the reason it
-  is not used is a trip count, which the same test asserts.
+  identity that would have made this file unnecessary, and asserts the trip
+  count that rules it out.
 
-The bitwise standard has the same teeth as elsewhere in this suite and the same
-two guards against being vacuous: a shifted operand must fail the comparison, and
-the specific bug this module can uniquely have -- writing a tap to the wrong slot
-of the ``[Cout][tap][Cin]`` output -- is constructed and required to fail.
+The bitwise standard carries the two guards it does elsewhere in this suite: a
+shifted operand must fail the comparison, and the bug unique to this module --
+writing a tap to the wrong slot of the ``[Cout][tap][Cin]`` output -- is
+constructed and required to fail.
 """
 
 from __future__ import annotations
@@ -66,24 +64,20 @@ EDGE = [p for p in edge_cases() if not p.transposed]
 def _corpus_channel_pairs() -> list[ConvProblem]:
     """Every distinct ``(Cin, Cout, kernel)`` in the corpus, at a testable volume.
 
-    Same construction as ``test_bwd_data.py``, and it is needed for the same
-    reason with a different arithmetic: backward-weight reduces over the whole
-    *output volume*, so a sum of ``{-1,0,1}`` products at a real ScaFFold shape
-    runs to about ``sqrt(2.1e6) = 1450`` while bf16 holds integers only to 256.
-    Restating each pair at ``6x7x8`` keeps what the corpus is for -- the channel
-    widths, and with them ``EVEN_M``/``EVEN_N``, the tile selection and the
-    512-byte row strides -- and brings the reduction down to 336 terms, which
-    bf16 does hold.
+    Backward-weight reduces over the whole *output volume*, so at a real
+    ScaFFold shape a sum of ``{-1,0,1}`` products runs to about
+    ``sqrt(2.1e6) = 1450`` while bf16 holds integers only to 256.  Restating
+    each pair at ``6x7x8`` keeps what the corpus is for -- the channel widths,
+    and with them ``EVEN_M``/``EVEN_N``, the tile selection and the 512-byte row
+    strides -- and brings the reduction down to 336 terms, which bf16 does hold.
 
-    **All three paddings** are generated, because ScaFFold issues all three
-    (``shapes.py``'s module docstring): ``p=(1,1,1)`` is what the adapter hands
-    the kernel unsharded and the module's own statement everywhere,
-    ``p=(0,1,1)`` is what it hands the kernel at two or four shards, and
-    ``p=(0,0,0)`` is what upstream DistConv hands MIOpen.  They do not differ in
-    the *predicate* the kernel compiles the way backward-data's do -- this
-    direction reads X at ``o + t - p``, and ``PADDED`` is on for any non-zero
-    padding -- but they differ in the output extent and therefore in the
-    reduction length, the split count and whether ``BLOCK_K`` divides a row, and
+    All three paddings are generated, because ScaFFold issues all three (see
+    ``shapes.py``): ``p=(1,1,1)`` is what the adapter hands the kernel
+    unsharded, ``p=(0,1,1)`` what it hands the kernel at two or four shards, and
+    ``p=(0,0,0)`` what upstream DistConv hands MIOpen.  They compile the same
+    predicate -- this direction reads X at ``o + t - p``, and ``PADDED`` is on
+    for any non-zero padding -- but differ in the output extent and therefore in
+    the reduction length, the split count and whether ``BLOCK_K`` divides a row;
     the anisotropic one is the only case where the ``d`` half of the boundary
     predicate is dead while the ``h``/``w`` halves are live.
     """
@@ -179,14 +173,14 @@ def test_the_splits_partition_the_reduction_exactly_once():
 
 
 def test_the_grid_lands_on_whole_waves():
-    """The snap that the measured split-count curve turned out to be about.
+    """The split count rounds the grid to whole waves, and that is the property.
 
     Every program in this kernel does the same amount of work, so a grid of 4.5
-    waves runs five and idles through half the last one.  At
-    ``64 -> 64 @ 130x258x258`` that sawtooth is an 18% effect -- 596 splits is
-    16% more parallelism than 512 and 9% slower -- and it is easy to misread as
-    a statement about cache footprint.  So the property is pinned here rather
-    than left to the constant that happens to produce it.
+    waves runs five and idles through half the last one.  A sweep chose
+    ``_SPLIT_TARGET_WAVES`` and the sawtooth it removes is easy to misread as a
+    statement about cache footprint, so the property is pinned here rather than
+    left to the constant that happens to produce it;
+    ``triton_conv3d/bench/conv_bench.py`` reproduces the sweep.
     """
     for cout, cin, taps, k_total, out_w in (
         (64, 64, 27, 8_388_608, 256),
@@ -228,23 +222,15 @@ def test_the_split_count_is_a_pure_function_of_the_shape():
     assert split_count(cfg, 128, 256, 27, 4096, 16)[0] < first[0]
 
 
-#: The largest fp32 partial workspace any corpus problem asks for, in MiB, on
-#: the path :func:`conv3d_backward_weight` actually takes.  Quoted to anyone
-#: sizing a hoisted ``workspace=`` once and out of the step, so it is pinned by
-#: a test rather than recorded in a document: the previously published figure
-#: (111 MiB) was the maximum over the ten shapes of the determinism table
-#: measured on the *heuristic* config, and understated the real corpus maximum
-#: by 1.46x.  An integration that had sized from it would have taken a
-#: ``ValueError`` mid-run.
 def _every_form(problems):
     """Each non-transposed problem in all three of the forms ScaFFold issues.
 
-    Bounds like the workspace ceiling have to hold on the shape the *kernel*
-    is handed, and there are three of those: the module's own padded statement,
-    the adapter's (padded on every unsplit axis) and upstream DistConv's (halo'd
-    and unpadded).  Iterating only the last of them -- which this file did until
-    2026-08-04 -- bounds the one form production never issues.  Deduplicated on
-    the qualified label, since the three coincide wherever nothing is split.
+    Bounds like the workspace ceiling have to hold on the shape the *kernel* is
+    handed, and there are three of those: the module's own padded statement, the
+    adapter's (padded on every unsplit axis) and upstream DistConv's (halo'd and
+    unpadded).  Iterating only the last bounds the one form production never
+    issues.  Deduplicated on the qualified label, since the three coincide
+    wherever nothing is split.
     """
     seen: set[str] = set()
     for p in problems:
@@ -257,6 +243,12 @@ def _every_form(problems):
             yield q
 
 
+#: The largest fp32 partial workspace any corpus problem asks for, in MiB, on
+#: the path :func:`conv3d_backward_weight` actually takes.  Pinned by a test
+#: rather than recorded in a document because it is the number an integration
+#: sizes a hoisted ``workspace=`` from, once and out of the step; a figure taken
+#: from a subset of the shapes or from the heuristic config alone understates
+#: it, and an undersized workspace raises ``ValueError`` mid-run.
 _WORST_WORKSPACE_MIB = 216
 
 
@@ -269,14 +261,13 @@ def test_the_partial_workspace_is_bounded_across_the_whole_corpus():
     want many splits are the ones with a small ``Cout * taps * Cin`` -- but that
     is an observation about this corpus, not a theorem, so it is checked.
 
-    Two things this test used to get wrong, both of which made it unable to
-    fail:
+    Two traps for anyone editing this:
 
-    * it built its config with :func:`default_bwd_weight_config` while the
-      entry point uses :func:`bwd_weight_config`, which prefers the tuned table
-      and therefore a different ``BLOCK_M``/``BLOCK_NC``/``TAP_BLOCK``, a
-      different tile count and a different split count.  The two disagree by up
-      to 1.5x in practice, so the bound it certified was not the shipped one;
+    * the config has to come from :func:`bwd_weight_config`, which is what the
+      entry point uses.  :func:`default_bwd_weight_config` skips the tuned table
+      and so gives a different ``BLOCK_M``/``BLOCK_NC``/``TAP_BLOCK``, a
+      different tile count and a different split count -- a bound certified on
+      it is not the shipped one;
     * ``mib <= _WORKSPACE_BYTES`` is *trivially* true -- ``split_count``'s own
       ``ceiling`` is ``_WORKSPACE_BYTES // per_split``, so no config it returns
       can violate it.  The assertion that carries the weight is the pinned
@@ -288,11 +279,7 @@ def test_the_partial_workspace_is_bounded_across_the_whole_corpus():
         # Both, and the worst of the two: a caller who passes no ``config=``
         # gets the resolver's answer, and one who builds a config from
         # :func:`default_bwd_weight_config` gets the heuristic's, which at an
-        # untuned pair is what production launches.  Since 2026-08-05 the two
-        # agree on padded problems that they used to disagree on -- the
-        # ``TAP_BLOCK`` decline is gone -- so the worst of the pair is a smaller
-        # set than it was, and it is still the number to size an allocation
-        # from.
+        # untuned pair is what production launches.
         for cfg in (
             bwd_weight_config(
                 hp.cout,
@@ -334,13 +321,11 @@ def test_the_wave_snap_outranks_the_epilogue_bound_and_only_below_one_wave():
     :func:`split_count` clamps its target against three ceilings and *then*
     snaps to a whole number of waves, and the snap can push the result back
     above the epilogue bound.  That reads like an oversight and is not: the
-    alternative was implemented and raced, and it loses badly.  Re-applying the
-    epilogue bound after the snap takes ``128 -> 256 @ 34^3`` from 16 splits to
-    7 -- a 98-program grid on 228 CUs -- and the site from 0.2536 to 0.4563 ms
-    (**1.80x**); ``256 -> 512 @ 10x34x34`` goes 0.2731 -> 0.6553 ms.  Half an
-    idle device costs more than a doubled epilogue, and the shapes where the
-    snap overrides the bound are *exactly* the shapes with a sub-wave grid,
-    because that is the condition under which ``round`` rounds to zero.
+    alternative -- re-applying the epilogue bound after the snap -- was
+    implemented and raced, and it loses badly, because half an idle device costs
+    more than a doubled epilogue.  The shapes where the snap overrides the bound
+    are *exactly* the shapes with a sub-wave grid, because that is the condition
+    under which ``round`` rounds to zero.
 
     So what is pinned here is the ordering itself, in both directions:
 
@@ -348,12 +333,9 @@ def test_the_wave_snap_outranks_the_epilogue_bound_and_only_below_one_wave():
       nearest whole wave* -- at most half a wave of extra programs, or one
       whole wave where the bounded grid does not fill even that.  Anything
       beyond that would mean the bound had stopped constraining anything;
-    * the **workspace** ceiling is different in kind (a failed allocation at
-      step 400 is not a slow kernel) and is re-applied after the snap, so it is
-      never exceeded.
-
-    Both halves have failed at some point in this function's history, in
-    opposite directions.
+    * the workspace ceiling is different in kind (a failed allocation mid-run is
+      not a slow kernel) and is re-applied after the snap, so it is never
+      exceeded.
     """
 
     def bounds(cfg, cout, cin, taps, k_total):
@@ -446,11 +428,10 @@ def test_selected_config_is_legal_for_every_shape(problem: ConvProblem):
 def test_default_config_fits_in_lds_in_every_dtype(dtype):
     """fp32 operands are twice the bytes, and ``more_determinism`` runs in fp32.
 
-    M2 found exactly this hole in the *forward*'s shipped heuristic, where
-    ``128x128x128`` is 64 KiB in bf16 and 128 KiB in fp32 and the shipped
-    configuration raised ``OutOfResources``.  This direction's tiles are wider
-    still -- ``TAP_BLOCK`` multiplies ``BLOCK_N`` -- so the same trap is closer,
-    not further away.
+    The forward's shipped heuristic had exactly this hole: ``128x128x128`` is
+    64 KiB in bf16 and 128 KiB in fp32, so it raised ``OutOfResources``.  This
+    direction's tiles are wider still -- ``TAP_BLOCK`` multiplies ``BLOCK_N`` --
+    so the same trap is closer, not further away.
     """
     for cout in (6, 64, 128, 256, 512, 1024):
         for cin in (3, 64, 128, 256, 512, 1024):
@@ -525,8 +506,7 @@ def test_is_supported_declines_what_the_kernel_cannot_express():
     # and ScaFFold runs four GPUs per node: with peer access enabled a foreign
     # pointer does not fault, it reads another rank's activations and returns a
     # plausible wrong gradient.  ``gather_gemm.is_supported`` refuses the same
-    # thing; the two gates sit behind one rung ladder and a hole in either is a
-    # hole in the ladder.
+    # thing, and a hole in either gate is a hole in the fallback ladder.
     assert not is_supported_bwd_weight(x, ws, gy.cpu(), padding=1)
     assert not is_supported_bwd_weight(x.cpu(), ws, gy, padding=1)
     if torch.cuda.device_count() >= 2:
@@ -580,10 +560,10 @@ def test_unsupported_calls_raise_rather_than_return_garbage():
 def test_exact_operands_match_bitwise(problem: ConvProblem):
     """Bitwise against ``torch.autograd.grad`` in fp64, on the nasty shapes.
 
-    The synthetic corpus earns its place here differently than in the other two
-    directions: ``Cout=6`` and ``Cout=7`` land on the GEMM's *M*, which is the
-    axis this kernel has least of, and ``spatial_thin`` (2x31x3) gives an output
-    volume of 12 -- a reduction shorter than one ``BLOCK_K``.
+    The synthetic corpus bites differently here: ``Cout=6`` and ``Cout=7`` land
+    on the GEMM's *M*, which is the axis this kernel has least of, and
+    ``spatial_thin`` (2x31x3) gives an output volume of 12 -- a reduction
+    shorter than one ``BLOCK_K``.
     """
     ops = reference.make_inputs(problem, seed=3, exact=True)
     expected = reference.reference(problem, ops, "bwd-weight")
@@ -614,7 +594,7 @@ def test_the_bitwise_corpus_is_not_entirely_skipped():
 
     ``is_exactly_representable`` declining is correct behaviour, but if it
     declines for every parametrized case the suite reports a wall of passes and
-    tests nothing.  That is what the first version of ``test_bwd_data.py`` did.
+    tests nothing.
     """
     exact = sum(
         reference.is_exactly_representable(
@@ -640,9 +620,9 @@ def test_deep_corpus_shapes_match_bitwise_in_fp32(problem: ConvProblem):
 
     A reduction over a real ScaFFold output volume runs to about ``sqrt(K)`` in
     ``{-1,0,1}`` arithmetic -- 1450 at the 128^3 sites -- which bf16's 8-bit
-    mantissa provably cannot hold, as a property of the arithmetic and not of
-    the test.  fp32 has 24 bits, which covers it, and the addressing under test
-    is dtype-independent: what changes is the MFMA intrinsic and therefore the
+    mantissa cannot hold, as a property of the arithmetic and not of the test.
+    fp32 has 24 bits, which covers it, and the addressing under test is
+    dtype-independent: what changes is the MFMA intrinsic and therefore the
     legal ``BLOCK_K``, so this is also the only bitwise coverage the fp32 tile
     selection gets at real widths.
 
@@ -659,8 +639,7 @@ def test_deep_corpus_shapes_match_bitwise_in_fp32(problem: ConvProblem):
 
 #: Shapes that compile the ``PADDED and ROW_ALIGNED`` pair of constexprs.  Every
 #: other padded shape in this file has ``out_w < BLOCK_K``, so ``_row_aligned``
-#: is False at all of them and this combination had never been compiled by the
-#: suite at all.  See the test below for why that is worth fixing.
+#: is False there and nothing else in the suite reaches the combination.
 _PADDED_ROW_ALIGNED = [
     # ``IN_D = IN_H = 1`` under ``padding=1``: ``src_d`` is -1 at every voxel and
     # the three taps land at -1, 0 and +1, so both the low and the high ``d``/
@@ -669,8 +648,8 @@ _PADDED_ROW_ALIGNED = [
     ConvProblem("pad-rowaligned-thin", 16, 16, (1, 1, 16)),
     # The logical (non-halo'd) form of a real corpus site: ``256->128 k3 @
     # 64x128x128, padding=1`` has ``out_w = 128`` against ``BLOCK_K = 64``.  Same
-    # shape of predicate at a width the corpus actually produces; fp32 because
-    # a 2048-term reduction is past bf16's mantissa.
+    # predicate at a width the corpus produces; fp32 because a 2048-term
+    # reduction is past bf16's mantissa.
     ConvProblem("pad-rowaligned-corpus", 32, 32, (4, 4, 128), dtype="fp32"),
 ]
 
@@ -681,21 +660,17 @@ def test_the_padded_row_aligned_corner_is_compiled_and_correct(problem):
     """The one ``constexpr`` pair nothing else in this suite reaches.
 
     ``PADDED`` and ``ROW_ALIGNED`` are independent, and they interact.  In the
-    ``ROW_ALIGNED`` branch ``row``, ``od``, ``oh`` and ``idn`` collapse to
-    **rank-0 scalars** -- the whole point of that branch is that the unravel
-    becomes four SALU divisions -- so the padded branch's boundary predicate
+    ``ROW_ALIGNED`` branch ``row``, ``od``, ``oh`` and ``idn`` collapse to rank-0
+    scalars -- that branch exists so the unravel becomes four SALU divisions --
+    so the padded branch's boundary predicate
     ``src_d[:, None] + (kd*DD)[None, :]`` is a different expression there than
     in the general branch: broadcast from a scalar rather than from a
     ``BLOCK_K`` vector, and collapsed to one row of the mask instead of
     ``BLOCK_K`` of them.  It is the right predicate, because within a
-    row-aligned K-tile ``od`` and ``oh`` really are constant -- but "it is
-    correct" and "it is tested" are different claims, and a bug planted in the
-    ``d`` or ``h`` half of it passed the entire suite.
+    row-aligned K-tile ``od`` and ``oh`` really are constant, but a bug planted
+    in the ``d`` or ``h`` half of it passes everything else in the suite.
 
-    **This is a production branch, not a hypothetical one.**  It used to be
-    documented as reachable only by "a caller who bypasses DistConv", on the
-    premise that every ScaFFold convolution is issued halo'd and unpadded.  That
-    premise is false: the shipped adapter halos only the split axis, so
+    It is a production branch: the adapter halos only the split axis, so
     ``256->128 k3 @ 64x128x128`` arrives padded with ``out_w = 128`` against
     ``BLOCK_K = 64`` -- exactly this branch -- every step.
     """
@@ -720,11 +695,10 @@ def test_the_padded_row_aligned_corner_is_compiled_and_correct(problem):
     assert reference.compare(_run(problem, ops), expected.to(dtype)).bitwise
 
 
-#: The channel pairs whose tuned backward-weight row widens ``TAP_BLOCK``.
-#: Until 2026-08-05 these were exactly the rows *declined* on a padded problem,
-#: i.e. at every production ScaFFold site; the decline is gone and this set is
-#: now the rows that must survive the padding.  Resolved from the table rather
-#: than listed, so a retune moves this set instead of stranding it.
+#: The channel pairs whose tuned backward-weight row widens ``TAP_BLOCK``: the
+#: rows that have to survive the padding every production site carries.
+#: Resolved from the table rather than listed, so a retune moves this set
+#: instead of stranding it.
 def _tap_widened_pairs() -> list[tuple[ConvProblem, BwdWeightConfig]]:
     from triton_conv3d.reduce_gemm import (
         _TUNED_BWD_W,
@@ -747,29 +721,17 @@ _TAP_WIDENED = _tap_widened_pairs()
 
 
 def test_a_tuned_tap_block_row_survives_the_padding():
-    """The replacement for ``..._is_declined_when_padded``, and why it flipped.
+    """A tuned ``TAP_BLOCK > 1`` row must be what a *padded* problem resolves.
 
-    Until 2026-08-05 ``bwd_weight_config`` refused a tuned row with
-    ``TAP_BLOCK > 1`` whenever the convolution was padded, and
-    ``default_bwd_weight_config`` refused to widen ``TAP_BLOCK`` there at all.
-    Both clauses were written believing they could not fire -- "no real ScaFFold
-    convolution is padded, DistConv halos them all" -- and that was false:
-    ScaFFold's own adapter halos only the split axis, so every ``k > 1`` site
-    arrives padded and **eight sites over six channel pairs** took the decline
-    at every configuration.
+    A padded problem is the only kind ScaFFold issues: the adapter halos only
+    the split axis, so every ``k > 1`` site arrives padded.  A resolver that
+    answered differently under padding would mean the tuned table bought nothing
+    at any real site, and the tuned row is the faster of the two on the padded
+    production form of every affected cell --
+    ``triton_conv3d/bench/conv_bench.py`` reproduces the comparison.
 
-    The old test asserted the decline and asked whoever relaxed it to replace
-    the assertion with a measurement.  That is what happened.  Raced on the
-    padded production form of all 18 affected cells, the tuned row against the
-    config the decline produced, one interleaved block per cell with 95%
-    intervals: the tuned row wins **18 of 18**, geometric mean **1.946x**, range
-    1.137x-5.336x, worst cell 7.9505 ms declined against 1.4910 ms with the
-    row.  The heuristic's half was raced separately on the six pairs that reach
-    it and widening wins **6 of 6**, 1.263x-2.084x.
-
-    So this test now pins the opposite property, and it is the one that matters
-    for production: the tuned row must be what a *padded* problem resolves,
-    because a padded problem is the only kind ScaFFold issues.
+    :func:`test_the_heuristic_widens_tap_block_under_padding_too` pins the same
+    property for the pairs the table does not list.
     """
     assert _TAP_WIDENED, (
         "no tuned backward-weight row widens TAP_BLOCK any more; this test and "
@@ -798,12 +760,11 @@ def test_a_tuned_tap_block_row_survives_the_padding():
 def test_the_heuristic_widens_tap_block_under_padding_too():
     """The other half of the same predicate, pinned separately.
 
-    :func:`default_bwd_weight_config` used to pin ``TAP_BLOCK`` to 1 on a padded
-    problem.  It no longer does, and the two are now the same config: padding
-    changes the boundary predicate inside the kernel and nothing about the tile
-    the host picks.  Kept apart from the test above because this one governs
-    every channel pair the tuned table does *not* list, which is where a new
-    ScaFFold site lands.
+    :func:`default_bwd_weight_config` answers the same config padded or not:
+    padding changes the boundary predicate inside the kernel and nothing about
+    the tile the host picks.  Kept apart from the test above because this one
+    governs every channel pair the tuned table does *not* list, which is where a
+    new ScaFFold site lands.
     """
     for p, _row in _TAP_WIDENED:
         k_total = p.n * math.prod(p.out_spatial)
@@ -846,12 +807,8 @@ def test_the_heuristic_widens_tap_block_under_padding_too():
 def test_a_padded_tap_block_row_is_still_bitwise_correct(problem, cfg):
     """The gradient a widened row produces on a padded problem, bitwise.
 
-    Written while the row was still *declined* on a padded problem, to establish
-    that what the decline protected was a performance argument and not a
-    correctness one.  Since 2026-08-05 the decline is gone and this is no longer
-    a hypothetical: it is the gradient every ``k = 3`` ScaFFold site computes,
-    so a failure here is a wrong weight gradient in production rather than a
-    reason not to relax a clause.
+    This is the gradient every ``k = 3`` ScaFFold site computes, so a failure
+    here is a wrong weight gradient in production.
     """
     assert cfg.TAP_BLOCK > 1 and any(problem.padding)
     ops = reference.make_inputs(problem, seed=1234, exact=True)
@@ -866,21 +823,18 @@ def test_a_padded_tap_block_row_is_still_bitwise_correct(problem, cfg):
 
 
 #: The triple ``PADDED and ROW_ALIGNED and TAP_BLOCK > 1``, and -- in the last
-#: entry -- the *quintuple* production actually launches.  ``_PADDED_ROW_
-#: ALIGNED`` above reaches the first two but not the third, so until 2026-08-05
-#: the combination was compiled nowhere; it is now compiled at every ``k = 3``
-#: site of every configuration.  ``out_w`` is chosen equal to ``BLOCK_K`` so a
-#: K-tile is exactly one output row.
+#: two entries -- the *quintuple* production launches.  ``_PADDED_ROW_ALIGNED``
+#: above reaches the first two but not the third, so nothing else in the suite
+#: compiles the combination, which runs at every ``k = 3`` site.  ``out_w`` is
+#: chosen equal to ``BLOCK_K`` so a K-tile is exactly one output row.
 #:
 #: ``block_nc`` is carried per case because the stem needs it.  ``3 -> 64``
 #: resolves ``64x64x64/tb16``, i.e. ``BLOCK_NC = 4`` against ``Cin = 3``, so it
 #: adds two raggednesses to the triple -- a partial channel group *and* a
 #: partial tap group (27 taps in blocks of 16) -- inside the ``ROW_ALIGNED``
 #: branch where ``src_d``/``src_h`` collapse to scalars.  Nothing else in the
-#: suite compiles that: the three cases above hold ``Cin = BLOCK_NC = 32``, and
-#: the ragged-``Cin`` tests elsewhere are not row-aligned.  It is also the
-#: largest single win in the round (5.3x), which is a poor thing to have
-#: untested.
+#: suite compiles that: the other cases hold ``Cin = BLOCK_NC = 32``, and the
+#: ragged-``Cin`` tests elsewhere are not row-aligned.
 _PADDED_ROW_ALIGNED_TAPS = [
     (ConvProblem("triple-tb8", 32, 32, (2, 3, 16)), 8, 16, 32),
     (ConvProblem("triple-tb2", 32, 32, (2, 2, 64), dtype="fp32"), 2, 64, 32),
@@ -916,16 +870,16 @@ def test_the_padded_row_aligned_tap_widened_corner_is_correct(
     ``PADDED`` selects a two-dimensional boundary predicate; ``ROW_ALIGNED``
     collapses ``od``/``oh``/``idn`` to rank-0 scalars; ``TAP_BLOCK > 1`` makes
     the tap vary down the *columns*.  Together the predicate is a scalar
-    broadcast against a per-column tap shift, and since 2026-08-05 it is the
-    shape production launches at every ``k = 3`` site with a widened row -- see
-    :func:`test_a_tuned_tap_block_row_survives_the_padding`.  It was written
-    while the combination was still unreachable, which is why it forces the
-    constexpr triple by hand rather than going through the resolver.
+    broadcast against a per-column tap shift, which is what production launches
+    at every ``k = 3`` site with a widened row -- see
+    :func:`test_a_tuned_tap_block_row_survives_the_padding`.  The triple is
+    forced by hand rather than resolved, so a retune cannot quietly stop the
+    combination being compiled.
 
-    The last two cases add the stem's two raggednesses on top, which is the
-    combination the shipped ``3 -> 64`` row launches and which nothing else
-    reaches; the assertions below say which case is which so a failure names the
-    axis rather than the tile.
+    The last two cases add the stem's two raggednesses on top, the combination
+    the shipped ``3 -> 64`` row launches and nothing else reaches; the
+    assertions below say which case is which so a failure names the axis rather
+    than the tile.
     """
     cfg = BwdWeightConfig(
         BLOCK_M=32,
@@ -982,10 +936,9 @@ def test_a_permuted_tap_axis_is_detected():
     The kernel's N axis is ``(tap, Cin)`` and its output offset is
     ``co*taps*Cin + tap*Cin + ci``.  Getting the tap ordering wrong -- reversing
     it, or transposing (kd,kh,kw) -- produces a correctly shaped, correctly
-    scaled, entirely plausible weight gradient, and would pass every tolerance
-    test one could write.  At ``k=3`` with a symmetric volume nothing else in
-    this file would catch it, so the wrong answer is constructed and required to
-    differ.
+    scaled weight gradient that passes any tolerance test, and at ``k=3`` with a
+    symmetric volume nothing else in this file catches it.  So the wrong answer
+    is constructed and required to differ.
     """
     problem = ConvProblem("taps", 16, 16, (6, 7, 8))
     ops = reference.make_inputs(problem, seed=13, exact=True)
@@ -1058,7 +1011,7 @@ def test_the_atomic_path_agrees_with_the_deterministic_one():
 
 @requires_gpu
 def test_the_forward_kernel_can_express_backward_weight():
-    """The reuse M2 got for free, checked here and then rejected on a trip count.
+    """The identity that would make this file unnecessary, and its trip count.
 
     Swapping the batch and channel axes of both activations turns
     backward-weight into a forward convolution whose kernel extent is the
@@ -1066,12 +1019,11 @@ def test_the_forward_kernel_can_express_backward_weight():
     computes it, which is what this half of the test shows.
 
     The other half is why ``reduce_gemm.py`` exists anyway.  At config B's
-    ``dec3`` site that convolution has 8.4 million taps and a channel count of
-    ``N = 1``, so the forward's reduction loop -- ``taps * ceil(Cin/BLOCK_K)``
-    iterations, each carrying a six-compare boundary predicate -- runs 8.4
-    million times with 15 of every 16 ``BLOCK_K`` lanes masked off, and there is
-    no split-K anywhere in it.  Both numbers are asserted rather than described,
-    because "too slow" is the kind of claim that rots.
+    ``dec3`` site that convolution has 8.4 million taps and ``N = 1``, so the
+    forward's reduction loop -- ``taps * ceil(Cin/BLOCK_K)`` iterations, each
+    carrying a six-compare boundary predicate -- runs 8.4 million times with 15
+    of every 16 ``BLOCK_K`` lanes masked off, and has no split-K.  Both numbers
+    are asserted rather than described.
     """
     problem = ConvProblem("reuse", 4, 5, (4, 5, 6), padding=(0, 0, 0))
     ops = reference.make_inputs(problem, seed=29, exact=True)
@@ -1127,13 +1079,11 @@ def test_no_worse_than_miopen(problem: ConvProblem):
 def test_split_k_is_more_accurate_than_miopen_at_a_long_reduction():
     """A claim worth making in the other direction, for once.
 
-    Splitting a 32k-term fp32 reduction into fixed chunks and summing the
-    partials is not just reproducible, it is *more accurate* than one long
-    accumulation -- the error of a sum of ``K`` terms grows like ``sqrt(K)`` and
-    a two-level sum trades that for ``sqrt(K/S) + sqrt(S)``.  Measured here so
-    that "deterministic" is not read as "at some cost in accuracy": Triton's
-    error lands at the bf16 rounding limit of the output, and MIOpen's is
-    several times larger.
+    Splitting a long fp32 reduction into fixed chunks and summing the partials
+    is not just reproducible, it is *more accurate* than one long accumulation
+    -- the error of a sum of ``K`` terms grows like ``sqrt(K)`` and a two-level
+    sum trades that for ``sqrt(K/S) + sqrt(S)``.  Pinned so that
+    "deterministic" is not read as "at some cost in accuracy".
     """
     problem = ConvProblem("acc", 64, 64, (34, 34, 34), padding=(0, 0, 0))
     ops = reference.make_inputs(problem, seed=31)
@@ -1219,8 +1169,8 @@ def test_repeated_calls_are_bitwise_reproducible_in_process():
         assert torch.equal(first, _run(problem, ops))
 
 
-#: The ``k=1`` segmentation head, at a volume that splits ~800 ways, in **fp32**.
-#: The dtype is the entire point -- see the negative-control test below.
+#: The ``k=1`` segmentation head, at a volume that splits many ways, in fp32.
+#: The dtype is the point -- see the negative-control test below.
 _DET_K1 = ConvProblem(
     "determinism-k1", 64, 6, (64, 64, 64), (1, 1, 1), padding=(0, 0, 0), dtype="fp32"
 )
@@ -1235,26 +1185,17 @@ def test_the_atomic_path_is_not_bitwise_reproducible(problem: ConvProblem):
     reproducible for some unrelated reason -- a grid too small to race, say --
     and the claim would be about the shape rather than about the mechanism.
     Float addition is not associative and ``tl.atomic_add`` fixes no order, so
-    at 100-odd racing splits a repeat that agrees bitwise every time would mean
-    the atomic path is not doing what it says.
+    at a hundred-odd racing splits a repeat that agrees bitwise every time would
+    mean the atomic path is not doing what it says.
 
-    **The second cell is the interesting one, and it is the reason this test is
-    parametrized at all.**  The ``k=1`` head at ``64 -> 6 @ 128^3`` was recorded
-    elsewhere in this project as a shape where the atomic control "reproduced by
-    scheduling accident".  That is not the mechanism.  The atomic accumulator is
-    fp32 and the *result* is bf16, so a reordering that perturbs the sum at the
-    fp32 ulp is simply invisible after the cast -- measured, the perturbation
-    there is about 300x below one bf16 ulp of the output.  The splits are racing
-    the whole time; the race is under the resolution of the dtype it is being
-    observed in.  Run the identical shape in fp32 and the control fires every
-    single time (15/15, ~400 ulps of the fp32 output).
-
-    That distinction matters because it says what the control *can* certify: it
-    is informative wherever the reordering is resolvable in the output dtype,
-    and it certifies nothing on a short-``Cout`` bf16 shape -- a change that
-    made the deterministic path non-deterministic at the ``k=1`` head would be
-    invisible in a bf16 cell.  So the ``k=1`` head is covered here in the dtype
-    where the control has teeth.
+    The dtype is why this is parametrized.  The atomic accumulator is fp32 and
+    the *result* of a bf16 problem is bf16, so a reordering that perturbs the
+    sum at the fp32 ulp is invisible after the cast: the splits race the whole
+    time, but the race is under the resolution of the dtype it is observed in.
+    So the control certifies nothing on a short-``Cout`` bf16 shape -- a change
+    that made the deterministic path non-deterministic at the ``k=1`` head would
+    not show there -- and the ``k=1`` head is covered here in fp32, where the
+    reordering is resolvable in the output.
 
     If this ever goes flaky it is worth reading as a result rather than as a
     flake: it would mean the splits stopped racing.
@@ -1360,14 +1301,13 @@ def test_an_out_the_kernel_would_overrun_is_refused():
     """The ``Cout`` extent is invisible to a stride check, and it is the extent.
 
     ``[Cout][kd][kh][kw][Cin]`` strides are
-    ``(taps*Cin, 1, kh*kw*Cin, kw*Cin, Cin)`` -- **not one of them mentions
-    Cout**.  So a gradient allocated for ``Cout=8`` is stride-identical to one
+    ``(taps*Cin, 1, kh*kw*Cin, kw*Cin, Cin)`` -- not one of them mentions
+    ``Cout``.  So a gradient allocated for ``Cout=8`` is stride-identical to one
     allocated for ``Cout=64`` with the same ``Cin`` and kernel, and the
     reduction pass takes its element count from ``weight_shape`` rather than
-    from ``gw``: passing the small one used to be accepted and wrote 55 296
-    elements into a 6 912-element allocation.  No fault and no exception -- the
-    write lands in whatever the caching allocator has next, and some other live
-    tensor is wrong later.
+    from ``gw``: an unchecked small buffer is written eight times past its end,
+    with no fault and no exception -- the write lands in whatever the caching
+    allocator has next, and some other live tensor is wrong later.
 
     The other three clauses are here for the same reason they are in the
     function: a foreign device is a pointer this kernel will happily
@@ -1385,8 +1325,8 @@ def test_an_out_the_kernel_would_overrun_is_refused():
 
     right = grad_weight_empty(64, 32, k, dtype=torch.bfloat16, device="cuda")
     small = grad_weight_empty(8, 32, k, dtype=torch.bfloat16, device="cuda")
-    # The trap, stated: the guard that used to be here could not tell these two
-    # apart, because the only thing that differs is an extent.
+    # The trap: a stride check cannot tell these two apart, because the only
+    # thing that differs is an extent.
     assert small.stride() == right.stride()
     assert small.numel() * 8 == right.numel()
 
@@ -1412,10 +1352,9 @@ def test_the_gradient_buffer_is_allocated_in_the_layout_it_is_used_in():
 
     ``torch.empty(shape).contiguous(memory_format=channels_last_3d)`` allocates
     NCDHW and then runs a permuting device copy to reach the layout it was
-    always going to be asked for.  The contents are undefined either way, so
-    the copy transports nothing -- it is pure waste on a buffer this direction
-    allocates once per parameter per step, and the identical defect in the
-    forward measured 235x the cost of the one-shot allocation.
+    always going to be asked for.  The contents are undefined either way, so the
+    copy transports nothing -- pure waste on a buffer this direction allocates
+    once per parameter per step.
     """
     from torch.utils._python_dispatch import TorchDispatchMode
 
@@ -1466,10 +1405,9 @@ def test_hoisted_workspace_and_out_are_equivalent():
     assert torch.equal(inline, hoisted)
 
     # An undersized workspace has to say *how big* it needed to be.  A hoisted
-    # workspace is sized once, out of the step, from a number someone read
-    # somewhere -- and the number that was published for this corpus was
-    # understated by 1.46x, so the first thing that caller sees is this
-    # exception at step 1 with no way to compute the right size from it.
+    # workspace is sized once, out of the step, from a number read elsewhere; if
+    # that number is short, this exception is the whole of what the caller gets,
+    # so it has to carry the size to allocate.
     need = workspace_elements(splits, problem.cout, problem.cin, problem.kernel)
     with pytest.raises(ValueError, match=rf"at least {need} float32 elements"):
         _run(problem, ops, workspace=ws[:8])

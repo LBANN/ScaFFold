@@ -14,330 +14,182 @@
 
 """Channels-last-native Triton GroupNorm (NDHWC in, NDHWC out).
 
-Why this exists
-===============
-With ``PYTORCH_MIOPEN_SUGGEST_NHWC=1`` -- which every production ScaFFold run
-sets -- every convolution in the UNet emits ``channels_last_3d`` activations,
-but *every* stock GroupNorm variant (eager or Inductor-compiled) consumes them
-through the *logical* NCDHW iteration order, which over a channels-last tensor
-is a strided gather, and then emits a **contiguous** tensor.  Measured on one
-MI300A at scale 8 that costs 6.4x on GroupNorm itself (443 ms/step of GN
-fwd+bwd against 69 ms/step here) *and* breaks the channels-last chain 22 times
-per forward, forcing the following convolution to convert back.
+With ``PYTORCH_MIOPEN_SUGGEST_NHWC=1``, which every production ScaFFold run
+sets, every convolution in the UNet emits ``channels_last_3d`` activations, but
+every stock GroupNorm (eager or Inductor-compiled) iterates them in logical
+NCDHW order -- a strided gather over channels-last memory -- and returns a
+contiguous tensor, so the next convolution has to convert back.  The kernels
+here read and write channels-last directly.
 
-A channels-last-3d contiguous ``(N, C, D, H, W)`` tensor is *physically* a dense
-``(N, S, C)`` array with ``S = D*H*W``; group ``g`` owns a contiguous run of
-``C/G`` channels *inside every voxel*.  The kernels below therefore let **one
-program handle all groups at once** for a chunk of voxels: they read a dense
-``(BLOCK_S, C)`` run, reshape the inner axis to ``(G, C/G)``, and get perfectly
-coalesced loads and stores with the group axis costing nothing.  Measured at
-95-98% of this device's streaming roofline at the two largest UNet shapes.
-
-Measured on one MI300A (228 CUs), fp32, ``num_groups=8``, median of 20, the six
-scale-8 UNet GroupNorm shapes, fwd / fwd+bwd in ms::
-
-    shape             this      compiled-CL   compiled-CONT   eager-CL fwd
-    [1,64,256^3]    4.23/11.39   19.51/77.01    4.77/11.85      151.2
-    [1,128,128^3]   1.15/ 3.00    7.23/24.64    1.22/ 3.07       36.5
-    [1,256,64^3]    0.35/ 0.97    2.27/ 7.42    0.34/ 0.84        9.1
-    [1,512,32^3]    0.14/ 0.57    0.19/ 1.03    0.11/ 0.33        1.7
-    [1,1024,16^3]   0.11/ 0.57    0.10/ 0.39    0.07/ 0.33        0.4
-    [1,2048,8^3]    0.11/ 0.57    0.08/ 0.40    0.07/ 0.33        0.1
-
-Over the 22 scale-8 call sites that is **442.8 -> 67.1 ms/step** of GroupNorm
-fwd+bwd against today's production path (compiled GroupNorm on channels-last
-input), i.e. **376 ms/step recovered**, and a dead heat with compiled GroupNorm
-on *contiguous* input (66.4 ms/step) while additionally not breaking the
-layout chain.  The three smallest shapes lose on host dispatch, not on GPU
-work -- see :func:`select_strategy`.
-
-The ``this`` column and the rollup were re-measured after the launch folding
-below (2+2 kernels instead of 3+4, retuned jointly); the same measurement of
-the unfused chain in the same process gives 4.26/11.59, 1.19/3.21, 0.35/1.01,
-0.14/0.63, 0.13/0.63, 0.13/0.62 and a 69.5 ms/step rollup, i.e. **-3.4% over
-the 22 sites** and -1.7% to -9.5% per shape.  The other three columns are from
-the earlier sweep and are unchanged.
+A channels-last-3d contiguous ``(N, C, D, H, W)`` tensor is physically a dense
+``(N, S, C)`` array with ``S = D*H*W``, and group ``g`` owns a contiguous run
+of ``C/G`` channels inside every voxel.  One program therefore serves all
+groups at once for a chunk of voxels: it reads a dense ``(BLOCK_S, C)`` run,
+reshapes the inner axis to ``(G, C/G)``, and gets coalesced loads and stores
+with the group axis costing nothing.
 
 Public API
 ==========
 ``triton_group_norm(input, num_groups, weight=None, bias=None, eps=1e-5,
 activation=None)``
     Drop-in for ``F.group_norm`` (plus an optionally fused ReLU) with
-    first-order autograd support.  Accepts *anything* ``F.group_norm`` accepts;
-    inputs the Triton kernel cannot serve fall back to ``F.group_norm``
-    internally (see "Layouts" below).
+    first-order autograd.  Accepts anything ``F.group_norm`` accepts; inputs
+    the Triton kernel cannot serve fall back to ``F.group_norm`` internally.
 
 ``is_supported(input, num_groups, weight=None, bias=None, activation=None)``
     Cheap, side-effect-free predicate: ``True`` exactly when the native Triton
-    kernel will run.  Callers that already have a good fallback (e.g. a
-    ``torch.compile``d GroupNorm) should test this and route rejects
-    themselves; ``triton_group_norm``'s own fallback is plain eager
-    ``F.group_norm``.
+    kernel will run.  Callers with a better fallback than eager -- a
+    ``torch.compile``d GroupNorm, say -- should test it and route the rejects
+    themselves.
 
 Contract
 ========
 For every input ``is_supported`` accepts, the result matches ``F.group_norm``
 to within fp32 reduction-order noise, with:
 
-* **dtype** -- output dtype is exactly ``F.group_norm``'s.  Verified
-  empirically on this build (torch 2.13.0+rocm7.2): without autocast the output
-  dtype is the input dtype (fp32/bf16/fp16); under ``torch.autocast("cuda",
-  ...)`` GroupNorm is an fp32-policy op, so the output is **fp32** for any
-  input dtype.  This module reproduces that rule (see ``_autocast_out_dtype``)
-  without materializing the fp32 copy of the input that autocast's cast would
-  create: the kernels read the input at its native width and accumulate in
-  fp32, which is bit-for-bit the same computation as upcasting first, but reads
-  half the bytes.  Gradients follow the same rule: ``d_input`` has the input's
-  dtype, ``d_weight``/``d_bias`` have the parameter's dtype.  Forward time at
-  ``[1,64,256^3]`` / ``[1,128,128^3]`` / ``[1,256,64^3]`` in ms: fp32
-  4.28/1.20/0.35, bf16 2.42/0.68/0.22, fp16 2.43/0.66/0.22, and bf16-in with
-  the fp32-out autocast contract 3.08/0.84/0.28 -- so honouring autocast's
-  fp32 output still buys 1.4x over fp32 end to end, because only the read side
-  narrows.
-* **statistics** -- always accumulated in fp32, never in the input dtype.
+* **dtype** -- exactly ``F.group_norm``'s: the input's dtype outside autocast,
+  fp32 inside it, since ``at::group_norm`` carries autocast's fp32 cast policy.
+  ``_autocast_out_dtype`` reproduces that rule without materializing the fp32
+  copy of the input that autocast's own cast would make: the kernels read at
+  the native width and accumulate in fp32, which is the same computation as
+  upcasting first but reads fewer bytes.  Gradients follow suit -- ``d_input``
+  has the input's dtype, ``d_weight``/``d_bias`` the parameter's.
+* **statistics** -- always accumulated in fp32, never in the input dtype, and
+  rounded to the output dtype exactly once, on the store.
 * **memory format** -- the output has the *input's* memory format.  This is the
   one deliberate difference from stock GroupNorm, which returns a contiguous
-  tensor for every input layout; preserving channels-last is the entire point
-  of the kernel.
-* **autograd** -- ``d_input``, ``d_weight``, ``d_bias``; ``weight=None`` and/or
-  ``bias=None`` supported.  **First order only**: the backward is itself a
-  custom op with no autograd formula of its own, so a second
-  ``torch.autograd.grad`` through this op raises ``RuntimeError: Trying to
-  backward through scaffold_gn.group_norm_backward.default but no autograd
-  formula was registered``.  Stock ``F.group_norm`` *does* support double
-  backward, so a gradient penalty or a Hessian-vector product must route
-  around this kernel (``is_supported`` says nothing about second derivatives;
-  it is documented there too).  It fails loudly rather than returning garbage.
-* **device** -- the kernels run on the *input's* device, whatever device is
-  current, matching ATen's ``DeviceGuard`` behaviour; see ``_device_guard``.
-* **determinism** -- bitwise reproducible run to run and process to process.
-  There are no float atomics anywhere, and the grid, split count and tile sizes
-  are pure functions of the shape (the tuning table is frozen in this file for
-  exactly that reason -- a *runtime* autotuner would break reproducibility by
-  changing the reduction order between runs).
+  tensor whatever went in; preserving channels-last is the point of the kernel.
+* **autograd** -- ``d_input``, ``d_weight``, ``d_bias``, with ``weight`` and/or
+  ``bias`` ``None`` allowed.  First order only: the backward is itself a custom
+  op with no autograd formula, so a second ``torch.autograd.grad`` raises where
+  stock ``F.group_norm`` supports double backward.  A gradient penalty or a
+  Hessian-vector product must route around this kernel; it fails loudly rather
+  than returning garbage.
+* **device** -- the kernels run on the *input's* device whatever device is
+  current, matching ATen's ``DeviceGuard``; see ``_device_guard``.
+* **determinism** -- bitwise reproducible run to run and process to process:
+  no float atomics anywhere, and grid, split count and tile sizes are pure
+  functions of the shape.  The tuning table is frozen in this file for that
+  reason -- a runtime autotuner would change the reduction order between runs.
 * **rejections** -- every shape/dtype/parameter combination ``F.group_norm``
   raises on is one ``is_supported`` returns ``False`` for, including the
-  degenerate "1 value per channel" shape (``N*(C/G)*D*H*W == 1``), so a caller
-  that branches on ``is_supported`` never gets an answer where the op this
-  replaces would have raised.
-* **eps** -- one deliberate divergence, at a value no run uses: for a
-  *subnormal* fp32 ``eps`` (``< 1.18e-38``) on a zero-variance group the GPU
-  flushes ``var + eps`` to zero, so ``rstd`` is ``inf`` and ``y`` is ``NaN``
-  where ATen stays finite.  The boundary is exactly the normal/subnormal one
-  (``eps=1.2e-38`` gives ``rstd=9.1e18``, ``eps=1e-38`` gives ``inf``); at
-  ``eps == 0`` both implementations produce non-finite output identically.
-  Left as is rather than clamped because clamping would perturb every
-  ordinary call to defend a value nine orders of magnitude below the smallest
-  plausible one.
+  degenerate ``N*(C/G)*D*H*W == 1`` shape, so a caller branching on
+  ``is_supported`` never gets an answer where the op this replaces would raise.
+* **eps** -- one deliberate divergence: for a *subnormal* fp32 ``eps`` (below
+  the smallest normal, 1.18e-38) on a zero-variance group the GPU flushes
+  ``var + eps`` to zero, so ``rstd`` is ``inf`` and ``y`` is ``NaN`` where ATen
+  stays finite.  Not clamped, because clamping would perturb every ordinary
+  call to defend a value far below any plausible one.
+
+Layouts
+=======
+* ``channels_last_3d`` 5-D input -> native Triton kernel, channels-last output.
+  This is the fast path and the only one ``is_supported`` accepts.
+* Every other layout and rank -> ``triton_group_norm`` falls back to
+  ``F.group_norm``, whose contiguous output again has the input's memory
+  format.  ``is_supported`` returns ``False`` so that callers keep their own,
+  probably compiled, fallback instead of silently dropping to eager.
+
+One kernel family rather than two is deliberate.  A native NCDHW kernel needs a
+different tiling -- with C outermost the fast axis is spatial, so a program owns
+one group and streams S instead of owning all groups and streaming voxels --
+and on contiguous input Inductor's compiled GroupNorm is already near this
+device's streaming roofline, so the payoff there is a fraction of what the
+channels-last path recovers.  If a mixed-layout model ever makes it worth
+having, the place to add it is :func:`select_strategy`.
 
 Reduction strategy
 ==================
-Group statistics span ``S * C/G`` elements (134M at the largest UNet shape), so
-one pass cannot produce them.  Split-K partial reductions land at a fixed
-scratch index and are combined by a fixed-order tree::
+Group statistics span ``S * C/G`` elements, far more than one pass can reduce
+at the large UNet shapes, so split-K partials land at a fixed scratch index and
+are combined by a fixed-order tree::
 
     fwd:  stats_partial -> normalize    (2 kernels)
     bwd:  bwd_partial   -> dx           (2 kernels)
 
 Traffic (``B = numel * itemsize``): 3B forward, 5B backward.
 
-Each pass is **two** launches, not the three and four an unfused split-K chain
-needs: the two finalize passes and the dweight/dbias row reduction are folded
-into the elementwise kernel that consumes them.  ``_normalize_kernel``
-re-derives ``mean``/``rstd`` from the split-K partials itself (and program 0
-stores them for the backward); ``_dx_kernel`` re-derives ``c1``/``c2`` the same
-way and its first ``ceil(C/BLOCK_C)`` programs also do the dweight/dbias
-reduction.  Folding plus the retuning below is worth 8.0-9.5% of fwd+bwd at the
-four smallest shapes, which are host-dispatch bound, 4.9-6.8% at the two middle
-ones and 1.7% at the largest.
+Each pass is two launches, not the three and four an unfused split-K chain
+needs: the finalize passes and the dweight/dbias row reduction are folded into
+the elementwise kernel that consumes them.  ``_normalize_kernel`` re-derives
+``mean``/``rstd`` from the split-K partials itself (program 0 stores them for
+the backward); ``_dx_kernel`` re-derives ``c1``/``c2`` the same way, and its
+first ``ceil(C/BLOCK_C)`` programs also do the dweight/dbias reduction.
 
-The catch, and the reason the tuning table was re-derived rather than inherited:
-**the fusion and the tiling are one problem, not two.**  A fused finalize is
-recomputed by every elementwise *program*, so its cost is
-``nprog_elem * nsplit`` triples of redundant (L2-resident) traffic.  Keeping the
-unfused table's ``nsplit_target=2048`` at ``[1,64,256^3]``, whose flat
-elementwise grid is 131072 programs, asks for 25.7 GB of redundant reads
-against a 4.3 GB tensor and costs **+34% of fwd+bwd** (+70% of the forward).
-Two things fix it, both of them in ``GNConfig``: the elementwise grid is capped
-at ``elem_progs`` programs which then stride over the tiles (so the redundancy
-is bounded by the *grid*, not by the tile count), and ``nsplit_target`` is
-retuned per shape against that cap.  With both, the same shape is 1-2% *faster*
-than the unfused chain.  The two were tuned jointly by coordinate descent, so
-do not change one without re-running the other.
+Fusion and tiling are one problem, not two: a fused finalize is recomputed by
+every elementwise *program*, so the redundant (L2-resident) traffic is
+``nprog_elem * nsplit`` triples, which with an uncapped grid at the largest
+shape costs several times the tensor itself.  Two knobs in ``GNConfig`` bound
+it -- the elementwise grid is capped at ``elem_progs`` programs which then
+stride over the tiles, so redundancy scales with the grid and not with the tile
+count, and ``nsplit_target`` is tuned per shape against that cap.  They were
+tuned jointly by coordinate descent; do not change one without re-deriving the
+other.
 
 Why not one launch per pass
 ---------------------------
 A device-scope software barrier (int32 atomics with volatile loads, no float
-atomics, so still bitwise deterministic) collapses each pass to a single
-launch and was measured at 2.3-2.6x on the four smallest shapes.  It is
-deliberately **not** used.  A grid barrier requires every workgroup to be
-co-resident, which caps the grid at the CU count (228 here); the kernel then
-tops out at 0.5-0.9 TB/s against split-K's 2.7, so it loses catastrophically
-the moment the shape is bandwidth-bound rather than dispatch-bound --
-**18.0 ms against 3.0 ms at [1,128,128^3]**, and it does not compile at all at
-``[1,64,256^3]``.  Serving both regimes therefore means shipping two kernel
-families plus a crossover rule, for a whole-model gain of ~3% (65.7 -> 63.6
-ms/step at scale 8); and under CUDA-graph capture, where launch count is free,
-the ten small-shape sites are already only 1.05 ms of a 64.1 ms/step total, so
-the gain is zero.  Hand-rolled inter-workgroup synchronisation is not a good
-trade for 3% in a benchmark whose value depends on being trustworthy and
-reproducible.
+atomics, so still bitwise deterministic) would collapse each pass to a single
+launch, and does win on the smallest, host-dispatch-bound shapes.  It is
+deliberately not used: a grid barrier needs every workgroup co-resident, which
+caps the grid at the CU count (228 here) and with it the achievable bandwidth,
+so it loses badly the moment a shape is bandwidth-bound rather than
+dispatch-bound, and at the largest UNet shape it does not compile at all.
+Serving both regimes would mean two kernel families plus a crossover rule, for
+a few percent of the model step -- and nothing at all under CUDA-graph capture,
+where launch count is free.
 
 Numerics: Welford, not ``E[x^2]-E[x]^2``
 ========================================
-The prototype accumulated ``sum(x)`` and ``sum(x*x)`` and formed
-``var = E[x^2] - E[x]^2``.  That is split-friendly and cheap but cancels
-catastrophically once ``mean >> std``, because it subtracts two nearly equal
-large numbers to recover a small one.
-
-Here each tile instead produces ``(count, mean, M2)`` via a *corrected*
+``E[x^2]-E[x]^2`` is split-friendly and cheap but cancels catastrophically once
+``mean >> std``, subtracting two nearly equal large numbers to recover a small
+one.  Each tile here instead produces ``(count, mean, M2)`` by a *corrected*
 two-pass over registers -- ``mean0 = sum(x)/n``, then ``corr = sum(x-mean0)/n``
 to recover the digits the first sum lost, then ``M2 = sum((x-mean0-corr)^2)``
--- and tiles and splits are merged with Chan's parallel combine.  Every step is
+-- and tiles and splits merge with Chan's parallel combine.  Every step is
 register-only (the tile is read from HBM exactly once either way) and
 atomic-free, so neither the traffic model nor determinism changes.
 
-Measured at ``[1,256,64^3]``, ``num_groups=8``, affine, relative error of the
-*output* against a float64 reference computed from the same fp32 samples:
-
-    x ~ N(mu, sigma)     this kernel   ATen fp32   E[x^2]-E[x]^2
-    mu=0,    sigma=1       1.6e-07      4.1e-07       1.8e-07
-    mu=10,   sigma=1       3.0e-07      6.9e-07       9.9e-06
-    mu=100,  sigma=1       8.0e-07      4.2e-06       5.6e-04
-    mu=1e3,  sigma=1e-2    1.1e-04      2.5e-03       2.3e+00
-
-At ``mu/sigma = 1e5`` the old formulation has lost the variance outright (the
-difference of the two ~1e6-sized fp32 terms is below one ulp, so ``rstd``
-saturates on ``eps`` and the output is meaningless), while this kernel is still
-good to 1.1e-04 -- and is 4-23x *more* accurate than ATen's own fp32 GroupNorm
-at every non-trivial mean.  The residual 1.1e-04 is the fp32 representation
-floor rather than an algorithm defect: a mean of 1e3 held in fp32 is quantized
-to ~6e-5, which is 6e-3 of a standard deviation here, and both kernels sit on
-that floor.
-
-Cost of the rewrite, isolated by timing the kernels alone against the
-prototype's: **+0.8%** on the forward at ``[1,64,256^3]`` (the shape that
-dominates the step), +3-8% at the middle shapes, and **0%** on the backward,
-which does not compute a variance.  A cheaper shifted-mean variant (two tile
-reductions instead of three, shift taken from a peeled first tile) would
-recover most of that; it was not worth the extra failure mode for ~4 ms/step.
-
-What the third pass (``corr``) is worth, separately
----------------------------------------------------
-The accuracy above is mostly the *two-pass* structure; the ``corr`` term is a
-third reduction on top of it and deserves its own accounting.  Deleting it
-outright (keeping ``mean_t = mean0``, ``M2 = sum((x-mean0)^2)``) and comparing
-both against float64 on the same fp32 samples, relative error of ``rstd``,
-10 seeds each:
-
-    regime                                     with corr    without    ratio
-    one tile per group reduction (nsplit=1):
-      [2,64,8,4,4] G=4, mu/sigma=1e6            1.1e-07     1.6e-04    1472x
-      [2,64,8,4,4] G=2, mu/sigma=1e6            8.4e-08     4.9e-05     580x
-      [2,64,8,4,4] G=1, mu/sigma=1e6            9.8e-08     2.1e-05     216x
-      [2,64,8,4,4] G=4, mu/sigma=1e5            9.9e-08     8.4e-06      85x
-    many tiles and splits (the production configs):
-      [1,512,32^3]  G=8, mu/sigma=1e5           1.2e-05     4.4e-05     3.8x
-      [1,1024,16^3] G=8, mu/sigma=1e5           8.6e-06     2.5e-05     2.9x
-      [1,256,24^3]  G=8, mu/sigma=1e5           3.0e-05     3.7e-05     1.3x
-      [1,256,24^3]  G=8, mu/sigma=1e7           5.8e-04     2.3e-06    0.004x
-
-So it is decisively load-bearing exactly where the tile mean is formed from
-many large values -- up to 1472x on ``rstd`` -- and worth a steady 1.3-4x in
-the multi-split configs the tuning table actually picks, at ``mu/sigma = 1e5``.
-Past ``mu/sigma ~ 1e6`` with many splits it can go the *other* way (last row):
-there the true spread between tile means is smaller than one ulp of the means
-themselves, so Chan's between-tile term is computed from quantization noise
-either way and the uncorrected version's inflated ``M2`` partly cancels it.
-That regime is past fp32's floor for this computation (a mean of 1e6 held in
-fp32 quantizes to 0.06, i.e. 6% of a standard deviation at sigma=1) and no
-production input is near it.
-
-The *output* error is nearly unmoved by any of this -- at most ~1.4x in either
-direction -- which is why the term looks free to delete if you only measure
-``y``: the output is dominated by the fp32 representation of the mean, which
-``corr`` cannot improve (``mean0 + corr`` rounds straight back to ``mean0``
-once the mean is large).  It is ``rstd`` that carries the benefit.
-
-Price, measured the same way (median of 20 forwards, correction removed
-outright rather than zeroed): **+2.3%** of the forward at ``[1,64,256^3]``,
-+3.0% at ``[1,128,128^3]``, +4.7% at ``[1,256,64^3]``, and nothing measurable
-(-1.2% to +0.5%, i.e. noise) at the three launch-bound shapes.  At the shape
-that dominates the step that is +0.10 ms of a 11.6 ms fwd+bwd, i.e. +0.9%.
-Kept: a 1.3-1472x accuracy factor on the statistic the whole rewrite exists to
-protect is worth ~1% of GroupNorm time.  The load-bearing case is pinned by
+The ``corr`` term is what keeps ``rstd`` accurate where a tile mean is formed
+from many large values, by orders of magnitude in a single-tile reduction.  The
+*output* error barely moves, because it is dominated by the fp32 representation
+of the mean, which ``corr`` cannot improve -- so do not delete the term on the
+strength of an output comparison.  Its load-bearing case is pinned by
 ``test_welford_correction_recovers_rstd_in_a_single_tile_reduction`` in
-``tests/test_triton_group_norm_edge.py``, so deleting the term now fails the
-suite instead of passing it silently.
-
-Layouts
-=======
-* ``channels_last_3d`` 5-D input -> **native Triton kernel**, channels-last
-  output.  This is the fast path and the only one ``is_supported`` accepts.
-* Plain contiguous NCDHW (and every other layout/rank) -> ``triton_group_norm``
-  falls back to ``F.group_norm``, which returns a contiguous tensor, so the
-  input's memory format is still preserved.  ``is_supported`` returns ``False``
-  so that callers keep their own (probably compiled) fallback rather than
-  silently dropping to the eager kernel.
-
-  This is a deliberate scope decision, not an oversight.  A native NCDHW kernel
-  would need a *different* tiling -- with C outermost the fast axis is spatial,
-  so a program must own one group and stream S, rather than owning all groups
-  and streaming voxels -- i.e. a second family of four kernels.  The payoff is
-  small: on contiguous input Inductor's compiled GroupNorm already reaches
-  89-92% of this device's measured streaming roofline -- and the table above
-  confirms it, 66.4 ms/step against this kernel's 67.1 -- so a native NCDHW
-  kernel could win ~10% there, against the 6.4x it wins on
-  channels-last input.  If a mixed-layout model ever makes that 10% matter, the
-  place to add it is the strategy hook below.
+``tests/test_triton_group_norm_edge.py``.
 
 Addressing
 ==========
-``[2, 64, 256^3]`` is *exactly* 2^31 elements, so int32 linear offsets block
-batch>1 at the largest UNet shape and every shape above it.  The kernels widen
-only the **scalar tile base** to int64 (``INT64`` is a ``tl.constexpr``, so
-shapes that fit still emit pure 32-bit code); the vector offsets inside a tile
-span at most ``BLOCK_S*C + C`` elements and stay int32 either way.  That is why
-the wide path is free: forcing int64 on every scale-8 shape moves fwd+bwd by
--0.8% to +0.8% and forward by -3.7% to +4% (a 0.02 ms swing on the two smallest,
-launch-bound shapes) -- noise in both directions.  The switch is kept anyway
-because it costs one constexpr and documents where the boundary is; correctness
-above 2^31 elements is covered by a test at ``[2, 64, 256, 256, 257]``
-(2_155_872_256 elements, 2.5e-05 relative error on *both* batch items, i.e. the
-same reduction noise a 134M-element fp32 reduction has anywhere).
+``[2, 64, 256^3]`` is exactly 2^31 elements, so int32 linear offsets would
+block batch>1 at the largest UNet shape and at everything above it.  The
+kernels widen only the *scalar* tile base to int64 (``INT64`` is a
+``tl.constexpr``, so shapes that fit still emit pure 32-bit code); the vector
+offsets inside a tile span at most ``BLOCK_S*C + C`` elements and stay int32
+either way, which is why the wide path costs nothing measurable.
 
 Fused activation
 ================
-``activation="relu"`` folds the ReLU into the forward store.  In a store-bound
-kernel that is free (one compare and one select) and it removes an entire 2B
-streaming pass.  Measured against ``F.relu(triton_group_norm(x))``: 39% off the forward
-and 35% off fwd+bwd at ``[1,64,256^3]`` (6.83 -> 4.20 ms and 17.82 -> 11.61
-ms), 38%/35% at ``[1,128,128^3]``, 34%/30% at ``[1,256,64^3]``, tapering to
-21%/9% at ``[1,512,32^3]`` and below, where the call is host bound and there is
-less streaming pass to remove.
+``activation="relu"`` folds the ReLU into the forward store -- one compare and
+one select in a store-bound kernel -- and removes an entire 2B streaming pass.
 
-The backward gates the incoming gradient on the sign of the **pre-activation**
-value, which it *recomputes* from the saved ``(x, mean, rstd, weight, bias)``
-using the identical expression the forward used.  Recomputation costs two FLOPs
-on values already in registers and is bit-exact -- same inputs, same operation
-order, same fp32 rounding -- so the sign always agrees with the forward's.  The
-alternative, testing ``y > 0`` on the saved output, would need the output kept
-alive *in addition to* ``x`` (which the GroupNorm backward needs regardless),
-and in bf16/fp16 it would also mis-gate any element whose positive
-pre-activation rounded to zero on the store.
+The backward gates the incoming gradient on the sign of the *pre-activation*
+value, which it recomputes from the saved ``(x, mean, rstd, weight, bias)``
+with the expression the forward used: two FLOPs on values already in registers,
+and bit-exact, so the sign always agrees with the forward's.  Testing ``y > 0``
+on the saved output instead would need the output kept alive in addition to
+``x`` (which the backward needs anyway), and in bf16/fp16 would mis-gate any
+element whose positive pre-activation rounded to zero on the store.
 
 Both the store and the gate are spelled as the *complement* of the usual test
-(``tl.where(y <= 0, 0, y)``, ``tl.where(pre <= 0, 0, dy)``) rather than as
-``tl.maximum(y, 0)`` / ``tl.where(pre > 0, dy, 0)``.  The two are identical on
-every finite value but not on NaN: ``tl.maximum`` returns the *non*-NaN operand
-and ``NaN > 0`` is False, so both of the usual spellings silently map a NaN to
-0.0, while ``F.relu`` propagates it and ``threshold_backward(grad, result, 0)``
--- ReLU's real backward -- passes its gradient (``NaN <= 0`` is False too).
-Matching ``F.relu`` here is not pedantry: a diverging run whose forward comes
-back finite because the fused activation ate the NaN passes straight through
-ScaFFold's non-finite-loss abort and checkpoints a broken model.  ``+-Inf`` and
-``-0.0`` are bit-identical under either spelling (``-0.0`` flushes to ``+0.0``,
-as ``F.relu`` does).  Cost: nil, measured -- see ``FastGroupNorm``'s tests.
+(``tl.where(y <= 0, 0, y)``, ``tl.where(pre <= 0, 0, dy)``) rather than
+``tl.maximum(y, 0)`` / ``tl.where(pre > 0, dy, 0)``.  The two agree on every
+finite value but not on NaN: ``tl.maximum`` returns the non-NaN operand and
+``NaN > 0`` is False, so both usual spellings map a NaN to 0.0, while
+``F.relu`` propagates it and ``threshold_backward`` -- ReLU's real backward --
+passes its gradient, ``NaN <= 0`` being False too.  Matching ``F.relu`` here
+matters: a diverging run whose forward comes back finite because the fused
+activation ate the NaN sails through ScaFFold's non-finite-loss abort and
+checkpoints a broken model.
 
 Composition
 ===========
@@ -348,55 +200,29 @@ fake/meta kernel and ``register_autograd``.  Consequences:
 * ``torch.compile(..., fullgraph=True)`` traces through without a graph break.
 * Tensor subclasses that dispatch via ``__torch_dispatch__`` -- notably
   DistConv's ``DCTensor`` -- intercept the op, unwrap to the local shard, run
-  it, and rewrap, so a DCTensor goes in and a DCTensor comes out with the graph
-  intact.  As with the rest of DistConv today, statistics are per-shard.
+  it and rewrap, so a DCTensor goes in and a DCTensor comes out with the graph
+  intact.  As with the rest of DistConv, statistics are per-shard.
 
-Where the host time goes, and what is left
-==========================================
-Composing has a price, and at the launch-bound shapes it is now the *dominant*
-cost.  Peeling the layers at ``[1,2048,8^3]``, steady-state wall clock per
-fwd+bwd (median of 200, min of 7 rounds; GPU work is 0.030 ms)::
+At the smallest shapes the call is dominated by autograd and the dispatcher
+rather than by the kernels; that is the price of being an op ``torch.compile``
+and ``DCTensor`` can see.  Two ways to claw that host time back are rejected:
 
-    kernels + this file's Python (_forward/_backward called directly)  0.145 ms
-    + torch.library dispatcher (both custom ops)                      +0.054 ms
-    + autograd (register_autograd node, save_for_backward, ctx)       +0.338 ms
-    = triton_group_norm(x).backward(dy)                                0.537 ms
+* Bypassing ``JITFunction.run`` for a cached ``CompiledKernel`` handle assumes
+  Triton's specialization key -- 16-byte pointer alignment included -- is a
+  pure function of the shape.  It is not: this module accepts channels-last
+  views with a storage offset and non-contiguous affine parameters, both
+  exercised by the test suite, and a stale specialization there is a wrong
+  answer rather than a crash.
+* Caching the scratch buffers across calls makes them shared mutable state
+  between call sites: correct on one stream, wrong on two, and this module
+  cannot tell which it is on.
 
-    for scale: an *empty* python torch.autograd.Function, fwd+bwd      0.065 ms
+What is left at those shapes is torch's own plumbing, removable only from
+outside this file -- CUDA-graph capture of the training step, or a C++ autograd
+node.
 
-So **63% of the call is the autograd layer** and 10% is the dispatcher -- both
-of them the cost of being a real dispatcher op that ``torch.compile`` and
-``DCTensor`` can see, which is the whole point of registering it that way.  Of
-the 0.145 ms this file is responsible for, 0.030 ms is GPU and the remaining
-0.115 ms is four launches plus the allocations, plan lookup and argument
-binding around them: launching every kernel twice measures the marginal cost of
-a whole invocation site at **35 us**, so the four of them are ~0.14 ms of host
-work that the GPU work does not cover.
-
-Two things were considered for that 0.14 ms and rejected:
-
-* **Bypassing ``JITFunction.run`` for a cached ``CompiledKernel`` handle**
-  (8.68 us -> 3.94 us per launch on this node) would recover ~19 us, i.e. 3.3%
-  of the call.  It buys that by asserting that Triton's specialization key --
-  including 16-byte pointer alignment -- is a pure function of the shape.  It is
-  not: this module accepts channels-last *views with a storage offset* and
-  non-contiguous affine parameters, both of which the test suite exercises, and
-  a stale specialization there is a wrong answer rather than a crash.  3.3% on
-  the host-bound shapes only is not worth a silent-miscompute failure mode.
-* **Caching the scratch buffers** across calls saves ~1.7 us per allocation,
-  ~20 us here, and makes the buffers shared mutable state across call sites --
-  correct on one stream, wrong on two, and this module has no way to know.
-
-What that leaves: the kernels are at 95-98% of the streaming roofline at the
-two largest shapes and the fused chain is 1.7-6.8% faster than the unfused one
-there, so there is no meaningful GPU headroom left.  At the launch-bound
-shapes the remaining 0.4 ms is torch's own plumbing, and the two ways to remove
-it are both outside this file: CUDA-graph capture of the training step (which
-takes the ten small scale-8 sites to ~1.05 ms/step of GPU time in total), or a
-C++ autograd node.
-
-Triton is imported lazily, on the first call that actually reaches the kernel,
-so importing this module (or running the CPU test suite) costs nothing.
+Triton is imported lazily, on the first call that reaches the kernel, so
+importing this module (or running the CPU test suite) costs nothing.
 """
 
 import contextlib
@@ -421,31 +247,27 @@ __all__ = [
 class TritonKernelError(RuntimeError):
     """A failure of the Triton kernels themselves, with the original as ``__cause__``.
 
-    Raised in place of whatever ``_forward``/``_backward`` raised -- a missing or
+    Raised in place of whatever ``_forward``/``_backward`` raised: a missing or
     mismatched ``triton``, an unwritable JIT cache, a compile error, a launch
-    failure, an API change between Triton releases.  It exists so that a caller
-    with a fallback (``ScaFFold.unet.group_norm``'s ladder) can catch *exactly*
-    "the kernel is broken" and nothing else, instead of catching ``Exception``
-    and trying to enumerate every framework mechanism that legitimately raises
-    through a forward -- saved-tensor pack hooks, ``torch.utils.checkpoint``'s
-    recompute control flow, functorch, a user's offloading hook.
+    failure, an API change between Triton releases.  It lets a caller with a
+    fallback (``ScaFFold.unet.group_norm``'s ladder) catch exactly "the kernel
+    is broken" instead of catching ``Exception`` and trying to enumerate the
+    framework mechanisms that legitimately raise through a forward -- pack
+    hooks, ``torch.utils.checkpoint`` recompute, functorch, offloading hooks.
 
-    Two things are deliberately *not* tagged and therefore propagate unchanged:
+    Two things are deliberately not tagged, and propagate unchanged:
 
-    * ``torch.OutOfMemoryError``, which is a resource condition rather than a
-      defect (every fallback allocates an output of the same size, so retrying
-      one is a second, differently-shaped OOM at a call site the caller did not
-      ask about), and
-    * the ``ValueError``s ``_validate`` raises, which are contract violations by
-      the caller.  ``is_supported`` accepts exactly what ``_validate`` accepts,
-      so a caller that branches on it can never see one; if one escapes, that
-      is a bug in this module and must be loud.
+    * ``torch.OutOfMemoryError``, a resource condition rather than a defect --
+      every fallback allocates an output of the same size, so retrying one is
+      just a second OOM at a call site the caller did not ask about;
+    * the ``ValueError``s ``_validate`` raises, which are caller contract
+      violations that ``is_supported`` already excludes, so one escaping is a
+      bug here and must stay loud.
 
-    The tagged region contains no autograd-observable work -- allocations and
-    kernel launches only, with ``save_for_backward`` happening in
-    ``_setup_context`` strictly *after* ``_forward`` returns -- so an exception
-    that carries this type is guaranteed to have been raised before the op saved
-    anything.  That is what makes retrying the call on another kernel safe.
+    The tagged region does no autograd-observable work -- allocations and
+    launches only, with ``save_for_backward`` in ``_setup_context`` strictly
+    after ``_forward`` returns -- so an exception of this type always predates
+    anything the op saved, which is what makes retrying on another kernel safe.
     """
 
 
@@ -467,18 +289,16 @@ class GNConfig:
 
     ``stats_tile``/``elem_tile`` are *element* budgets per program (the spatial
     block is ``tile // channels_per_voxel``, rounded down to a power of two);
-    ``nsplit_target`` is the total number of split-K partials wanted across the
+    ``nsplit_target`` is the number of split-K partials wanted across the whole
     batch, so the per-sample split count is ``nsplit_target // N``;
     ``elem_progs`` caps the elementwise grid, each program then striding over
     ``ceil(nblk_elem / elem_progs)`` tiles (0 = one program per tile).
 
-    These are **not** independent knobs, and in particular they stopped being
-    independent when the finalize passes were folded into the elementwise
-    kernels: each elementwise *program* now re-reads all ``nsplit`` split-K
-    partials, so the redundant traffic is ``min(nblk_elem, elem_progs) *
-    nsplit`` triples.  Raising ``nsplit_target`` for stats-kernel occupancy and
-    lowering ``elem_progs`` for redundancy pull against each other and were
-    tuned together; see the module docstring.
+    Not independent knobs: every elementwise program re-reads all ``nsplit``
+    partials for the fused finalize, so the redundant traffic is
+    ``min(nblk_elem, elem_progs) * nsplit`` triples.  Raising ``nsplit_target``
+    for stats-kernel occupancy and lowering ``elem_progs`` for redundancy pull
+    against each other and were tuned together; see the module docstring.
     """
 
     __slots__ = (
@@ -529,22 +349,15 @@ class GNConfig:
         )
 
 
-#: Frozen tuning table, produced by coordinate descent on fwd+bwd time on one
-#: MI300A (228 CUs) at fp32 with ``num_groups=8``, keyed by the
-#: ``(num_channels, cube-root spatial extent)`` of the scale-8 ScaFFold UNet
-#: GroupNorm sites plus the ``[1,4096,4^3]`` tail.  Frozen -- never autotuned at
-#: run time -- because the split count fixes the reduction order and therefore
-#: the bits of the result.
+#: Tuning table for the fused kernels, from a coordinate-descent sweep of
+#: fwd+bwd time on one MI300A at fp32 with ``num_groups=8``, keyed by the
+#: ``(num_channels, cube-root spatial extent)`` of the ScaFFold UNet GroupNorm
+#: sites.  Frozen -- never autotuned at run time -- because the split count
+#: fixes the reduction order and therefore the bits of the result.
 #:
-#: Re-derived for the fused (2+2 launch) kernels: every candidate was timed
-#: **interleaved against the incumbent** in one process, so that anything which
-#: changes on the device partway through a sweep -- a neighbour process above
-#: all -- lands on both arms at once instead of on whichever ran later.  The
-#: table is keyed on ``(C, edge)`` and not on ``N``: ``nsplit_target`` is a target for
-#: the split count *summed over the batch* (the per-sample count is
-#: ``nsplit_target // N``), so the same entry serves ``N > 1`` with the same
-#: total number of stats programs.  Verified at ``[2,1024,16^3]``,
-#: ``[4,2048,8^3]`` and ``[2,256,64^3]``.
+#: Keyed on ``(C, edge)`` and not on ``N`` because ``nsplit_target`` targets the
+#: split count summed over the batch (per sample it is ``nsplit_target // N``),
+#: so one entry serves ``N > 1`` with the same total number of stats programs.
 _TUNED = {
     (64, 256): GNConfig(16384, 4, 2048, 8192, 4, 2048),
     (128, 128): GNConfig(16384, 4, 2048, 16384, 4, 912),
@@ -575,36 +388,29 @@ def default_config(num_channels: int, spatial: int) -> GNConfig:
 STRATEGIES = ("split_k",)
 
 #: Spatial extent (``D*H*W``) below which the split-K chain is host-dispatch
-#: bound rather than bandwidth bound.  Measured on MI300A: at ``[1,2048,8^3]``
-#: the kernels do 0.030 ms of GPU work behind ~0.58 ms of
-#: Python/autograd/launch cost, and 0.086 ms of that is the *empty*
-#: ``torch.autograd.Function`` wrapper -- i.e. 68% of the remaining call is
-#: torch's plumbing, not this file's.  Purely informational --
-#: ``select_strategy`` does not use it.
+#: bound rather than bandwidth bound, most of that host cost being torch's own
+#: autograd and dispatcher plumbing rather than this file's.  Purely
+#: informational -- ``select_strategy`` does not use it.
 SMALL_SPATIAL_THRESHOLD = 4096
 
 
 def select_strategy(n: int, num_channels: int, spatial: int, num_groups: int) -> str:
-    """### SMALL-SHAPE DISPATCH HOOK ### -- the single point where a different
-    kernel strategy is chosen for a shape.
+    """The single point where a different kernel strategy is chosen per shape.
 
-    Returns a name from :data:`STRATEGIES`.  Today it always returns
-    ``"split_k"``: two forward and two backward kernels with split-K partial
-    reductions and the finalize passes fused into their consumers.  That is
-    bandwidth-optimal for the large shapes and, after the fusion, within
-    ~0.09 ms of the floor a Python ``autograd.Function`` can reach at the small
-    ones -- so there is much less left here than there looks.  Below roughly
-    ``SMALL_SPATIAL_THRESHOLD`` voxels the call is host bound, but the host cost
-    is now dominated by autograd and the dispatcher rather than by launches:
-    see "Why not one launch per pass" in the module docstring for the one
-    strategy that *would* cut it further and why it is not here.
+    Returns a name from :data:`STRATEGIES`.  Today always ``"split_k"``: two
+    forward and two backward kernels with split-K partial reductions and the
+    finalize passes fused into their consumers, which is bandwidth-optimal at
+    the large shapes and close to the floor a Python ``autograd.Function`` can
+    reach at the small ones.  Below roughly ``SMALL_SPATIAL_THRESHOLD`` voxels
+    the call is host bound, but on autograd and the dispatcher rather than on
+    launches; see "Why not one launch per pass" in the module docstring for the
+    strategy that would cut it further and why it is not here.
 
-    If a second strategy ever lands, add its name to :data:`STRATEGIES`, return
-    it from here on a rule that is a **pure function of the shape**
-    (determinism depends on it), and branch on it in ``_dispatch`` -- which is
-    the only caller, sits in front of the memoized tiling plan, and is itself
-    called by both ``_forward`` and ``_backward``.  Nothing else in this file
-    needs to change.
+    A second strategy needs its name in :data:`STRATEGIES`, a rule here that is
+    a pure function of the shape (determinism depends on it), and a branch in
+    ``_dispatch`` -- the only caller, sitting in front of the memoized tiling
+    plan and used by both ``_forward`` and ``_backward``.  Nothing else in this
+    file changes.
     """
     return "split_k"
 
@@ -674,9 +480,9 @@ class _Plan:
             self.groups_p2 != groups or self.group_channels_p2 != self.group_channels
         )
         # int64 addressing is needed once a linear element index can exceed
-        # INT32_MAX.  [2,64,256^3] is exactly 2^31 elements, so this is not
-        # hypothetical at scale.  Only the *scalar* tile base is widened (see
-        # the kernels), which measurement showed to be free.
+        # INT32_MAX; [2,64,256^3] is exactly 2^31 elements, so that is not
+        # hypothetical at scale.  Only the scalar tile base is widened, in the
+        # kernels; see "Addressing" in the module docstring.
         self.int64 = numel + channels > _INT32_MAX
         self.cfg = cfg
 
@@ -713,11 +519,11 @@ class _Plan:
 
 @functools.lru_cache(maxsize=256)
 def _plan(n, channels, spatial, groups, numel) -> _Plan:
-    """Memoized: a UNet presents a handful of shapes, and the three smallest
-    GroupNorm sites are host-dispatch bound, so rebuilding the plan (two
-    power-of-two loops and a dict lookup) on every call is measurable there.
-    Memoization cannot affect results -- the plan is a pure function of its
-    arguments, which is also what makes the kernels bitwise reproducible."""
+    """Memoized: a UNet presents a handful of shapes, and at the host-bound
+    sites rebuilding the plan (two power-of-two loops and a dict lookup) on
+    every call is measurable.  Memoization cannot affect results -- the plan is
+    a pure function of its arguments, which is also what makes the kernels
+    bitwise reproducible."""
     return _Plan(n, channels, spatial, groups, default_config(channels, spatial), numel)
 
 
@@ -847,26 +653,20 @@ def _build_kernels():
             m = tl.broadcast_to((offs_s < nvalid)[:, None, None], (BLOCK_S, GP, CGP))
             if MASKED_C:
                 m = m & cmask
-            # `other` is not load-bearing for any *bounded* value: `cnt_t`
-            # counts only the valid lanes, so `corr` below evaluates to
-            # `sum_valid(x)/cnt_t - mean0` and `mean_t = mean0 + corr` is the
-            # true mean whatever the masked lanes contributed, while `d`/`dd`
-            # are re-masked before they reach `m2_t`.  (Bounded: `other=1e30`
-            # would swamp `mean0` and the correction with it, and `other=inf`
-            # or `nan` would poison it outright.)  0.0 is kept because it is
-            # the value that survives all three of those, not because the
-            # cancellation is something to rely on.
+            # `other` must stay a small finite value.  `cnt_t` counts only the
+            # valid lanes, so `mean_t = mean0 + corr` is the true mean whatever
+            # the masked lanes contributed, and `d`/`dd` are re-masked before
+            # they reach `m2_t` -- but a huge `other` would swamp `mean0` (and
+            # the correction with it), and `inf` or `nan` would poison it.
             x = tl.load(X + base + off, mask=m, other=0.0).to(tl.float32)
 
             # Corrected two-pass within the tile: the first mean loses digits
             # to the magnitude of the data, `corr` puts them back, and the
             # centred squares are then accurate to fp32 roundoff.  Everything
             # here is register traffic; the tile is read from HBM exactly once.
-            # `corr` is worth 1.3x to 1472x on `rstd` once the data's mean
-            # dominates its spread -- see "What the third pass is worth" in the
-            # module docstring for the measurements, for the one regime where
-            # it goes the other way, and for why the *output* error barely
-            # moves even where `rstd` improves by three orders of magnitude.
+            # `corr` is what keeps `rstd` accurate once the mean dominates the
+            # spread; do not drop it on the strength of an output comparison,
+            # which barely moves either way -- see the module docstring.
             cnt_t = (nvalid * CG).to(tl.float32)
             mean0 = tl.sum(tl.sum(x, 2), 0) / cnt_t
             d = tl.where(m, x - mean0[None, :, None], 0.0)
@@ -919,20 +719,18 @@ def _build_kernels():
     ):
         """Finalize the split-K statistics, then normalize NBLK/NPROG tiles.
 
-        The finalize is *recomputed by every program* rather than round-tripped
+        The finalize is recomputed by every program rather than round-tripped
         through its own kernel launch: merging NSPLIT Welford triples is a few
         KB of L2-resident traffic and a tree reduction over a ``(NSPLIT, GP)``
-        tile, which is cheaper than the ~9 us launch it replaces.  What it is
-        *not* cheap enough for is being paid once per tile at the largest
-        shapes, where the flat grid is 10^5 programs: the grid is therefore
-        capped at ``NPROG`` and each program strides over its share of the
-        ``NBLK`` tiles, so the redundant read costs ``NPROG * NSPLIT`` and not
-        ``NBLK * NSPLIT``.  See :class:`GNConfig` -- ``nsplit_target``,
-        ``elem_tile`` and ``elem_progs`` are one joint tuning problem, not
-        three independent knobs.
+        tile, cheaper than the launch it replaces.  It is not cheap enough to
+        pay once per tile at the largest shapes, so the grid is capped at
+        ``NPROG`` and each program strides over its share of the ``NBLK``
+        tiles, making the redundant read ``NPROG * NSPLIT`` rather than
+        ``NBLK * NSPLIT``.  See :class:`GNConfig`: ``nsplit_target``,
+        ``elem_tile`` and ``elem_progs`` are one joint tuning problem.
 
-        Every program reads the same partials with the same tile shape, so they
-        all get bit-identical ``mean``/``rstd``; program 0 stores them for the
+        Every program reads the same partials with the same tile shape, so all
+        get bit-identical ``mean``/``rstd``; program 0 stores them for the
         backward.  The loop carries nothing across iterations, so the striding
         cannot affect the result.
         """
@@ -996,13 +794,12 @@ def _build_kernels():
             xhat = (x - mean) * rstd
             y = xhat * w + b
             if RELU:
-                # `tl.maximum(y, 0.0)` and `tl.where(y > 0, y, 0.0)` both map NaN
-                # to 0.0 (the first returns the non-NaN operand, the second
+                # `tl.maximum(y, 0.0)` and `tl.where(y > 0, y, 0.0)` both map a
+                # NaN to 0.0 (the first returns the non-NaN operand, the second
                 # because `NaN > 0` is False), while `F.relu` propagates it.
-                # Testing the *complement* keeps NaN on the pass-through side:
-                # `NaN <= 0` is also False, so NaN falls to `y`.  Bit-identical
-                # to `F.relu` on NaN, +-Inf and -0.0 (which both flush to +0.0),
-                # for one comparison and one select -- see the module docstring.
+                # Testing the complement keeps NaN on the pass-through side:
+                # `NaN <= 0` is False too, so NaN falls to `y`.  Bit-identical
+                # to `F.relu` on NaN, +-Inf and -0.0 -- see the module docstring.
                 y = tl.where(y <= 0.0, 0.0, y)
             tl.store(Y + base + off, y.to(Y.dtype.element_ty), mask=m)
 
@@ -1084,11 +881,10 @@ def _build_kernels():
                 # Identical expression (and therefore identical rounding) to
                 # the forward's pre-activation, so the sign test agrees with
                 # the forward bit for bit.  Masked lanes carry dy == 0, so
-                # gating cannot resurrect them.  Spelled as the *complement*
-                # (`pre <= 0` zeroes) rather than `pre > 0` passes, so that a
-                # NaN pre-activation passes the gradient through: that is what
-                # `threshold_backward(grad, result, 0)` -- ReLU's real backward
-                # -- does, since `NaN <= 0` is False.  See the forward store.
+                # gating cannot resurrect them.  Spelled as the complement
+                # (`pre <= 0` zeroes) so that a NaN pre-activation passes its
+                # gradient, which is what `threshold_backward` -- ReLU's real
+                # backward -- does, `NaN <= 0` being False.  See the forward.
                 dy = tl.where(xhat * w + b <= 0.0, 0.0, dy)
             dyw = dy * w
             acc1 += tl.sum(tl.sum(dyw, 2), 0)
@@ -1142,14 +938,13 @@ def _build_kernels():
     ):
         """The whole backward tail: dweight/dbias, the c1/c2 finalize, and dx.
 
-        Two reductions that used to be their own launches ride along here.  The
-        per-channel dweight/dbias row reduction is done by the first ``NDW``
-        programs of ``n == 0`` (a single pass over an ``(n*nsplit, C)`` scratch,
-        i.e. a few hundred KB); the per-``(n, g)`` c1/c2 finalize is recomputed
-        redundantly by every program, once, before the tile loop -- exactly as
-        in ``_normalize_kernel``, and capped the same way.  The grid is
-        ``(max(NPROG, NDW), n)``; programs past ``NPROG`` exist only to cover
-        the dweight/dbias rows and run no loop iterations.
+        The per-channel dweight/dbias row reduction is done by the first
+        ``NDW`` programs of ``n == 0``, in one pass over the ``(n*nsplit, C)``
+        scratch; the per-``(n, g)`` c1/c2 finalize is recomputed redundantly by
+        every program before the tile loop, exactly as in ``_normalize_kernel``
+        and capped the same way.  The grid is ``(max(NPROG, NDW), n)``;
+        programs past ``NPROG`` exist only to cover the dweight/dbias rows and
+        run no loop iterations.
         """
         pid = tl.program_id(0)
         n = tl.program_id(1)
@@ -1182,11 +977,10 @@ def _build_kernels():
             # One element per group: mean == x and var == 0 identically, so
             # xhat is the constant 0 and y does not depend on x at all -- the
             # exact d_input is zero everywhere.  The expression below would
-            # instead return rstd * (dy*w - c1), and since the compiler
-            # contracts that to fma(dy, w, -c1) while c1 was accumulated from
-            # the *rounded* product, what survives is the product's rounding
-            # error amplified by rstd = 1/sqrt(eps) ~ 316 (2.2e-05 at
-            # eps=1e-5).  Answering with the exact zero costs one constexpr.
+            # instead return rstd * (dy*w - c1), which the compiler contracts
+            # to fma(dy, w, -c1) while c1 was accumulated from the rounded
+            # product, leaving that rounding error amplified by
+            # rstd = 1/sqrt(eps).  The exact zero costs one constexpr.
             zero = tl.zeros((BLOCK_S, GP, CGP), dtype=tl.float32)
             for blk in tl.range(pid, NBLK, NPROG):
                 s0 = blk * BLOCK_S
@@ -1275,15 +1069,11 @@ def _device_guard(device: torch.device):
     (including ``F.group_norm``) carry a ``DeviceGuard`` and handle the same
     call, so this is required for the drop-in contract, not a nicety.
 
-    The ``current_device()`` test is not about correctness but about *cost*.
-    Measured on this node (median of 200k calls, torch 2.13.0+rocm7.2):
-    ``with torch.cuda.device(t.device)`` is **1.55 us** of host time per call,
-    ``with torch.cuda._DeviceGuard(t.device.index)`` **0.61 us**, and this
-    helper **0.51 us** when the tensor is already on the current device --
-    which it is on every ScaFFold call, since ScaFFold pins one device per
-    rank.  Two of those (forward + backward) against the 0.65 ms fwd+bwd of the
-    two smallest scale-8 shapes, which are host-dispatch bound, is 0.16%
-    instead of 0.48%.
+    The ``current_device()`` test is about cost, not correctness: entering
+    ``torch.cuda.device`` is host time, and ScaFFold pins one device per rank,
+    so the tensor is already on the current device on every call.  It is
+    charged twice per step (forward and backward) and only shows up at the
+    host-bound shapes.
     """
     if device.index == torch.cuda.current_device():
         return _NO_GUARD
@@ -1302,12 +1092,11 @@ def _tag_kernel_failures(fn):
     """Re-raise anything ``fn`` raises as :class:`TritonKernelError`.
 
     Applied to the two functions that do nothing but import Triton, allocate
-    scratch and launch kernels.  The region is *closed*: it runs no
-    autograd-observable op, so a blanket ``except Exception`` here cannot
-    swallow framework control flow the way one at the call site would -- there
-    is no pack hook, no recompute stop and no functorch layer inside it.  That
-    closure is what lets the caller's fallback ladder use a one-element
-    allowlist instead of an ever-growing denylist.
+    scratch and launch kernels.  The region is closed -- no autograd-observable
+    op, so no pack hook, recompute stop or functorch layer inside it -- so the
+    blanket ``except Exception`` here cannot swallow framework control flow the
+    way one at the call site would.  That is what lets the caller's fallback
+    ladder key on a single exception type instead of an ever-growing denylist.
 
     ``torch.OutOfMemoryError`` is passed through untagged; see
     :class:`TritonKernelError`.
@@ -1495,10 +1284,10 @@ def _one_value_per_channel(input, num_groups: int) -> bool:
     extent is 1 -- i.e. iff ``numel == C == num_groups``, which is the cheap
     form used here (``numel`` is wanted by the caller anyway).
 
-    Rejected rather than served: the kernel *can* compute it (it returns
-    ``bias``, since every group has zero variance), but a caller that branches
-    on :func:`is_supported` would then get a result where the op this replaces
-    raises, which is a worse failure than being slower.
+    Rejected rather than served: the kernel can compute it (it returns
+    ``bias``, every group having zero variance), but a caller branching on
+    :func:`is_supported` would then get a result where the op this replaces
+    raises -- a worse failure than being slower.
     """
     channels = input.shape[1]
     return channels == num_groups and input.numel() == channels
@@ -1698,10 +1487,9 @@ def _autocast_active(input: torch.Tensor) -> bool:
 def _autocast_out_dtype(input: torch.Tensor) -> Optional[torch.dtype]:
     """``F.group_norm``'s output dtype for this input, or None for "unchanged".
 
-    ``at::group_norm`` carries autocast's ``fp32`` cast policy, so under an
+    ``at::group_norm`` carries autocast's ``fp32`` cast policy, so inside an
     enabled autocast region it upcasts its input and returns fp32 whatever came
-    in.  Verified empirically on torch 2.13.0+rocm7.2 for fp32/bf16/fp16 input
-    and both bf16 and fp16 autocast dtypes.
+    in.
     """
     if input.dtype is not torch.float32 and _autocast_active(input):
         return torch.float32

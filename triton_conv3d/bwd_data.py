@@ -25,37 +25,25 @@ with the output spatial extent working out to the input's on its own:
 
 Consequences, all of which the code below leans on:
 
-* **There is no ``@triton.jit`` in this module, deliberately.**
-  ``grep -c '^@triton\.jit' triton_conv3d/*.py`` reporting 1 for
-  ``gather_gemm.py`` and 0 for everything else is the claim this file is making
-  -- anchored at column 0 so that this very sentence does not satisfy the grep,
-  which the first version of it did.  It is also why the tests here can reuse
-  the forward's correctness standards unchanged.
-* **There is no weight transform either, and there used to be.**  ``to_bwd_rsck``
-  materialized ``(kd, kh, kw, Cout, Cin)`` with the taps flipped, once per layer
-  per optimizer step -- 0.531 ms/step over one configuration's 19 Conv3d sites,
-  which no caching removes because the optimizer dirties every parameter every
-  step.  Both halves of it are now free, and neither cost what it looked like it
-  would.  The flip is a constexpr index (``taps - 1 - dij``: flipping all three
-  kernel axes is the complement of a mixed-radix index).  The transpose is *not
-  performed at all* -- the kernel addresses the weight through its strides, and
-  a ``permute`` supplies those, so "transposed" is a matter of which stride is
-  which.  A ``channels_last_3d`` parameter is ``[Cout][tap][Cin]``, and this
-  direction's N is ``Cin``, so the parameter is read here with the *same*
-  contiguous-N tile the forward gets from a materialized RSCK buffer.  Measured
-  against the ``to_bwd_rsck`` path it replaced, on the eight hottest sites of
-  config A: 0.98-1.02x, i.e. free.
-* The tuning does **not** transfer from the forward.  The effective GEMM has
-  the channel widths swapped: forward ``128 -> 64`` is ``N=64, K=128*27``,
-  and its backward-data is ``N=128, K=64*27``.  Same kernel, different corner
-  of the tuning surface, so :data:`_TUNED_BWD` is its own table.
+* There is no ``@triton.jit`` in this module: it is host code around the
+  forward's kernel, which is also why the tests here reuse the forward's
+  correctness standards unchanged.
+* There is no weight transform either.  The flip is a constexpr index
+  (``taps - 1 - dij``: flipping all three kernel axes is the complement of a
+  mixed-radix index), and the transpose is *not performed at all* -- the kernel
+  addresses the weight through its strides and a ``permute`` supplies those, so
+  "transposed" is a matter of which stride is which.  A ``channels_last_3d``
+  parameter is ``[Cout][tap][Cin]``, and this direction's N is ``Cin``, so the
+  parameter is read here with the same contiguous-N tile the forward gets from
+  a materialized RSCK buffer.
+* The tuning does not transfer from the forward.  The effective GEMM has the
+  channel widths swapped -- a forward ``Cin`` to ``Cout`` runs here as
+  ``N = Cin``, ``K = Cout * taps`` -- so :data:`_TUNED_BWD` is its own table.
 * ``PADDED`` is always true for ``k > 1``, whatever the forward's padding was.
   The equivalent forward has ``p' = d*(k-1) - p``, which is 2 for an unpadded
   ``k = 3`` and 1 for a "same"-padded one -- both non-zero, so the six-compare
   boundary predicate is unavoidable here even in the one case the forward
-  compiles it away.  That is a property of the mathematics, not of the reuse,
-  and it is why this direction is the one place the halo'd/padded distinction
-  does *not* change which kernel body is compiled.
+  compiles it away.  That is a property of the mathematics, not of the reuse.
 
 Restrictions beyond the forward's
 =================================
@@ -119,32 +107,23 @@ def _tuned(bm: int, bn: int, bk: int, warps: int, group_m: int = 6) -> ConvConfi
     )
 
 
-#: Measured backward-data winners, keyed by the **forward** problem's
-#: ``(dtype, Cin, Cout, kernel)`` -- i.e. by the convolution a reader would name
-#: -- even though the GEMM that runs has those two widths swapped.  Keying it
-#: the other way round would make ``512 -> 256`` in this table and ``512 -> 256``
-#: in the forward's mean different things, which is a trap not worth setting.
+#: Backward-data winners, keyed by the *forward* problem's
+#: ``(dtype, Cin, Cout, kernel)`` -- the convolution a reader would name -- even
+#: though the GEMM that runs has those two widths swapped.  Keying it the other
+#: way round would make the same channel pair mean different things here and in
+#: the forward's table, which is a trap not worth setting.
 #:
-#: Drawn from a backward-data sweep over 21 problems and 1468 timed
-#: configurations.  Only channel pairs that were actually timed appear; a miss
-#: falls to the heuristic on the effective widths, which is a real gap and not
-#: an extrapolation dressed up as a measurement.
+#: A sweep chose the rows and ``triton_conv3d/bench/conv_bench.py`` reproduces
+#: it.  Only channel pairs that were actually timed appear; a miss falls to the
+#: heuristic on the effective widths rather than to an extrapolation.
 #:
-#: Three things this table records that the forward's does *not*:
-#:
-#: * ``BLOCK_N`` runs to **256**.  The GEMM's N is ``Cin``, so the decoder
-#:   convolutions whose forward is skinny (``Cout=64``) are the widest ones
-#:   here, and the tile follows.
-#: * ``BLOCK_K`` of **32** wins twice.  The reduction is ``Cout * 27``, which for
-#:   ``Cout=64`` is only 1728, and a deep K-tile then wastes the tail.
-#: ``GROUP_M`` and ``matrix_instr_nonkdim`` are pinned at 6 and 16, as in the
-#: forward, and both were re-checked here rather than inherited.  ``nonkdim=32``
-#: won exactly one pair (``64 -> 64``) and forcing 16 there costs **0.3%**.
-#: ``GROUP_M=8`` won 8 of 21 problems with a geometric mean of 1.006x, and that
-#: count is biased in its favour -- the sweep only tries 8 on each problem's
-#: finalists -- so 6 (MI300A's XCD count) is used throughout.  Selecting each
-#: entry from the ``g6``/``nk16`` arm alone, which is the arm every configuration
-#: was timed in, costs a geometric mean of **1.9%** against the per-problem best.
+#: Two rules this table encodes that the forward's does *not*: ``BLOCK_N`` runs
+#: up to 256, because the GEMM's N is ``Cin`` and the convolutions whose forward
+#: is skinny are the widest ones here; and ``BLOCK_K`` drops to 32 where
+#: ``Cout`` is small, because the reduction is ``Cout * taps`` and a deep K-tile
+#: then wastes the tail.  ``GROUP_M`` is 6 (MI300A's XCD count) and
+#: ``matrix_instr_nonkdim`` 16 throughout, as in the forward, both re-measured
+#: here rather than inherited.
 _TUNED_BWD: dict[tuple, ConvConfig] = {
     **{
         tune_key(torch.bfloat16, cin, cout, (3, 3, 3)): cfg
@@ -168,15 +147,10 @@ _TUNED_BWD: dict[tuple, ConvConfig] = {
     # (``p' = 0``) and a reduction of just ``Cout = 6``, so it is a different
     # regime from every entry above and gets its own key.
     #
-    # ``num_warps = 2``, not the 4 the original sweep shipped, and that is the
-    # only axis of this entry that moved: that sweep drew ``num_warps`` from
-    # ``{4, 8, seed}``, so 1 and 2 were never timed at any site in this
-    # project.  Raced at all three head volumes, 2 is 1.099x, 1.057x and 1.101x
-    # over 4, and 8 is 0.89-0.90x.  The reduction here is
-    # ``Cout * taps = 6``, one MFMA fragment deep, so a second pair of waves has
-    # nothing to reduce and only replicates the addressing.  1 warp is within
-    # noise of 2 at this site and is 0.245x at ``128 -> 128 @ 66^3``, so the
-    # narrow regime is where this stops, not a direction-wide rule.
+    # ``num_warps = 2``: the reduction is ``Cout * taps = 6``, one MFMA fragment
+    # deep, so a second pair of waves has nothing to reduce and only replicates
+    # the addressing.  That holds because this site is narrow; it is not a
+    # direction-wide rule, and warps below 4 lose badly at the wide pairs.
     tune_key(torch.bfloat16, 64, 6, (1, 1, 1)): _tuned(256, 64, 16, 2),
 }
 
@@ -290,11 +264,9 @@ def is_supported_bwd_data(
     for i in range(3):
         if int(grad_output.shape[2 + i]) != in_sp[i] + 2 * p[i] - d[i] * (k[i] - 1):
             return False
-    # ``n`` alongside the spatial extents, for the same reason: this predicate's
-    # own "every output voxel must exist" argument excludes an empty batch, and
-    # a gate that answers ``True`` for a problem with no voxels in it is stating
-    # something it has not checked.  Costs a fallback to MIOpen on a call that
-    # has nothing to compute.
+    # ``n`` alongside the spatial extents: an empty batch has no output voxels,
+    # so answering ``True`` would assert something this predicate has not
+    # checked.  Costs only a fallback on a call with nothing to compute.
     if n < 1 or any(v < 1 for v in in_sp):
         return False
     return True
@@ -322,7 +294,7 @@ def conv3d_backward_data(
     mismatch is the cheapest available check that the caller has not paired a
     ``grad_output`` with the wrong problem.
 
-    ``weight_rsck`` is the **forward's** RSCK buffer, ``(kd, kh, kw, Cin,
+    ``weight_rsck`` is the *forward's* RSCK buffer, ``(kd, kh, kw, Cin,
     Cout)`` -- the same tensor
     :func:`~triton_conv3d.gather_gemm.conv3d_forward` takes, not a second one
     transformed for this direction.  It is optional and, on a
@@ -357,21 +329,18 @@ def conv3d_backward_data(
     # A *view* in both branches, never a copy.  The effective convolution's
     # channel widths are the real one's swapped, and ``permute`` is exactly that
     # relabelling: the forward's :func:`~triton_conv3d.gather_gemm._weight_plan`
-    # reads the resulting strides and picks the load orientation off them, so
-    # both of these are addressed in place.
+    # reads the resulting strides and picks the load orientation off them.
     #
     # * the parameter itself becomes ``(Cin, Cout, kd, kh, kw)``.  Channels-last
-    #   makes its ``Cin`` contiguous, which is this GEMM's N -- the same
-    #   ``W_ORDER == 0`` load the forward has always used, at a different stride.
+    #   makes its ``Cin`` contiguous, which is this GEMM's N -- the forward's
+    #   ``W_ORDER == 0`` load at a different stride.
     # * the forward's RSCK buffer becomes the same shape with ``Cout``
     #   contiguous, i.e. this GEMM's K, so its N is strided and it takes the
-    #   general load.  Tap ``t`` of this direction is tap ``flip(t)`` of the
-    #   weight and its matrix is the transpose; both are addressing, and neither
-    #   is a copy or a register shuffle.
+    #   general load.  Tap ``t`` here is tap ``flip(t)`` of the weight and its
+    #   matrix is the transpose; both are addressing, neither is a copy.
     #
-    # ``out=`` is still validated by the forward rather than here, and that is
-    # exact rather than approximate: the effective forward's output shape
-    # ``(n, Cin_eff, out_d, out_h, out_w)`` *is* ``input_shape``.
+    # ``out=`` is validated by the forward rather than here, and that is exact:
+    # the effective forward's output shape *is* ``input_shape``.
     if weight_rsck is None:
         w_view = weight.permute(1, 0, 2, 3, 4)
     else:

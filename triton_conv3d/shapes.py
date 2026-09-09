@@ -4,18 +4,18 @@
 Three sources:
 
 ``scaffold_corpus()``
-    The 57 distinct convolutions that occur in real ScaFFold runs, extracted
-    from ``model-analysis/unet_shapes.py`` dumps for the three profiled
-    configurations (scale 7 on 1 GPU, scale 8 sharded over 2 and over 4 GPUs)
-    and joined with the measured MIOpen cost and roofline efficiency of each.
-    This is the tuning target and the priority list.
+    The distinct convolutions that occur in real ScaFFold runs, extracted from
+    ``model-analysis/unet_shapes.py`` dumps for the profiled configurations
+    (scale 7 on 1 GPU, scale 8 sharded over 2 and over 4 GPUs) and joined with
+    the measured MIOpen cost and roofline efficiency of each.  This is the
+    tuning target and the priority list.
 
 ``census_corpus()``
-    Every convolution an **instrumented ScaFFold training step actually
-    issued**, at the four configurations the current benchmark harness runs.
-    Recorded by wrapping the entry points inside a running step, so it is a
-    measurement rather than a model.  It carries no MIOpen timings; it exists
-    to say what the shapes *are*.
+    Every convolution an instrumented ScaFFold training step actually issued,
+    at the configurations the benchmark harness runs.  Recorded by wrapping the
+    entry points inside a running step, so it is a measurement rather than a
+    model.  It carries no MIOpen timings; it exists to say what the shapes
+    *are*.
 
 ``edge_cases()``
     Synthetic problems chosen to break addressing, masking and tiling
@@ -32,14 +32,11 @@ One problem, three forms
 ========================
 
 A single ScaFFold convolution reaches a kernel in three different shapes
-depending on *who* issues it, and they are three different tuning problems --
-MIOpen keys its find database on the padding, this package's ``bwd_data_config``
-derives ``M`` from it, and every one of them is a different *measurement*.
-Confusing them has already cost this project one wrong projection, so
+depending on *who* issues it, and they are three different tuning problems:
+MIOpen keys its find database on the padding, and this package's
+``bwd_data_config`` derives ``M`` from it.  They are easy to confuse, so
 :attr:`ConvProblem.form` names which one an instance is and every corpus
-accessor says which it returns.  (``bwd_weight_config`` used to change its
-answer on the padding as well; that clause went on 2026-08-05 and the forms are
-still three problems without it.)
+accessor says which it returns.
 
 ``"logical"``
     The convolution as ``unet_parts.py`` states it: the local shard at the
@@ -47,20 +44,19 @@ still three problems without it.)
     :func:`scaffold_corpus` stores.
 
 ``"distconv"``
-    What upstream DistConv hands the backend: it concatenates a ``k // 2`` halo
-    on **every dimension listed in ``dc_shard_dims``**, split or not, and zeroes
-    the padding there.  :attr:`ConvProblem.halo_variant`.  This is the form the
-    MIOpen baseline in ``measured`` was profiled in, and it is the incumbent's
-    problem.
+    What upstream DistConv hands the backend: a ``k // 2`` halo on *every*
+    dimension listed in ``dc_shard_dims``, split or not, with the padding
+    zeroed there.  :attr:`ConvProblem.halo_variant`.  The MIOpen baseline in
+    ``measured`` was profiled in this form; it is the incumbent's problem.
 
 ``"adapter"``
     What ``ScaFFold/unet/conv3d.py`` -- the shipped Triton rung -- hands the
-    kernel: it exchanges a halo only on axes that are *genuinely split*, so at
+    kernel: a halo only on axes that are *genuinely split*, so at
     ``dc_num_shards = (1, 1, 1)`` nothing is exchanged and the convolution is
     padded on all three axes, and at ``(2, 1, 1)`` or ``(4, 1, 1)`` only D is
     halo'd while H and W stay padded.  :attr:`ConvProblem.production_variant`.
-    **This is the form production actually runs today**, at every
-    configuration, and it is padded at every one of them.
+    This is the form production runs, at every configuration, and it is padded
+    at every one of them.
 """
 
 from __future__ import annotations
@@ -85,8 +81,8 @@ Form = Literal["logical", "distconv", "adapter"]
 FORMS: tuple[Form, ...] = ("logical", "distconv", "adapter")
 
 #: Empirical MI300A roofline constants, supplied rather than derived.  They are
-#: measured ceilings: a kernel that exceeds one is a fact about the measurement,
-#: not necessarily an error.
+#: measured ceilings, so a kernel that exceeds one is a fact about the
+#: measurement and not necessarily an error.
 HBM_BYTES_PER_S = 3.3e12
 PEAK_FLOPS = {"fp32": 82.6e12, "bf16": 600e12, "fp16": 600e12}
 ELEM_BYTES = {"fp32": 4, "bf16": 2, "fp16": 2}
@@ -98,9 +94,9 @@ INT32_MAX = 2**31 - 1
 #: Triton's runtime specializer tags a pointer argument ``tt.pointer_range = 32``
 #: -- the flag that lets the backend emit ``buffer_load_dwordx4`` rather than
 #: ``global_load_dwordx4`` -- from ``arg.untyped_storage().size() <= 2**31 - 1``.
-#: That check reads the whole *storage* and it counts *bytes*, so it is a
-#: different question from whether an element index overflows int32, and the two
-#: answers differ by ``elem_bytes``.
+#: That check reads the whole *storage* and counts *bytes*, so it is a different
+#: question from whether an element index overflows int32; the two answers
+#: differ by ``elem_bytes``.
 BUFFER_OP_MAX_BYTES = 2**31 - 1
 
 
@@ -135,16 +131,16 @@ class ConvProblem:
     measured: tuple[dict, ...] = ()
     #: Set for problems that need a lot of memory or a long time; opt-in.
     large: bool = False
-    #: **Upstream DistConv's** halo width per spatial dim: ``k // 2`` on every
-    #: dim listed in ``dc_shard_dims``, whether or not that dim is actually
-    #: split.  Non-zero means the *MIOpen* rung -- which goes through
+    #: *Upstream DistConv's* halo width per spatial dim: ``k // 2`` on every dim
+    #: listed in ``dc_shard_dims``, whether or not that dim is actually split.
+    #: Non-zero means the *MIOpen* rung -- which goes through
     #: ``distconv_forward`` -- runs the convolution unpadded at a larger extent;
     #: see :meth:`halo_variant`.  It says nothing about the Triton rung, which
     #: exchanges only what :attr:`shard_halo` records.  Zero for synthetic
     #: problems.
     halo: tuple[int, int, int] = (0, 0, 0)
-    #: **The ScaFFold Triton adapter's** halo width per spatial dim: ``k // 2``
-    #: on the dims that are genuinely split (``dc_num_shards > 1``) and zero
+    #: *The ScaFFold Triton adapter's* halo width per spatial dim: ``k // 2`` on
+    #: the dims that are genuinely split (``dc_num_shards > 1``) and zero
     #: elsewhere, because ``ScaFFold/unet/conv3d.py``'s ``_halo_plan`` skips an
     #: unsplit axis and leaves the module's own padding on it.  This is what
     #: separates the production form from DistConv's -- see
@@ -153,7 +149,7 @@ class ConvProblem:
     #: Which of the three statements of the problem this instance is.  Set by
     #: :meth:`halo_variant` and :meth:`production_variant`; ``"logical"``
     #: otherwise.  Carried so that a table row, a benchmark cell and a JSON
-    #: record all say which shape they measured instead of leaving it to be
+    #: record all say which shape they describe instead of leaving it to be
     #: inferred from the padding.
     form: Form = "logical"
 
@@ -194,44 +190,37 @@ class ConvProblem:
 
     @property
     def halo_variant(self) -> "ConvProblem":
-        """The same convolution in the form **upstream DistConv** issues it.
+        """The same convolution in the form *upstream DistConv* issues it.
 
         ``distconv_forward`` never lets PyTorch pad a convolution on a dimension
         it manages.  It concatenates a halo slab of width ``k // 2`` onto both
         faces -- neighbour data, or zeros at the mesh boundary and at one shard
-        -- and then sets that dimension's padding to zero (``distconv.py``).
-        It does this for **every dim in ``dc_shard_dims``**, including dims with
-        a single shard, where the slab is provably zeros; that is why
-        :attr:`halo` is ``(1, 1, 1)`` on every ``k = 3`` corpus problem even at
-        one GPU.  So the tensor MIOpen sees is two voxels larger per listed axis
-        and the convolution is unpadded.
+        -- and then sets that dimension's padding to zero (``distconv.py``).  It
+        does this for *every* dim in ``dc_shard_dims``, including dims with a
+        single shard, where the slab is provably zeros; that is why :attr:`halo`
+        is ``(1, 1, 1)`` on every ``k = 3`` corpus problem even at one GPU.  So
+        the tensor MIOpen sees is two voxels larger per listed axis and the
+        convolution is unpadded.
 
-        **This is the incumbent's form, not the shipped one.**  ScaFFold routes
-        its convolutions through ``ScaFFold/unet/conv3d.py``, which performs the
+        This is the incumbent's form, not the shipped one.  ScaFFold routes its
+        convolutions through ``ScaFFold/unet/conv3d.py``, which performs the
         exchange itself and only on axes that are genuinely split -- see
         :meth:`production_variant`.  The MIOpen numbers in :attr:`measured` were
-        profiled through DistConv, so they *are* timings of this form, and it is
-        the right form to compare an MIOpen baseline in; it is not the form the
-        Triton kernels are handed.
+        profiled through DistConv, so this is the right form to hold an MIOpen
+        baseline in and not the form the Triton kernels are handed.
 
-        This distinction is not cosmetic.  MIOpen keys its find database on the
-        whole problem descriptor, padding included: ``64-128-128-128-...-1x1x1``
-        and ``64-130-130-130-...-0x0x0`` are two different problems that tune
-        independently and can land on different kernels.  This package used to
-        change its own answer on it too -- :func:`~triton_conv3d.reduce_gemm.
-        bwd_weight_config` declined a tuned row with ``TAP_BLOCK > 1`` on a
-        padded convolution until 2026-08-05 -- and no longer does; but the two
-        forms remain different *problems*, they are timed differently, and
-        :func:`~triton_conv3d.bwd_data.bwd_data_config` still reads the padding
+        The distinction is not cosmetic: MIOpen keys its find database on the
+        whole problem descriptor, padding included, so the padded and unpadded
+        statements tune independently and can land on different kernels, and
+        :func:`~triton_conv3d.bwd_data.bwd_data_config` reads the padding
         because it derives ``M`` from it.
 
         The cost model follows the shape rather than being special-cased: the
-        halo'd form genuinely reads a slightly larger input and genuinely
-        produces a slightly larger input gradient, and :meth:`flops` and
-        :meth:`bytes` say so because they are derived from ``spatial``.
-        Returns ``self`` when there is no halo -- the three forms genuinely
-        coincide there, and returning an unequal copy would only make a
-        distinction the problem does not have.
+        halo'd form genuinely reads a larger input and produces a larger input
+        gradient, and :meth:`flops` and :meth:`bytes` say so because they are
+        derived from ``spatial``.  Returns ``self`` when there is no halo -- the
+        three forms coincide there, and returning an unequal copy would only
+        invent a distinction the problem does not have.
         """
         if not any(self.halo):
             return self
@@ -247,7 +236,7 @@ class ConvProblem:
 
     @property
     def production_variant(self) -> "ConvProblem":
-        """The same convolution in the form **ScaFFold runs it today**.
+        """The same convolution in the form *ScaFFold runs it*.
 
         ``ScaFFold/unet/conv3d.py``'s ``_halo_plan`` walks the parallel
         strategy and ``continue``s past any axis with a single shard, so it
@@ -261,17 +250,15 @@ class ConvProblem:
         * sharded, D is halo'd and H and W are still padded --
           ``padding = (0, 1, 1)`` at ``(D_loc + 2, H, W)``.
 
-        **Every production convolution with ``k > 1`` is therefore padded, at
-        every configuration.**  Measured inside running steps at all four, not
-        inferred: 18 of the 19 distinct ordinary convolutions at scale 7 on
-        one GPU arrive with ``padding = (1, 1, 1)``, and the nineteenth is the
-        ``k = 1`` head, which has no padding to begin with.
+        Every production convolution with ``k > 1`` is therefore padded, at
+        every configuration; the census of running steps behind
+        :func:`census_corpus` confirms it rather than leaving it inferred.
 
-        Dropping the zero slabs on the unsplit axes is a deliberate and
-        separately verified decision -- ``cat(zeros, x, zeros)`` at
-        ``padding = 0`` is the same arithmetic as ``padding = k // 2`` on ``x``,
-        and it is measured bitwise identical through these kernels -- so this is
-        not a divergence to be repaired but the shape to be tuned for.
+        Dropping the zero slabs on the unsplit axes is deliberate and separately
+        verified: ``cat(zeros, x, zeros)`` at ``padding = 0`` is the same
+        arithmetic as ``padding = k // 2`` on ``x``, and is bitwise identical
+        through these kernels.  So this is not a divergence to be repaired but
+        the shape to be tuned for.
 
         Returns ``self`` when nothing is split, for the same reason
         :meth:`halo_variant` does: unsharded, the logical statement *is* what
@@ -408,16 +395,12 @@ class ConvProblem:
 
         Counted in elements because that is what a Triton offset holds: the
         largest one is ``max_elements - 1``, so the boundary sits at ``2**31``
-        elements and not at ``INT32_MAX``.  (The old form compared
-        ``max_elements > INT32_MAX``, which fires one element early -- harmless,
-        but it made the predicate hard to reason about at the boundary the
-        edge cases exist to pin.)
+        elements and not at ``INT32_MAX``.
 
-        This is emphatically **not** the 2 GiB cliff.  No corpus problem
-        reaches it in either shape mode, including the cliff cell itself:
-        ``conv 128->64 k3 @ 130x258x258`` holds 1.108e9 elements -- half of
-        int32's range -- in 2.22 GiB of storage.  What that shape loses is
-        buffer ops, which is :attr:`buffer_ops_eligible`.
+        This is *not* the buffer-op cliff, which counts bytes: a shape can be
+        well under the element limit while its storage is over the byte limit,
+        and that is what :attr:`buffer_ops_eligible` answers.  No corpus problem
+        reaches this one in any of the three forms.
         """
         return self.max_elements - 1 > INT32_MAX
 
@@ -430,13 +413,11 @@ class ConvProblem:
     def buffer_ops_eligible(self) -> bool:
         """The larger activation still fits the buffer-load fast path.
 
-        False costs about 4.5% on the shapes we measured it on (M1), and it is
-        the property that separates the corpus's one cliff cell from the rest of
-        it: a 2.22 GiB activation is 3.2% over the byte limit while being
-        nowhere near the *element* limit.  Modelled from the shape, so it
-        assumes a freshly allocated tensor -- a narrowed view keeps its parent's
-        storage and ``conv_bench`` therefore measures the same predicate off
-        ``untyped_storage().size()`` instead.
+        False means the kernel loses buffer ops on that operand, which costs
+        real time; see :data:`BUFFER_OP_MAX_BYTES`.  Modelled from the shape, so
+        it assumes a freshly allocated tensor -- a narrowed view keeps its
+        parent's storage, and ``conv_bench`` therefore measures the same
+        predicate off ``untyped_storage().size()`` instead.
         """
         return self.max_activation_bytes <= BUFFER_OP_MAX_BYTES
 
@@ -454,13 +435,10 @@ class ConvProblem:
         """:attr:`label` plus the two things that make it a *different problem*.
 
         ``label`` names the operator, the channels, the kernel and the extent,
-        and every published table is keyed on it -- so it stays exactly as it
-        is.  It does not name the padding, and the padding is what separates the
-        three forms of the module docstring: ``conv 64->64 k3 @ 128x128x128``
-        alone does not say whether it is the padded convolution ScaFFold runs or
-        an unpadded one, and MIOpen and this package both answer differently on
-        that.  Use this wherever a reader could otherwise take a halo'd cell for
-        a production one.
+        and every published table is keyed on it, so it stays as it is.  It does
+        not name the padding, and the padding is what separates the three forms
+        of the module docstring.  Use this wherever a reader could otherwise
+        take a halo'd cell for a production one.
         """
         p = ",".join(map(str, self.padding))
         return f"{self.label} p{p} [{self.form}]"
@@ -520,24 +498,22 @@ def scaffold_corpus() -> tuple[ConvProblem, ...]:
 
 @functools.lru_cache(maxsize=1)
 def halo_corpus() -> tuple[ConvProblem, ...]:
-    """The corpus as **upstream DistConv** issues it: halo'd input, no padding.
+    """The corpus as *upstream DistConv* issues it: halo'd input, no padding.
 
     This -- not :func:`scaffold_corpus` -- is what the ``measured`` MIOpen
-    timings in the corpus are timings *of*, because the profile that produced
-    them ran through ``distconv_forward``.  It is therefore the right form to
-    hold an *MIOpen baseline* in, and the wrong one to hold a Triton result in:
-    the shipped Triton rung is handed :func:`production_corpus`'s form instead.
-    :func:`scaffold_corpus` keeps the logical, unhaloed statement of each
-    problem because that is what the shape dump records and what the FLOP model
-    is naturally expressed in; the three differ by
-    :meth:`ConvProblem.halo_variant` and :meth:`ConvProblem.production_variant`.
+    timings are timings *of*, because the profile that produced them ran through
+    ``distconv_forward``.  So it is the right form to hold an MIOpen baseline in
+    and the wrong one to hold a Triton result in: the shipped Triton rung is
+    handed :func:`production_corpus`'s form instead.  :func:`scaffold_corpus`
+    keeps the logical, unhaloed statement, which is what the shape dump records
+    and what the FLOP model is naturally expressed in.
     """
     return tuple(p.halo_variant for p in scaffold_corpus())
 
 
 @functools.lru_cache(maxsize=1)
 def production_corpus() -> tuple[ConvProblem, ...]:
-    """The corpus in the form **ScaFFold runs today** -- padded, mostly.
+    """The corpus in the form *ScaFFold runs* -- padded, mostly.
 
     :meth:`ConvProblem.production_variant` of every corpus problem: the local
     shard with a halo on the genuinely split axis only, and the module's own
@@ -557,29 +533,28 @@ def census_corpus() -> tuple[ConvProblem, ...]:
     """Every convolution an instrumented ScaFFold step actually issued.
 
     Recorded by a census harness that wraps ``FastConv3d`` /
-    ``FastConvTranspose3d`` and the six kernel entry points and
-    runs three real training steps at each of the four configurations the
-    benchmark harness uses (A = scale 7 / 1 GPU, B = scale 8 / 1 GPU, C = scale
-    8 / 2 GPUs, D = scale 8 / 4 GPUs).  Every problem here is in
-    :attr:`ConvProblem.form` ``"adapter"`` by construction: it is the shape and
-    padding the kernel was handed, read off the call.
+    ``FastConvTranspose3d`` and the six kernel entry points and runs real
+    training steps at each of the four configurations the benchmark harness uses
+    (A = scale 7 / 1 GPU, B = scale 8 / 1 GPU, C = scale 8 / 2 GPUs, D = scale 8
+    / 4 GPUs).  Every problem here is in :attr:`ConvProblem.form` ``"adapter"``
+    by construction: it is the shape and padding the kernel was handed, read off
+    the call.
 
-    Why this exists beside :func:`scaffold_corpus`, rather than being folded
-    into it:
+    Why this exists beside :func:`scaffold_corpus` rather than being folded into
+    it:
 
     * it covers a configuration the profiled corpus does not (scale 8 on one
-      GPU), and a *network depth* the profiled corpus does not -- the shape
-      dumps behind :func:`scaffold_corpus` were taken at
-      ``unet_bottleneck_dim = 4`` at scale 8, giving a four-layer model topping
-      out at 1024 channels, while every step-level measurement in this project
-      runs the shipped default of 3, i.e. a five-layer model topping out at 2048;
+      GPU), and a *network depth* it does not -- the shape dumps behind
+      :func:`scaffold_corpus` were taken at ``unet_bottleneck_dim = 4``, a
+      four-layer model, while every step-level measurement runs the shipped
+      default of 3, a five-layer one with twice the bottleneck width;
     * it carries no ``measured`` MIOpen data and no cost ordering, so it is not
       a priority list and must not be used as one;
     * and :func:`scaffold_corpus`'s ordering, indices and contents are the key
       every stored capture in this project refers to, so they do not move.
 
     ``large`` is set from the activation size, so a caller that iterates this
-    without opting in does not try to allocate the 2 GiB scale-8 unsharded
+    without opting in does not try to allocate the scale-8 unsharded
     activations.
     """
     if not _CENSUS_PATH.exists():  # pragma: no cover - shipped with the package
@@ -675,13 +650,12 @@ def edge_cases(include_large: bool = False) -> tuple[ConvProblem, ...]:
             padding=(0, 1, 1),
             sites=("synthetic",),
         ),
-        # The padding a *sharded* ScaFFold convolution actually reaches the
-        # kernel with: a symmetric ``k = 3`` with the split axis halo'd (so
-        # ``p = 0`` there) and H and W still padded.  Anisotropic padding under
-        # an isotropic kernel is a combination nothing else here produces --
-        # ``kernel_aniso`` gets its zero from ``kd = 1``, where the boundary
-        # predicate on D is dead for a different reason -- and it is the form
-        # every k=3 site runs at ``dc_num_shards = (2,1,1)`` or ``(4,1,1)``.
+        # The padding a *sharded* ScaFFold convolution reaches the kernel with:
+        # a symmetric ``k = 3`` with the split axis halo'd (so ``p = 0`` there)
+        # and H and W still padded.  Anisotropic padding under an isotropic
+        # kernel is a combination nothing else here produces -- ``kernel_aniso``
+        # gets its zero from ``kd = 1``, where the boundary predicate on D is
+        # dead for a different reason.
         ConvProblem(
             "shard_padded", 32, 32, (8, 8, 8), padding=(0, 1, 1), sites=("synthetic",)
         ),
@@ -705,19 +679,14 @@ def edge_cases(include_large: bool = False) -> tuple[ConvProblem, ...]:
         ConvProblem("fp16", 32, 32, (8, 8, 8), dtype="fp16", sites=("synthetic",)),
     ]
     if include_large:
-        # The 2**31 *element* boundary, bracketed.  ``1 x 128 x 258^3`` =
-        # 2.198e9 elements is the unsharded scale-8 activation that makes MIOpen
-        # assert; ``255^3`` is the largest volume of the same shape family that
-        # still fits an int32 index, at 2.122e9 elements.  The pair differs only
-        # in spatial extent so that what it brackets is the boundary and not a
-        # change of channel width or kernel as well.
-        #
-        # The previous ``int32_below`` was ``64 -> 64 @ 512^3``: 8.59e9
-        # elements, four times *above* the boundary it was meant to sit below,
-        # so the pair pinned nothing and the low case needed 16 GiB per
-        # activation.  Both of these are 4.2-4.4 GiB in bf16 and both are past
-        # the buffer-op byte limit -- see :attr:`ConvProblem.buffer_ops_eligible`
-        # for why that is a different question from this one.
+        # The 2**31 *element* boundary, bracketed.  ``1 x 128 x 258^3`` is the
+        # unsharded scale-8 activation that makes MIOpen assert and sits just
+        # above it; ``255^3`` is the largest volume of the same shape family
+        # that still fits an int32 index.  The pair differs only in spatial
+        # extent, so what it brackets is the boundary and not a change of
+        # channel width or kernel as well.  Both are past the buffer-op byte
+        # limit -- see :attr:`ConvProblem.buffer_ops_eligible` for why that is a
+        # different question from this one.
         cases += [
             ConvProblem(
                 "int32_below",
@@ -747,9 +716,8 @@ def all_problems(include_large: bool = False) -> Iterator[ConvProblem]:
 def problems_in_form(form: Form) -> tuple[ConvProblem, ...]:
     """The corpus in one of the three forms, chosen by name.
 
-    A driver that takes a ``--form`` flag wants exactly this, and wants it in
-    one place: the mapping from the word a user typed to the shape a kernel is
-    handed is the thing this whole distinction exists to keep honest.
+    A driver with a ``--form`` flag wants exactly this, in one place: the
+    mapping from the word a user typed to the shape a kernel is handed.
     """
     return {
         "logical": scaffold_corpus,

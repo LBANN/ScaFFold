@@ -2,22 +2,21 @@
 """Transposed 3-D convolution at ``kernel == stride``, on NDHWC tensors.
 
 ScaFFold's decoder upsamples with four ``nn.ConvTranspose3d(k=2, s=2, p=0)``
-sites.  That case is *much* simpler than a general transposed convolution, and
-the whole design here follows from one observation:
+sites, and the whole design here follows from one property of that case:
 
-    at ``kernel == stride`` and no padding the scatter windows **tile** the
-    output rather than overlapping, so every output voxel receives exactly one
+    at ``kernel == stride`` and no padding the scatter windows tile the output
+    rather than overlapping, so every output voxel receives exactly one
     contribution.
 
-Concretely, with ``k = s`` the map ``(d, kd) -> D = d*k + kd`` is a bijection
-onto ``[0, k*ID)`` -- it is just base-``k`` positional notation -- so
+The map ``(d, kd) -> D = d*k + kd`` is then a bijection onto ``[0, k*ID)`` --
+base-``k`` positional notation -- so
 
-    y[n, oc, d*KD+kd, h*KH+kh, w*KW+kw] = sum_ic x[n, ic, d, h, w] * w[ic, oc, kd, kh, kw]
+    y[n,oc,d*KD+kd,h*KH+kh,w*KW+kw] = sum_ic x[n,ic,d,h,w] * w[ic,oc,kd,kh,kw]
 
-with **no sum over taps at all**.  There is no accumulation across windows and
-no overlap-add: the operator is a pointwise GEMM from ``Cin`` to ``Cout * taps``
-channels, followed by an interleave of those ``taps`` groups into the ``taps``
-sub-lattices of the output volume -- a 3-D pixel shuffle.
+with no sum over taps: no accumulation across windows and no overlap-add.  The
+operator is a pointwise GEMM from ``Cin`` to ``Cout * taps`` channels, followed
+by an interleave of those ``taps`` groups into the ``taps`` sub-lattices of the
+output volume -- a 3-D pixel shuffle.
 
 Three directions, one new kernel
 ================================
@@ -35,33 +34,29 @@ already serves:
 
 Comparing that with the display above:
 
-* **backward-data is exactly** ``C(grad_output, w)``.  A strided forward
-  convolution, so :func:`~triton_conv3d.gather_gemm.conv3d_forward` serves it
-  with no new code and no permute of the parameter -- the transposed operator's
-  weight already *is* the shape a ``Cout -> Cin`` convolution wants.
-* **backward-weight is exactly** ``C``'s backward-weight, with ``grad_output``
-  in the "input" slot and ``x`` in the "grad_output" slot.  Backward-weight has
-  no stride restriction (its reduction is indexed by the output voxel), so
+* backward-data is ``C(grad_output, w)``, so
+  :func:`~triton_conv3d.gather_gemm.conv3d_forward` serves it with no permute of
+  the parameter -- the transposed operator's weight already *is* the shape a
+  ``Cout -> Cin`` convolution wants.
+* backward-weight is ``C``'s backward-weight, with ``grad_output`` in the
+  "input" slot and ``x`` in the "grad_output" slot.  Backward-weight has no
+  stride restriction (its reduction is indexed by the output voxel), so
   :func:`~triton_conv3d.reduce_gemm.conv3d_backward_weight` serves it unchanged,
   and it produces the gradient in ``channels_last_3d`` -- which for a
   ``(Cin, Cout, k, k, k)`` parameter is the layout ScaFFold's optimizer wants.
-* **the forward is** ``C``'s backward-*data*, which
+* the forward is ``C``'s backward-*data*, which
   :mod:`~triton_conv3d.bwd_data` refuses: its kernel-free formulation (the
   forward contraction on a flipped weight) holds only at unit stride, and at
   ``stride > 1`` the gather becomes a scatter into a sub-lattice.  That scatter
   is what :func:`_convT3d_fwd_kernel` below is.
-
-So this module adds one ``@triton.jit`` function and two thin re-expressions.
-The package's structural claim becomes: **four operators, three kernels.**
 
 The FLOP count has no per-tap factor
 ====================================
 ``2 * in_vol * Cin * Cout * taps`` looks like the general transposed formula and
 is not: the ``taps`` here is the *output/input volume ratio*, not a per-tap
 gather.  Each output voxel takes ``Cin`` MACs per output channel and there are
-``taps * in_vol`` of them.  Applying both factors at once overstates the count
-by ``taps`` -- 8x at ``k=2`` -- which this project did once;
-``shapes.ConvProblem.flops`` has it right and
+``taps * in_vol`` of them, so applying both factors at once overstates the count
+by ``taps``.  ``shapes.ConvProblem.flops`` has it right and
 ``test_shapes.py::test_transposed_flops_have_no_phantom_tap_factor`` pins it.
 Check any new arithmetic against :meth:`ConvProblem.gemm_shape`, which reports
 ``(in_vol, Cout*taps, Cin)`` for the forward -- one ``K = Cin``, no taps in it.
@@ -69,28 +64,24 @@ Check any new arithmetic against :meth:`ConvProblem.gemm_shape`, which reports
 Why the taps go in N and not in M
 =================================
 The GEMM is ``M = N*ID*IH*IW`` input voxels, ``N = Cout * taps``, ``K = Cin``,
-and the only real design question is which axis carries the taps.
+and the design question is which axis carries the taps.
 
-Putting them in **M** -- tiling the *output* volume, so each row is one output
-voxel and N is plain ``Cout`` -- gives a perfectly coalesced store and a
-correctly-once-written output, and then dies: the weight column a row needs
-depends on that row's tap, and ``kw`` alternates between adjacent rows along W.
-The B operand would have to vary down the M axis, which is not a GEMM.
+In M -- one output voxel per row, N plain ``Cout`` -- the weight column a row
+needs depends on that row's tap, and ``kw`` alternates between adjacent rows
+along W, so the B operand would have to vary down the M axis.  That is not a
+GEMM.
 
-Putting them in **N** keeps B constant per tile, and the tile's tap group is a
-function of the program id alone.  The store is then a scatter -- but a
-*structured* one: within one tap the columns are consecutive output channels at
-one voxel, i.e. contiguous, and the row-to-row step is ``k`` voxels.  With
-``TAP_BLOCK`` covering the ``kw`` pair and ``BLOCK_NC == Cout`` the tile is one
-dense run of memory outright.
+In N, B is constant per tile and the tile's tap group is a function of the
+program id alone.  The store becomes a scatter, but a *structured* one: within
+one tap the columns are consecutive output channels at one voxel, and the
+row-to-row step is ``k`` voxels; with ``TAP_BLOCK`` covering the ``kw`` pair and
+``BLOCK_NC == Cout`` the tile is one dense run of memory.
 
-``TAP_BLOCK`` is why the tap axis has to be in the tile rather than in the grid.
-Every tap of a given input voxel reads the *same* A row, so ``taps`` separate
-programs would read the input ``taps`` times -- 8x at ``k=2``, against an output
-that is only 4x the input at ``128 -> 64``, i.e. more traffic than the answer.
-One program spanning ``TAP_BLOCK`` taps loads A once for all of them, in exactly
-the way :mod:`~triton_conv3d.reduce_gemm` widens its N across taps and for
-exactly the same reason.
+The tap axis is in the tile and not in the grid because every tap of an input
+voxel reads the *same* A row: ``taps`` separate programs would read the input
+``taps`` times, where one program spanning ``TAP_BLOCK`` taps loads A once for
+all of them -- the way :mod:`~triton_conv3d.reduce_gemm` widens its N across
+taps, and for the same reason.
 """
 
 from __future__ import annotations
@@ -191,13 +182,12 @@ def _convT3d_fwd_kernel(
 ):
     # -- which tile this program owns --------------------------------------
     #
-    # The tap group is the *fastest*-varying part of the id, which is a cache
-    # decision rather than a cosmetic one: the programs that share an A tile are
-    # the ones differing only in tap group, and consecutive ids are dispatched
-    # together, so the second read of a row lands while the first is still in
-    # L2/MALL.  With the tap group slowest, every tap group would sweep the
-    # whole volume before the next one started and each sweep would come from
-    # HBM.  Within a tap group the ordinary grouped-M swizzle applies.
+    # The tap group is the *fastest*-varying part of the id, and that is a cache
+    # decision: the programs sharing an A tile are the ones differing only in
+    # tap group, and consecutive ids are dispatched together, so the second read
+    # of a row lands while the first is still in L2/MALL.  With the tap group
+    # slowest, each group would sweep the whole volume from HBM before the next
+    # started.  Within a tap group the ordinary grouped-M swizzle applies.
     pid = tl.program_id(0)
     grid_m = tl.cdiv(M_TOTAL, BLOCK_M)
     grid_nc = tl.cdiv(COUT, BLOCK_NC)
@@ -247,9 +237,9 @@ def _convT3d_fwd_kernel(
     # All hoisted out of the reduction: the column decomposition depends on the
     # tile and not on the reduction index.  ``BLOCK_NC``, ``KH`` and ``KW`` are
     # constexpr, so the divisions fold away.  No tap needs clamping here (unlike
-    # ``reduce_gemm``, whose 27 taps cannot be divided by a power of two):
-    # ``TAP_BLOCK`` is required to divide ``taps`` exactly, so every column
-    # addresses a real tap.
+    # ``reduce_gemm``, whose 27 taps have no power-of-two divisor): ``TAP_BLOCK``
+    # is required to divide ``taps`` exactly, so every column addresses a real
+    # tap.
     col = tl.arange(0, BLOCK_N)
     tap = pid_t * TAP_BLOCK + col // BLOCK_NC
     offs_n = pid_nc * BLOCK_NC + (col % BLOCK_NC)
@@ -270,11 +260,10 @@ def _convT3d_fwd_kernel(
         + offs_n.to(INDEX_DTYPE)
     )
     # B's column.  ``W_ORDER == 0`` means Cout is unit-stride, which is what a
-    # ``channels_last_3d`` ConvTranspose3d parameter is: its memory order is
-    # ``[Cin][kd][kh][kw][Cout]``, i.e. this GEMM's ``[K][tap][N]`` with N dense.
-    # That is the *good* case for this direction and it needs no transform,
-    # unlike the ordinary forward, where the same parameter layout puts the
-    # reduction axis in the contiguous slot.
+    # ``channels_last_3d`` ConvTranspose3d parameter is: memory order
+    # ``[Cin][kd][kh][kw][Cout]``, i.e. this GEMM's ``[K][tap][N]`` with N dense,
+    # so it needs no transform -- the opposite of the ordinary forward, where
+    # the same parameter layout puts the reduction axis in the contiguous slot.
     if W_ORDER == 0:
         w_col = tap.to(INDEX_DTYPE) * stride_wt + offs_n.to(INDEX_DTYPE)
     else:
@@ -287,9 +276,9 @@ def _convT3d_fwd_kernel(
         offs_k = k0 * BLOCK_K + tl.arange(0, BLOCK_K)
 
         # A: no gather and no boundary predicate.  Every input voxel of an
-        # in-range row contributes to every one of its taps, so the six compares
-        # the ordinary forward runs per tap do not exist here -- which is the
-        # whole reason ``kernel == stride`` is worth a kernel of its own.
+        # in-range row contributes to every one of its taps, so the per-tap
+        # bounds compares the ordinary forward runs do not exist here -- the
+        # reason ``kernel == stride`` is worth a kernel of its own.
         x_ptrs = X + x_row[:, None] + offs_k[None, :]
         if EVEN_K:
             a = tl.load(x_ptrs, mask=m_valid[:, None], other=0.0)
@@ -313,7 +302,7 @@ def _convT3d_fwd_kernel(
         # ``input_precision`` only bites for fp32 operands, where the backend's
         # default splits the dot into reduced-precision pieces.  bf16 already
         # accumulates in fp32 and is unaffected; fp32 is the ``more_determinism``
-        # path and has to actually be fp32, so it is asked for explicitly.
+        # path and has to really be fp32, so it is asked for explicitly.
         acc = tl.dot(a, b, acc, input_precision=INPUT_PRECISION)
 
     if HAS_BIAS:
@@ -343,8 +332,8 @@ class TransposedConfig(ConvConfig):
     :class:`~triton_conv3d.reduce_gemm.BwdWeightConfig` is one: the gather
     directions have no tap axis in their tile and a config printed in a forward
     sweep should not grow a suffix it cannot use.  ``BLOCK_N`` keeps its meaning
-    as the *full* tile width, so the inherited gfx942 legality rules and the
-    measured LDS model stay correct unchanged.
+    as the *full* tile width, so the inherited gfx942 legality and LDS rules
+    stay correct unchanged.
     """
 
     #: How many taps one tile spans.  ``BLOCK_N = TAP_BLOCK * BLOCK_NC``.
@@ -375,8 +364,8 @@ class TransposedConfig(ConvConfig):
 
 #: Below this many programs the grid cannot fill MI300A's 228 CUs.  The same
 #: value the gather kernel uses, restated rather than imported so that a change
-#: there is a deliberate change here too -- the two kernels have different
-#: occupancies and there is no measurement saying they should track.
+#: there is a deliberate change here too: the two kernels have different
+#: occupancies and nothing says they should track.
 _MIN_PROGRAMS = 114
 
 
@@ -385,19 +374,18 @@ def _fit_transposed(
 ) -> TransposedConfig:
     """Shrink a tile until it fits LDS *and* the grid fills the device.
 
-    Two shrinks, in this order, for the same reasons the gather kernel's
+    Two shrinks, in this order, for the reasons the gather kernel's
     :func:`~triton_conv3d.gather_gemm._fit_to_lds` and ``_fit_to_grid`` give:
     ``BLOCK_K`` first, because it changes neither the grid nor the parallelism;
-    then ``BLOCK_M``.  ``BLOCK_N`` is shrunk last and only down to
-    ``TAP_BLOCK * nonkdim``, because halving it below that would drop
-    ``BLOCK_NC`` under the MFMA granularity and the tile would be mostly
-    padding.
+    then ``BLOCK_M``.  ``BLOCK_N`` shrinks last and only down to
+    ``TAP_BLOCK * nonkdim``, below which ``BLOCK_NC`` drops under the MFMA
+    granularity and the tile is mostly padding.
 
-    The grid clause differs from the gather kernel's in one term and it matters:
+    The grid clause differs from the gather kernel's in one term that matters:
     this grid has ``taps // TAP_BLOCK`` tap groups in it, so a problem whose M
     and N alone look too small for 228 CUs may already fill them.  Leaving that
-    factor out would halve ``BLOCK_M`` at every decoder site and lose the reuse
-    for nothing.
+    factor out would halve ``BLOCK_M`` at every decoder site and lose the tap
+    reuse for nothing.
     """
     nk = cfg.matrix_instr_nonkdim
     kdim = _MFMA_KDIM.get(dtype, {}).get(nk)
@@ -440,11 +428,11 @@ def default_transposed_config(
     """A config that is legal for any shape this module accepts.
 
     ``TAP_BLOCK`` is the only choice here that is not the gather kernel's, and
-    it is chosen to cut the A traffic rather than to fill a tile: every tap of
-    an input voxel reads the same row, so a program spanning ``TAP_BLOCK`` taps
-    reads the input ``taps / TAP_BLOCK`` times instead of ``taps`` times.  It is
-    capped so the tile stays 256 columns wide -- past that the accumulator alone
-    is 128 registers per lane at four warps and occupancy collapses.
+    it cuts A traffic rather than filling a tile: every tap of an input voxel
+    reads the same row, so a program spanning ``TAP_BLOCK`` taps reads the input
+    ``taps / TAP_BLOCK`` times instead of ``taps`` times.  It is capped so the
+    tile stays 256 columns wide -- past that the accumulator alone is 128
+    registers per lane at four warps and occupancy collapses.
     """
     block_nc = _pow2_at_most(cout, 128)
     tap_block = _largest_pow2_divisor(taps, max(1, 256 // block_nc))
@@ -496,28 +484,23 @@ def transposed_tune_key(
 
 
 #: Measured winners for the transposed forward, keyed by ``(dtype, Cin, Cout,
-#: kernel)``: the four ``ConvTranspose3d`` channel pairs the model contains,
-#: swept over the tile and ``TAP_BLOCK`` grid of
-#: :func:`candidate_transposed_configs` and then raced against MIOpen.  A miss
-#: falls back to :func:`default_transposed_config`.
+#: kernel)``: the ``ConvTranspose3d`` channel pairs the model contains, swept
+#: over the tile and ``TAP_BLOCK`` grid of
+#: :func:`candidate_transposed_configs` and raced against MIOpen.  A miss falls
+#: back to :func:`default_transposed_config`.
 #:
 #: Keyed on the channel widths and not the volume, as the gather kernel's table
-#: is -- and with the same caveat, which this project has now paid for twice: a
-#: *speedup ratio* does not transfer across volume even when the winning tile
-#: does.  So only the *tile* is claimed to transfer, and only where it was
-#: measured winning at every volume the pair occurs at.  Each pair below occurs
-#: at three volumes (one per profiled configuration) and the entry named won all
-#: three; the speedups they produce differ by up to 2.3x between those volumes,
-#: and were therefore recorded per volume rather than averaged.
+#: is, and with the same caveat: a *speedup ratio* does not transfer across
+#: volume even when the winning tile does.  So only the *tile* is claimed to
+#: transfer, and only for a pair whose entry won at every volume that pair
+#: occurs at.
 #:
-#: **Two of the four pairs are deliberately absent.**  ``512 -> 256`` and
+#: Two of the four pairs are deliberately absent.  ``512 -> 256`` and
 #: ``1024 -> 512`` were swept just as thoroughly and
-#: :func:`default_transposed_config` picked the winner or a tie at every volume
-#: (within 0.4-8%, and the sweep's nominal best flipped tile between volumes),
+#: :func:`default_transposed_config` picked the winner or a tie at every volume,
 #: so an entry would restate the heuristic while claiming to have improved on
 #: it.  An absent row here means "measured, and the heuristic was right", which
-#: is a different statement from "never measured" -- the gather kernel's table
-#: had to learn that distinction the hard way.
+#: is a different statement from "never measured".
 _TUNED_T: dict[tuple, TransposedConfig] = {
     transposed_tune_key(torch.bfloat16, cin, cout, (2, 2, 2)): cfg
     for (cin, cout), cfg in {
@@ -525,8 +508,7 @@ _TUNED_T: dict[tuple, TransposedConfig] = {
         # 256-column tile spanning half the taps, against the heuristic's
         # ``BLOCK_NC = Cout, TAP_BLOCK = 2``.  Same column count, twice the tap
         # reuse: the input is read twice instead of four times, which is what
-        # this operator is short of at these channel widths.  Worth 1.12-1.23x
-        # over the heuristic and it is the whole gap between them.
+        # this operator is short of at these channel widths.
         (128, 64): _tuned(256, 64, 4, 64, 8),
         (256, 128): _tuned(128, 64, 4, 64, 8),
     }.items()
@@ -554,9 +536,9 @@ def transposed_config(
 
 
 #: Seed tiles for a sweep, ``(BLOCK_M, BLOCK_NC, BLOCK_K, num_warps)``.  Narrower
-#: than the gather kernel's grid because this GEMM's K is ``Cin`` alone -- there
-#: is no tap factor in it -- so a ``BLOCK_K`` above ``Cin`` is pure padding, and
-#: because ``TAP_BLOCK`` multiplies the column count on top of ``BLOCK_NC``.
+#: than the gather kernel's grid because this GEMM's K is ``Cin`` alone -- no tap
+#: factor -- so a ``BLOCK_K`` above ``Cin`` is pure padding, and because
+#: ``TAP_BLOCK`` multiplies the column count on top of ``BLOCK_NC``.
 _SEED_TILES: tuple[tuple[int, int, int, int], ...] = (
     (64, 64, 32, 4),
     (64, 64, 64, 4),
@@ -633,13 +615,13 @@ def to_tkn(w: torch.Tensor) -> torch.Tensor:
     """A ``(Cin, Cout, kd, kh, kw)`` transposed weight as ``(kd, kh, kw, Cin, Cout)``.
 
     The B tile wants ``[tap][K=Cin][N=Cout]`` with N dense, which is what this
-    produces.  **It is off the shipped path**: a ``channels_last_3d`` parameter
-    -- which is what ``worker.py`` makes every 5-D parameter -- already has
-    ``Cout`` unit-stride and the three kernel axes fused, so
+    produces.  It is off the shipped path: a ``channels_last_3d`` parameter --
+    which is what ``worker.py`` makes every 5-D parameter -- already has ``Cout``
+    unit-stride and the three kernel axes fused, so
     :func:`_transposed_weight_plan` addresses it in place and this copy never
-    runs.  Note that this is the opposite of the ordinary forward's situation,
-    where the same layout puts the *reduction* axis in the dense slot and the
-    tile has to be gathered.
+    runs.  That is the opposite of the ordinary forward's situation, where the
+    same layout puts the *reduction* axis in the dense slot and the tile has to
+    be gathered.
 
     Kept for the layouts the plan refuses -- chiefly PyTorch's default, where
     neither channel axis is unit-stride and every element of the B tile is its
@@ -654,9 +636,9 @@ def _transposed_weight_plan(w: torch.Tensor) -> tuple[int, int, int, int] | None
     ``w`` is the weight as PyTorch stores it for ``ConvTranspose3d``:
     ``(Cin, Cout, kd, kh, kw)``, i.e. dim 0 is this GEMM's reduction axis and
     dim 1 is its N.  That is the transpose of the ordinary convolution's
-    convention, which is why this cannot simply call
-    :func:`~triton_conv3d.gather_gemm._weight_plan`; everything else about it is
-    the same computation, including why it is a stride test rather than a
+    convention, which is why this cannot call
+    :func:`~triton_conv3d.gather_gemm._weight_plan`; everything else is the same
+    computation, including why it is a stride test rather than an
     ``is_contiguous(memory_format=...)`` one.
 
     ``None`` means materialize :func:`to_tkn` instead, for one of two reasons:
@@ -699,8 +681,8 @@ def _transposed_out_spatial(
     Spelled from ``kernel`` rather than from PyTorch's general
     ``(i-1)*s - 2p + d*(k-1) + 1 + output_padding`` because the gate has already
     pinned ``s == k``, ``p == 0``, ``d == 1`` and ``output_padding == 0``, at
-    which point that formula collapses to exactly this.  Writing the general one
-    here would suggest the module served the general case.
+    which point that formula collapses to this.  Writing the general one here
+    would suggest the module served the general case.
     """
     return tuple(int(i) * k for i, k in zip(in_spatial, kernel))  # type: ignore[return-value]
 
@@ -716,7 +698,7 @@ def _transposed_shape_ok(
 ) -> tuple[int, int, int] | None:
     """The kernel triple if this is a ``kernel == stride`` upsample, else ``None``.
 
-    Total, like the gates that call it: an argument it cannot interpret is a
+    Total, like the gates that call it: an argument it cannot interpret gives a
     ``None`` and never an exception, because these are the predicates of a
     Triton -> MIOpen rung ladder and a caller asking a question must not be
     taken down by the answer.
@@ -734,20 +716,19 @@ def _transposed_shape_ok(
         return None
     k = tuple(int(v) for v in w.shape[2:])
     # The whole of this module's mathematics: windows that tile rather than
-    # overlap.  ``k != s`` overlaps (or leaves gaps), a padding crops the
-    # result, an ``output_padding`` extends it asymmetrically and a dilation
-    # interleaves the window with holes -- each one breaks the bijection
-    # ``(d, kd) -> d*k + kd`` that makes every output voxel a single
-    # contribution, and none of them occurs in ScaFFold.
+    # overlap.  ``k != s`` overlaps or leaves gaps, a padding crops the result,
+    # an ``output_padding`` extends it asymmetrically, a dilation interleaves the
+    # window with holes -- each breaks the bijection ``(d, kd) -> d*k + kd`` that
+    # makes every output voxel a single contribution.
     if s != k or p != (0, 0, 0) or op != (0, 0, 0) or d != (1, 1, 1):
         return None
     if any(v < 1 for v in k):
         return None
     # Degenerate extents, refused for the same reason ``is_supported`` refuses
     # them: each clears every other test here and then disagrees with torch.  A
-    # zero-length spatial axis produces an empty output where the M-unravel has
-    # no rows to index; ``Cin = 0`` returns ``Cout`` channels of zeros where
-    # torch returns a tensor with no channels at all.
+    # zero-length spatial axis gives an empty output the M-unravel has no rows
+    # to index; ``Cin = 0`` returns ``Cout`` channels of zeros where torch
+    # returns a tensor with no channels at all.
     if any(int(v) < 1 for v in x.shape[2:]):
         return None
     if int(w.shape[0]) < 1 or int(w.shape[1]) < 1:
@@ -767,24 +748,22 @@ def is_supported_transposed(
 ) -> bool:
     """Whether :func:`conv_transpose3d_forward` will serve this call.
 
-    Deliberately conservative and **total**, for the reasons
+    Deliberately conservative and total, for the reasons
     :func:`~triton_conv3d.gather_gemm.is_supported` gives: the caller's fallback
     is MIOpen, which is correct everywhere, and an argument this cannot
     interpret has to be a ``False`` rather than an exception.
 
     ``w`` is PyTorch's ``ConvTranspose3d`` weight, ``(Cin, Cout, kd, kh, kw)``
-    -- the channel axes the other way round from ``nn.Conv3d``'s.  That is not a
-    detail: passing a ``Conv3d`` weight here would be accepted whenever the two
-    channel counts happen to match and would compute a transposed answer.
+    -- the channel axes the other way round from ``nn.Conv3d``'s.  Passing a
+    ``Conv3d`` weight here would be accepted whenever the two channel counts
+    happen to match and would compute a transposed answer.
 
-    **This gates the forward alone.**  Unlike the ordinary convolution, all three
-    of this operator's directions accept exactly the same problems -- both
-    backward directions are the *same* ``k == s`` convolution seen from the
-    other side -- so :func:`is_supported_transposed_all` should agree with this
-    on every input.  It exists anyway, and asks all three for real, because
-    "should agree" is an argument and the ladder needs a fact: the three gates
-    of the ordinary convolution were also expected to agree until ``stride > 1``
-    showed that they do not.
+    This gates the forward alone.  Unlike the ordinary convolution, all three of
+    this operator's directions accept the same problems -- both backward
+    directions are the *same* ``k == s`` convolution seen from the other side --
+    so :func:`is_supported_transposed_all` should agree with this on every
+    input.  It exists anyway, and asks all three for real, because "should
+    agree" is an argument where the ladder needs a fact.
     """
     k = _transposed_shape_ok(x, w, stride, padding, output_padding, dilation, groups)
     if k is None:
@@ -792,9 +771,9 @@ def is_supported_transposed(
     if x.dtype != w.dtype or x.dtype not in _MFMA_KDIM:
         return False
     # Same device, not merely both on *a* device.  Triton launches on the current
-    # device and dereferences the other pointer anyway; ScaFFold runs four GPUs
-    # per node, where peer access turns that into another rank's data rather
-    # than a fault.
+    # device and dereferences the other pointer anyway, and with peer access
+    # between the GPUs of a node that reads another rank's data rather than
+    # faulting.
     if not x.is_cuda or not w.is_cuda or w.device != x.device:
         return False
     if int(x.shape[1]) != int(w.shape[0]):
@@ -802,9 +781,8 @@ def is_supported_transposed(
     if bias is not None:
         # The kernel masks the bias load against ``Cout`` -- which says nothing
         # about how long the bias actually is -- and indexes it with an element
-        # stride of 1.  A short bias reads past the end and a stride-2 view of
-        # the right length silently applies every other value.
-        # ``torch.conv_transpose3d`` rejects both; so does this.  ``Cout`` is
+        # stride of 1.  A short bias reads past the end; a strided view of the
+        # right length silently applies the wrong values.  ``Cout`` is
         # ``w.shape[1]`` here, not ``w.shape[0]``.
         if (
             bias.dim() != 1
@@ -832,8 +810,8 @@ def is_supported_transposed_bwd_data(
 
     Asks the *ordinary* forward's gate about the strided convolution this
     direction actually is -- ``conv3d(grad_output, w, stride=k)`` -- rather than
-    re-deriving a predicate, so the two can never drift apart.  The extra checks
-    on top are the ones that gate cannot see: that the problem is a
+    re-deriving a predicate, so the two cannot drift apart.  The extra checks on
+    top are the ones that gate cannot see: that the problem is a
     ``kernel == stride`` upsample at all, and that ``input_shape`` is the shape
     this ``grad_output`` came from.
     """
@@ -922,16 +900,16 @@ def is_supported_transposed_all(
     The gate for a caller that is going to differentiate, and the counterpart of
     :func:`~triton_conv3d.gather_gemm.is_supported_all`.  A forward this package
     serves and a backward it cannot is discovered inside ``backward()``, where
-    the caller's fallback kernel is no longer reachable -- so a training caller
+    the caller's fallback kernel is no longer reachable, so a training caller
     must ask this one.
 
-    The gradient is passed as a **metadata-only stand-in**: all three predicates
+    The gradient is passed as a metadata-only stand-in: all three predicates
     read rank, shape, dtype, device and ``is_cuda`` and never a stride, a value
     or a contiguity, so a one-element allocation expanded to the output shape
     answers exactly as the real gradient would.  ``expand`` gives every dim a
-    stride of 0, so if a predicate ever grows a stride test it will see those
-    zeros and answer ``False`` -- a fallback to the caller's other kernel, which
-    is the safe direction.
+    stride of 0, so a predicate that ever grows a stride test will see those
+    zeros and answer ``False`` -- falling back to the caller's other kernel,
+    which is the safe direction.
     """
     if not is_supported_transposed(
         x, w, bias, stride, padding, output_padding, dilation, groups
@@ -984,8 +962,8 @@ def conv_transpose3d_forward(
     ``out=`` is checked rather than trusted, for the reason
     :func:`~triton_conv3d.gather_gemm._check_out` gives: the store addressing is
     derived from *this* call's shapes, so a mismatched buffer is an
-    out-of-bounds device write with no error and an NCDHW one is a full-rate
-    kernel returning a scrambled answer.
+    out-of-bounds device write with no error, and an NCDHW one returns a
+    scrambled answer at full speed.
     """
     if not is_supported_transposed(
         x, w, bias, stride, padding, output_padding, dilation, groups
@@ -1007,9 +985,9 @@ def conv_transpose3d_forward(
     y_shape = (n, cout, out_d, out_h, out_w)
     if out is None:
         # One allocation, already in the layout the kernel stores into.  Spelling
-        # it ``torch.empty(shape).contiguous(memory_format=...)`` allocates NCDHW
-        # and then copies the whole thing -- 235x, measured on the gather
-        # kernel's identically-shaped defect.
+        # it ``torch.empty(shape).contiguous(memory_format=...)`` instead
+        # allocates NCDHW and then copies the whole volume, which dwarfs the
+        # kernel -- the gather kernel had exactly that defect.
         y = torch.empty(
             y_shape,
             device=x.device,
@@ -1107,15 +1085,16 @@ def conv_transpose3d_backward_data(
 ) -> torch.Tensor:
     """Gradient of a ``k == s`` transposed convolution with respect to its input.
 
-    **This is an ordinary strided forward convolution**, and the module
-    docstring derives it: ``grad_input = conv3d(grad_output, w, stride=k)``,
-    with ``w`` passed *unpermuted*.  PyTorch stores a ``ConvTranspose3d`` weight
-    as ``(Cin, Cout, k, k, k)``, and that already is the ``(out_channels,
-    in_channels, k, k, k)`` an ordinary ``Cout -> Cin`` convolution wants -- the
-    transpose is in the storage convention, so it costs nothing here.
+    An ordinary strided forward convolution, as the module docstring derives:
+    ``grad_input = conv3d(grad_output, w, stride=k)`` with ``w`` passed
+    *unpermuted*.  PyTorch stores a ``ConvTranspose3d`` weight as
+    ``(Cin, Cout, k, k, k)``, and that already is the
+    ``(out_channels, in_channels, k, k, k)`` an ordinary ``Cout -> Cin``
+    convolution wants -- the transpose is in the storage convention, so it costs
+    nothing here.
 
     No bias term: the bias is added to the forward's output, so its gradient is
-    a reduction of ``grad_output`` and not part of this direction at all.
+    a reduction of ``grad_output`` and not part of this direction.
     """
     if not is_supported_transposed_bwd_data(
         grad_output, w, input_shape, stride, padding, output_padding, dilation, groups
@@ -1151,9 +1130,10 @@ def conv_transpose3d_backward_weight(
     The *same* reduction ``conv3d_backward_weight`` already performs, with the
     two activations in the slots the strided convolution of the module docstring
     puts them in: ``grad_output`` is that convolution's input and ``x`` is its
-    output gradient.  Reading the call and expecting ``x`` first is the one way
-    to misuse this function, which is why the argument order still matches
-    ``conv3d_backward_weight``'s -- the swap happens inside, once, here.
+    output gradient.  The argument order still matches
+    ``conv3d_backward_weight``'s and the swap happens inside, once, here --
+    expecting ``x`` in the first slot of the inner call is the one way to misuse
+    this function.
 
     The returned gradient is ``(Cin, Cout, k, k, k)`` in ``channels_last_3d``,
     which is both the parameter's own shape and the layout ``worker.py`` puts it
@@ -1193,11 +1173,10 @@ def grad_transposed_weight_empty(
 
     ``(Cin, Cout, kd, kh, kw)`` in ``channels_last_3d``, i.e. memory order
     ``Cin, kd, kh, kw, Cout``.  The ``Cin``/``Cout`` order is the only thing
-    that differs from
-    :func:`~triton_conv3d.reduce_gemm.grad_weight_empty`, and it differs because
-    a ``ConvTranspose3d`` parameter is stored the other way round; passing the
-    ordinary one here allocates a correctly-strided buffer of the wrong shape,
-    which ``conv3d_backward_weight``'s ``out=`` check catches.
+    that differs from :func:`~triton_conv3d.reduce_gemm.grad_weight_empty`, and
+    it differs because a ``ConvTranspose3d`` parameter is stored the other way
+    round; passing the ordinary one here allocates a correctly-strided buffer of
+    the wrong shape, which ``conv3d_backward_weight``'s ``out=`` check catches.
     """
     k = _triple(kernel, "kernel")
     return torch.empty(
@@ -1221,10 +1200,10 @@ def verify_isa_transposed(
 ) -> None:  # pragma: no cover
     """Compile and launch one configuration so its ISA can be inspected.
 
-    Run under ``AMDGCN_ENABLE_DUMP=1`` with a **cold** ``TRITON_CACHE_DIR``: a
+    Run under ``AMDGCN_ENABLE_DUMP=1`` with a *cold* ``TRITON_CACHE_DIR``: a
     cache hit skips the compile and therefore the dump, and an empty grep then
     looks exactly like a kernel with no MFMA in it.  The emitted mnemonic is
-    ``v_mfma_f32_16x16x16_bf16`` with **no** ``_1k`` suffix, despite Triton's
+    ``v_mfma_f32_16x16x16_bf16`` with no ``_1k`` suffix, despite Triton's
     internal table entry being named ``_1k``.
 
     ``weight_layout`` selects which of the two B loads is compiled, for the same

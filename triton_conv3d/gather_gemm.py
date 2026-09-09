@@ -20,13 +20,12 @@ Provenance
 
 The tiling is PyTorch Inductor's ``conv3d_template``
 (``torch/_inductor/kernel/conv.py``), not a fresh derivation.  Three things are
-taken from it unchanged because they are already right:
+taken from it unchanged:
 
 * the M-unravel of a fused ``ndhw`` linear index by successive ``%`` / ``//``;
-* the fused ``dijk`` reduction loop with **channel blocks innermost and taps
-  outermost**, which keeps the contiguous ``C`` axis fast-varying so the loads
-  vectorize (Inductor's own comment records that the nested-loop form is
-  slightly slower);
+* the fused ``dijk`` reduction loop with channel blocks innermost and taps
+  outermost, which keeps the contiguous ``C`` axis fast-varying so the loads
+  vectorize;
 * halo handling as pure predication -- no shared-memory staging, no im2col.
 
 What is *not* taken from it is the address arithmetic.  The template is written
@@ -39,14 +38,12 @@ lowering outright -- the documented reason naive Triton convolutions are slow.
 The weight is read where it lies
 ================================
 
-There is no weight transform on the shipped path, in any direction, and the
-reason is worth stating because the obvious design has one.  The B tile wants
-``(BLOCK_K, BLOCK_N) = (Cin, Cout)`` per tap, PyTorch stores neither channel
-axis in that position, and the natural fix -- materialize
-``(kd, kh, kw, Cin, Cout)`` once and reuse it -- costs **0.786 ms/step** for the
-forward and 0.531 for backward-data across one configuration's 19 Conv3d sites.
-Not per call: per *optimizer step*, because the optimizer dirties every
-parameter every step, so no cache removes it.
+There is no weight transform on the shipped path, in any direction, though the
+obvious design has one: the B tile wants ``(BLOCK_K, BLOCK_N) = (Cin, Cout)``
+per tap and PyTorch stores neither channel axis in that position.  The natural
+fix -- materialize ``(kd, kh, kw, Cin, Cout)`` once and reuse it -- costs a copy
+of every convolution weight per *optimizer step* rather than per call, because
+the optimizer dirties every parameter every step and no cache removes it.
 
 So the kernel addresses the weight through its strides instead, and which axis
 is unit-stride selects the load (``W_ORDER``):
@@ -54,29 +51,29 @@ is unit-stride selects the load (``W_ORDER``):
 ===========================  ==================  ====================  ==========
 weight layout                forward             backward-data         copies
 ===========================  ==================  ====================  ==========
-``channels_last_3d``         gathered columns    contiguous rows       **no**
-RSCK-strided or ``rsck=``    contiguous rows     gathered columns      **no**
+``channels_last_3d``         gathered columns    contiguous rows       no
+RSCK-strided or ``rsck=``    contiguous rows     gathered columns      no
 PyTorch default              --                  --                    yes
 ===========================  ==================  ====================  ==========
 
 A ScaFFold model is entirely in the first row: ``worker.py`` moves it to
 ``channels_last_3d`` at construction, which makes every conv weight
-``[Cout][kd][kh][kw][Cin]``.  The two rows that copy nothing are within 0.8% of
-each other over the eight hottest config-A sites, so the choice between them is
-not a performance question; the third is 4.8-9.0x slower if addressed in place,
-because neither tile axis is dense, and is therefore copied.
+``[Cout][kd][kh][kw][Cin]``.  The two rows that copy nothing measure the same,
+so the choice between them is not a performance question; the third is much
+slower addressed in place, because neither tile axis is dense, and is therefore
+copied.
 
-Two designs that look better and measure worse, both raced per site: loading the
-tile coalesced and transposing it in registers (1.05-1.55x, the transpose is the
-cost); and holding the
-parameter in RSCK order, which is 0.159 ms/step better in the kernels and
-**2.6 ms/step worse in the optimizer**, since the gradient this package produces
-is channels-last and the elementwise update would then be strided.
+Two designs that look better and measure worse: loading the tile coalesced and
+transposing it in registers, where the transpose costs more than the coalescing
+saves; and holding the parameter in RSCK order, which helps the kernels and
+costs more in the optimizer, since the gradient this package produces is
+channels-last and the elementwise update would then be strided.
+``triton_conv3d/bench/conv_bench.py`` regenerates both comparisons.
 
 Configuration constraints are hard
 ==================================
 
-On gfx942 an illegal MFMA configuration does not fail.  It emits **zero** MFMA
+On gfx942 an illegal MFMA configuration does not fail.  It emits *zero* MFMA
 instructions, falls back to vector FMA, and returns correct results at a
 fraction of the speed.  So :class:`ConvConfig` refuses rather than deprioritises:
 ``BLOCK_M``/``BLOCK_N`` must be multiples of ``matrix_instr_nonkdim`` and
@@ -176,8 +173,8 @@ def _conv3d_fwd_kernel(
     #
     # A flat program id with grouped-M ordering rather than a 2-D grid: the
     # group width is the L2 swizzle, and on MI300A it wants to be a multiple of
-    # the 6 XCDs rather than MI300X's 8.  Programs in a group share their B
-    # tiles, which for a convolution is the whole weight -- small and hot.
+    # the 6 XCDs.  Programs in a group share their B tiles, which for a
+    # convolution is the whole weight -- small and hot.
     pid = tl.program_id(0)
     grid_m = tl.cdiv(M_TOTAL, BLOCK_M)
     grid_n = tl.cdiv(COUT, BLOCK_N)
@@ -251,8 +248,8 @@ def _conv3d_fwd_kernel(
         else:
             # Unpadded: every tap of an in-range output voxel is in range, so
             # the six compares above are dead.  Worth compiling out -- they run
-            # 27 times per K sweep.  This is the *rarer* arm at a ScaFFold site:
-            # the adapter halos only the split axis, so a k>1 production
+            # once per tap per K sweep.  This is the *rarer* arm at a ScaFFold
+            # site: the adapter halos only the split axis, so a k>1 production
             # convolution compiles the PADDED branch above at every
             # configuration.  The transposed upsamplers and the k=1 head land
             # here.
@@ -274,38 +271,33 @@ def _conv3d_fwd_kernel(
         #                 is K.
         #
         # An uncoalesced B tile sounds like it should be much worse than a
-        # vectorized one and is not -- 0.96-1.05x per site, winning 6 of the 8
-        # hottest forward cells outright (``1024->512 @ 18^3``: 0.384 vs 0.408 ms
-        # before the transform it avoids is charged at all).  What matters is not
-        # that the *lanes* are contiguous but that the tile's K-run is: at
-        # ``BLOCK_K`` consecutive unit-stride elements each column costs two
-        # cache lines, the weight is small and stays hot, and B is not where the
-        # bandwidth goes.  Take that away -- a weight where neither channel axis
-        # is unit-stride -- and the same instruction sequence is 4.8-9.0x
-        # slower, which is why :func:`_weight_plan` refuses it rather than
-        # compiling it.
+        # vectorized one and is not.  What matters is not that the *lanes* are
+        # contiguous but that the tile's K-run is: at ``BLOCK_K`` consecutive
+        # unit-stride elements each column costs two cache lines, the weight is
+        # small and stays hot, and B is not where the bandwidth goes.  Take that
+        # away -- a weight where neither channel axis is unit-stride -- and the
+        # same instruction sequence is several times slower, which is why
+        # :func:`_weight_plan` refuses it rather than compiling it.
         #
-        # Two alternatives were implemented and measured worse, both on the eight
-        # hot config-A sites: loading the tile coalesced along K and
-        # transposing it in registers into the ``(BLOCK_K, BLOCK_N)`` the dot
-        # wants costs 1.05-1.55x, and holding the
-        # parameter in RSCK order costs the *backward* direction the same, since
-        # the axis RSCK makes contiguous is backward-data's reduction axis.
+        # The two alternatives were implemented and measured worse: a coalesced
+        # load plus a register transpose into the ``(BLOCK_K, BLOCK_N)`` the dot
+        # wants, and holding the parameter in RSCK order, which costs the
+        # *backward* direction, since the axis RSCK makes contiguous is
+        # backward-data's reduction axis.
         #
         # ``W_FLIP`` reverses the fused tap index.  Flipping all three kernel
         # axes is the complement of a mixed-radix index, i.e. exactly
         # ``taps - 1 - dij``, so backward-data's tap flip is this scalar rather
         # than a materialized copy of the weight.
         #
-        # Offsets are widened by the same ``INDEX_DTYPE`` as A.  The widest
-        # weight in this project is 28.3 M elements, 80x below int32, but
-        # ``taps * Cin * Cout`` is bounded by nothing a caller cannot exceed: at
-        # 2.30e9 elements the truncated offset goes *negative* and faults the
-        # GPU.  Cast per term rather than after the sum -- ``dij * stride_wt`` is
-        # the term that overflows on its own.  On the int32 path the casts are
-        # frontend no-ops, so the operand keeps the buffer-load eligibility it
-        # has today; it only loses it at sizes where the *storage* is already
-        # over the buffer-op limit and has lost it anyway (see
+        # Offsets are widened by the same ``INDEX_DTYPE`` as A.  No weight in
+        # this project comes near int32, but ``taps * Cin * Cout`` is bounded by
+        # nothing a caller cannot exceed, and past ``2**31`` a truncated offset
+        # goes *negative* and faults the GPU.  Cast per term rather than after
+        # the sum -- ``dij * stride_wt`` is the term that overflows on its own.
+        # On the int32 path the casts are frontend no-ops, so the operand keeps
+        # its buffer-load eligibility; it loses that only at sizes where the
+        # *storage* is already over the buffer-op limit (see
         # :data:`~triton_conv3d.shapes.BUFFER_OP_MAX_BYTES`).
         dij_w = (KD * KH * KW - 1 - dij) if W_FLIP else dij
         w_row = dij_w.to(INDEX_DTYPE) * stride_wt + offs_k.to(INDEX_DTYPE) * stride_wk
@@ -373,9 +365,8 @@ class ConvConfig:
     ``validate`` is not advisory.  Every constraint here has a *silent* failure
     mode: an illegal ``matrix_instr_nonkdim``, or a ``BLOCK_K`` that is not a
     multiple of the intrinsic's reduction depth, produces a kernel that runs and
-    returns the right answer with no MFMA instruction in it at all.  A config
-    generator that merely ranked such a config last would still be feeding
-    meaningless entries into a best-of sweep.
+    returns the right answer with no MFMA instruction in it at all -- so such a
+    config has to be refused, not merely ranked last in a sweep.
     """
 
     BLOCK_M: int = 128
@@ -431,11 +422,10 @@ class ConvConfig:
     def lds_bytes(self, dtype: torch.dtype) -> int:
         """Shared memory the two operand tiles need, in bytes.
 
-        Measured rather than assumed: across 22 tile/dtype combinations the
-        compiler's own ``metadata.shared`` equalled
-        ``(BLOCK_M*BLOCK_K + BLOCK_K*BLOCK_N) * itemsize`` exactly, with no
-        double-buffering factor -- Triton's gfx942 pipeliner keeps one LDS
-        buffer at ``num_stages=2``.  So this is the real number and not a bound.
+        There is no double-buffering factor: Triton's gfx942 pipeliner keeps one
+        LDS buffer at ``num_stages=2``, so ``(BLOCK_M*BLOCK_K +
+        BLOCK_K*BLOCK_N) * itemsize`` is what the compiler's own
+        ``metadata.shared`` reports.  This is the real number, not a bound.
         """
         elem = torch.empty((), dtype=dtype).element_size()
         return (self.BLOCK_M * self.BLOCK_K + self.BLOCK_K * self.BLOCK_N) * elem
@@ -455,21 +445,20 @@ def _pow2_at_most(x: int, cap: int) -> int:
 
 
 #: gfx942's shared memory per workgroup.  Exceeding it raises ``OutOfResources``
-#: at launch -- loudly, unlike the MFMA constraints, which is why M1 left it to
-#: fail rather than guarding it statically.  That is the right call for a *sweep*
-#: candidate and the wrong one for the config the entry point picks on its own,
-#: which is what :func:`_fit_to_lds` is for.
+#: at launch -- loudly, unlike the MFMA constraints -- so a *sweep* candidate is
+#: left to fail, while the config the entry point picks on its own goes through
+#: :func:`_fit_to_lds` first.
 _LDS_BYTES = 64 * 1024
 
 
 def _fit_to_lds(cfg: ConvConfig, dtype: torch.dtype) -> ConvConfig:
     """Shrink a tile until its operands fit in LDS, then legalize the warps.
 
-    This exists because of an fp32 hole that M2's tests fell into: the block
-    sizes in :func:`default_config` were chosen against bf16, and fp32 operands
-    are twice the bytes, so ``Cin >= 512`` in fp32 asked for 128 KiB and the
-    *shipped* configuration raised.  ``more_determinism`` runs the model in
-    fp32, so that was reachable from a real ScaFFold configuration.
+    :func:`default_config`'s block sizes are chosen against bf16, and fp32
+    operands are twice the bytes, so a wide ``Cin`` in fp32 asks for more than
+    ``_LDS_BYTES`` and the *shipped* configuration would raise.
+    ``more_determinism`` runs the model in fp32, so that is reachable from a
+    real ScaFFold configuration.
 
     ``BLOCK_K`` is halved first: it is the reduction depth, so shortening it
     costs some reuse but changes neither the grid nor the parallelism, whereas
@@ -498,8 +487,9 @@ def _fit_to_lds(cfg: ConvConfig, dtype: torch.dtype) -> ConvConfig:
 
 #: Below this many programs the grid cannot fill MI300A's 228 CUs, and a
 #: narrower ``BLOCK_M`` buys more parallelism than it loses in reuse.  Half a
-#: wave rather than a whole one: measured, the ``1024 -> 1024`` bottleneck at
-#: ``M = 512`` wants 128 programs and is *slower* when pushed to 256.
+#: wave rather than a whole one, because a sweep found the bottleneck shapes
+#: *slower* when pushed to a full wave; ``triton_conv3d/bench/conv_bench.py``
+#: reproduces it.
 _MIN_PROGRAMS = 114
 
 
@@ -508,20 +498,18 @@ def default_config(
 ) -> ConvConfig:
     """A config that is legal for any shape and close to tuned for most.
 
-    Measured, not guessed: over 15 corpus shapes and ~1000 timed configurations
-    the surface is remarkably flat and almost entirely determined by the channel
-    widths.  ``BLOCK_M=128`` won 14 of 15, ``BLOCK_N`` tracks ``Cout`` up to 128,
-    and ``BLOCK_K`` is 64 below ``Cin=512`` and 128 above.
+    Measured, not guessed -- ``triton_conv3d/bench/conv_bench.py`` regenerates
+    the sweep.  The surface is flat and almost entirely determined by the channel
+    widths, so ``BLOCK_M=128``, ``BLOCK_N`` tracks ``Cout`` up to 128, and
+    ``BLOCK_K`` is 64 below ``Cin=512`` and 128 above.
 
     Two things this does *not* do, both because the measurement said not to:
 
-    * It does not use ``matrix_instr_nonkdim=32``.  The M0 ceiling probe found 32
-      winning 9 of 10 ``N=64`` cells on a plain GEMM and worth 1.21x there, which
-      is why the M1 brief said to sweep it.  Swept here on the real convolution,
-      **16 won all 15 cells**, by 0.6-13% (geometric mean 5.8%).  The GEMM result
-      does not transfer: the convolution's inner loop carries a per-tap boundary
-      predicate and a 27x longer reduction, so it is not the same instruction
-      mix the ceiling probe measured.
+    * It does not use ``matrix_instr_nonkdim=32``, even though 32 wins on a
+      plain GEMM at ``N=64``.  That result does not transfer: the convolution's
+      inner loop carries a per-tap boundary predicate and a far longer
+      reduction, so it is not the instruction mix the GEMM probe measured, and
+      16 won every convolution cell.
     * It does not scale ``BLOCK_M`` with ``M``.  A tall tile only pays while the
       grid still fills the device, which at these shapes it always does; the one
       place it does not is handled by :data:`_MIN_PROGRAMS`.
@@ -594,8 +582,8 @@ _SEED_TILES: tuple[tuple[int, int, int, int], ...] = (
 )
 
 #: Extra tiles for the skinny-N regime.  ``Cout=64`` is the model's most common
-#: output width and the seed grid has little there; M0 found every winner in
-#: this band was tall in M with ``BLOCK_N=64``.
+#: output width and the seed grid has little there; the winners in this band are
+#: tall in M with ``BLOCK_N=64``.
 _SKINNY_N_TILES: tuple[tuple[int, int, int, int], ...] = (
     (256, 64, 64, 8),
     (512, 64, 64, 8),
@@ -608,24 +596,22 @@ _SKINNY_N_TILES: tuple[tuple[int, int, int, int], ...] = (
 )
 
 #: Tiles for the *narrow*-N regime, ``Cout <= 16``.  Only the segmentation head
-#: (``64 -> 6``) reaches it in ScaFFold, and until 2026-08-03 the head had no
+#: (``64 -> 6``) reaches it in ScaFFold, and without this grid that site has no
 #: tile evidence at all: ``candidate_configs`` prunes on ``bn > 2 * n2``, which
-#: at ``Cout = 6`` gives ``n2 = 16`` and removes every entry of both grids
-#: above, so the generator fell through to ``default_config`` and the "sweep"
-#: recorded for that site timed the shipped config twice with two ``GROUP_M``.
+#: at ``Cout = 6`` removes every entry of both grids above and leaves only
+#: ``default_config``.
 #:
 #: The ``num_warps`` column is the point of this grid, not the tile.  A
 #: ``BLOCK_N`` of 16 is one MFMA fragment wide, so there is no N work to hand a
 #: second wave; four warps each take a quarter of ``BLOCK_M`` and replicate the
-#: whole per-K-tile address computation for a fragment that is 10/16 padding.
-#: Measured at all three head volumes, one warp is 1.02-1.22x over the shipped
-#: four.
+#: whole per-K-tile address computation for a fragment that is mostly padding.
+#: One warp wins at every head volume.
 #:
 #: Gated to ``Cout <= 16`` in :func:`candidate_configs` rather than added to the
-#: grids above, because a 16-column tile at ``Cout = 512`` is 32x padding and
-#: would only lengthen every other site's sweep -- and because ``num_warps=1``
-#: is a **catastrophe** outside this regime: raced on the shipped tile it is
-#: 0.166x on the ``128 -> 128 @ 66^3`` forward and 0.245x on its backward-data.
+#: grids above, because a 16-column tile computes far more padding than work at
+#: a wide ``Cout`` and would only lengthen every other site's sweep -- and
+#: because ``num_warps=1`` is a catastrophe outside this regime, several times
+#: slower on the shipped tile in both directions.
 _NARROW_N_TILES: tuple[tuple[int, int, int, int], ...] = (
     (128, 16, 64, 1),
     (64, 16, 64, 1),
@@ -648,14 +634,15 @@ def candidate_configs(
 ) -> list[ConvConfig]:
     """Configs worth timing for one shape, already pruned to legal ones.
 
-    ``matrix_instr_nonkdim`` is *swept* over {16, 32} rather than fixed at 16.
-    Fixing it at 16 is what Inductor does and what AMD's guidance says, and at
-    ``Cout=64`` the M0 probe measured that advice costing 11-18%.
+    ``matrix_instr_nonkdim`` is *swept* over {16, 32} rather than fixed at 16 as
+    Inductor does and AMD's guidance says, because at narrow ``Cout`` that advice
+    is not the winner; ``triton_conv3d/bench/gemm_probe.py`` reproduces the
+    comparison.
 
     ``GROUP_M`` defaults to 6 alone -- MI300A's XCD count, and the value that won
-    the M0 square-GEMM probe -- because sweeping it doubles a list whose cost is
+    the square-GEMM probe -- because sweeping it doubles a list whose cost is
     almost entirely JIT compilation.  The caller refines it on the finalists
-    instead, which is where a few percent of L2 locality is actually decidable.
+    instead, which is where L2 locality is actually decidable.
     """
     m2 = max(16, triton.next_power_of_2(m))
     n2 = max(16, triton.next_power_of_2(cout))
@@ -710,13 +697,12 @@ def _tuned(
 ) -> ConvConfig:
     """One measured row.
 
-    ``nk`` defaults to 16 because that is what the forward measured -- 16 won
-    all 15 cells of M1's 1090-config sweep, and :func:`default_config` says why.
-    It is a parameter at all for exactly one row, the ``3 -> 64`` stem, where 32
-    is not chosen for its own sake: ``_MFMA_KDIM[bf16][32] = 8`` is what makes
-    ``BLOCK_K = 8`` legal, and ``BLOCK_K = 8`` is the whole effect.  Raced as a
-    control, ``nonkdim=32`` on the *shipped* ``128x64x16`` tile measures 0.9682
-    ms against 0.9554 -- i.e. nothing.  Spelled the same way
+    ``nk`` defaults to 16 because that is what the forward measured; see
+    :func:`default_config`.  It is a parameter at all for exactly one row, the
+    ``3 -> 64`` stem, where 32 is not chosen for its own sake:
+    ``_MFMA_KDIM[bf16][32] = 8`` is what makes ``BLOCK_K = 8`` legal, and
+    ``BLOCK_K = 8`` is the whole effect -- on any other tile the nonkdim alone
+    changes nothing.  Spelled the same way
     :func:`~triton_conv3d.reduce_gemm._tuned` spells it, and for the same
     reason: a per-row knob whose default carries the rule.
     """
@@ -737,79 +723,49 @@ def _tuned(
 #:
 #: Keyed on the channel widths and *not* on the spatial extent because that is
 #: what the measurement showed: where a channel pair occurs at more than one
-#: volume in the corpus -- ``128 -> 64`` at three, ``512 -> 512`` at two --
-#: the same tile won at each.  ``GROUP_M`` is the exception; it flips between 6
-#: and 8 across volumes but is worth under 1% either way at the shapes where it
-#: flips, so 6 (MI300A's XCD count) is used throughout.
+#: volume in the corpus, the same tile won at each.  ``GROUP_M`` is the
+#: exception; it flips between 6 and 8 across volumes but is worth little either
+#: way, so 6 (MI300A's XCD count) is used throughout.
 #:
 #: Deliberately a table and not ``@triton.autotune``: ScaFFold's figure of merit
 #: is total wall time, so a recompile inside a training step is a direct loss.
-#: Drawn from a forward sweep of 15 problems and ~1050 timed configs.
-#: Only channel pairs that were actually timed appear here.  The unmeasured
-#: pairs -- ``64 -> 128``, ``128 -> 256``, ``256 -> 512``, ``512 -> 1024``, all
-#: encoder-side -- fall to the heuristic on purpose: an extrapolated entry in a
-#: table called "measured winners" is worse than no entry, because it cannot be
-#: told apart from one.  Priced since: served by the heuristic those eight cells
-#: span 0.80x to 1.32x and are worth **+0.02 ms/step at config A and +0.12 at
-#: C** -- a wash, so tuning them is not the action.  Three of them are *losses*
-#: (``256 -> 512 @ 18^3`` 0.84x, ``512 -> 1024 @ 10^3`` 0.80x, ``512 -> 1024 @
-#: 6x18x18`` 0.90x) and belong on the adapter's block-list instead.  (An earlier
-#: version of this comment priced the four pairs at "12.7 ms/step"; that figure
-#: is config B's *all-directions* total at those pairs, not the forward time an
-#: absent row here governs.)
+#: Only channel pairs that were actually timed appear here; the unmeasured pairs
+#: -- ``64 -> 128``, ``128 -> 256``, ``256 -> 512``, ``512 -> 1024``, all
+#: encoder-side -- fall to the heuristic on purpose, because an extrapolated
+#: entry in a table called "measured winners" cannot be told apart from a
+#: measured one.  Tuning them is not worth much at the step level, but a few of
+#: them do lose to MIOpen and belong on the adapter's block-list.
 _TUNED: dict[tuple, ConvConfig] = {
-    # The segmentation head, and the one entry here that is *not* from the main
-    # forward sweep but from a follow-up race at this site alone.
-    # ``Cout = 6`` prunes every seed tile, so that sweep never timed anything
-    # but ``default_config`` at this site and the tile below is that same
-    # ``128x16x64`` with **one warp instead of four** -- see
-    # :data:`_NARROW_N_TILES` for why one, and why only here.  Raced against the
-    # shipped four at all three head volumes in one interleaved block:
-    # 1.024x @ 128^3, 1.137x @ 64x256^2, 1.217x @ 128x256^2, i.e. 1.19-1.21x of
-    # MIOpen where the shipped config was 1.16x, 1.04x and **0.99x**.  The
-    # runner-up ``64x16x64/w1`` wins the two smaller volumes by 2-3% and loses
-    # the largest by 8%, so it is not shipped; the choice between them is worth
-    # under 0.01 ms/step either way.
+    # The segmentation head.  ``Cout = 6`` prunes every seed tile, so the main
+    # forward sweep never timed anything but ``default_config`` here; this row
+    # comes from a follow-up race at this site and is that same ``128x16x64``
+    # tile with *one warp instead of four* -- see :data:`_NARROW_N_TILES` for
+    # why one, and why only here.
     tune_key(torch.bfloat16, 64, 6, (1, 1, 1)): _tuned(128, 16, 64, 1),
     **{
         tune_key(torch.bfloat16, cin, cout, (3, 3, 3)): cfg
         for (cin, cout), cfg in {
-            # The UNet stem, and the row that refutes the standing verdict that
-            # "``conv 3->64`` is genuinely hopeless, leave it on MIOpen".  It was
-            # never hopeless and it was never a matrix-core feeding problem: the
-            # reduction axis of this kernel's ``tl.dot`` is ``Cin`` **alone**
-            # (``BLOCK_K_COUNT = cdiv(Cin, BLOCK_K)``, taps outermost), and
-            # ``BLOCK_K`` is floored both by the MFMA intrinsic's reduction depth
-            # and by ``_pow2_at_most``'s own floor of 16 -- so at ``Cin = 3``
-            # every dot had **3 live columns of 16** and 81% of the matrix-core
-            # work multiplied padding this kernel put there itself.
-            # ``SQ_INSTS_MFMA`` measures 14,155,776 per call at ``130^3``,
-            # exactly 5.333x the useful FLOPs, against MIOpen's 3,145,728
-            # (2.370x -- CK contracts over the merged ``(Z,Y,X,C)`` axis, dense
-            # 81 padded once to 96).  On *issued* MFMA the old config already ran
-            # at 23.7% of the measured ``tl.dot`` ceiling against CK's 16.2%; it
-            # just issued 2.25x more of it.
+            # The UNet stem, and the row that makes serving it here rather than
+            # on MIOpen worthwhile.  The reduction axis of this kernel's
+            # ``tl.dot`` is ``Cin`` alone (``BLOCK_K_COUNT = cdiv(Cin,
+            # BLOCK_K)``, taps outermost), and ``BLOCK_K`` is floored both by
+            # the MFMA intrinsic's reduction depth and by ``_pow2_at_most``'s
+            # own floor of 16 -- so at ``Cin = 3`` a 16-deep dot leaves most of
+            # the matrix-core work multiplying padding this kernel put there
+            # itself.
             #
-            # ``BLOCK_K = 8`` is the fix and ``nonkdim=32`` is only how it is
-            # spelled -- see :func:`_tuned`.  Raced against the heuristic's
-            # ``128x64x16/nk16/w4`` and MIOpen, one interleaved block per volume,
-            # kernel-only, at every volume the corpus has for this pair:
-            #   130^3      0.5236 ms vs MIOpen 0.6236 -- 1.193x [1.190,1.196]
-            #   130x258^2  2.0522 ms vs MIOpen 2.4907 -- 1.214x [1.211,1.217]
-            #   66x258^2   1.0364 ms vs MIOpen 1.2468 -- 1.203x [1.201,1.206]
-            # i.e. 1.83-1.86x over the config it replaces, which was 0.651-0.653x
-            # of MIOpen.  Flat across the pair's 4.0x span of volume, which is the
-            # property this table has twice been burned by not checking.
+            # ``BLOCK_K = 8`` is the fix; ``nonkdim=32`` is only how that is
+            # spelled -- see :func:`_tuned`.  It beats both the heuristic and
+            # MIOpen at every volume the corpus has for this pair, which is what
+            # a row keyed on channel widths alone has to do.
             #
-            # Bitwise **identical** to the config it replaces on random operands
-            # (0 of 134 M elements differ), because at ``Cin = 3`` only 3 products
-            # per tap are non-zero whatever ``BLOCK_K`` is and the 27 taps are
-            # still visited in order.  So no determinism baseline moves.
+            # Bitwise identical to the config it replaces, because at
+            # ``Cin = 3`` only three products per tap are non-zero whatever
+            # ``BLOCK_K`` is and the taps are still visited in order.  So no
+            # determinism baseline moves.
             #
             # ``kpack = 1`` is not a rounding detail here: ``kp2`` on the same
-            # tile is 0.6085 ms, 1.17x worse.  Taller than 512 turns over
-            # (``1024x64x8/w16`` 0.6042); ``GROUP_M`` is inert at this site
-            # (g1/g6/g12 within 1%).
+            # tile is materially worse.  ``GROUP_M`` is inert at this site.
             (3, 64): _tuned(512, 64, 8, 8, nk=32),
             (64, 64): _tuned(128, 64, 64, 4),
             (128, 64): _tuned(128, 64, 64, 4),
@@ -817,8 +773,9 @@ _TUNED: dict[tuple, ConvConfig] = {
             (256, 128): _tuned(128, 128, 64, 4),
             (256, 256): _tuned(128, 128, 64, 4),
             # The one place the heuristic's "Cin >= 512 wants BLOCK_K=128" rule
-            # is wrong: here BLOCK_K=64 is 7% faster.  Cout=256 rather than 512
-            # is what distinguishes it, on one data point, so the rule stands.
+            # is wrong: here BLOCK_K=64 measures faster.  Cout=256 rather than
+            # 512 is what distinguishes it, on one data point, so the rule
+            # stands and this is an exception to it.
             (512, 256): _tuned(128, 128, 64, 4),
             (512, 512): _tuned(128, 128, 128, 8),
             (1024, 512): _tuned(128, 128, 128, 8),
@@ -826,54 +783,34 @@ _TUNED: dict[tuple, ConvConfig] = {
             # The two 2048-channel bottleneck pairs.  They are scale-8 sites
             # that appeared in no corpus until a shape census of running steps
             # found them -- the corpus's scale-8 model was a *four*-layer
-            # network and the harness runs a five-layer one -- so until now
-            # they fell to the heuristic, and against fresh MIOpen the forward
-            # **lost**, 0.952x and 0.977x.
+            # network and the harness runs a five-layer one -- so they fell to
+            # the heuristic, under which the forward lost to MIOpen.
             #
-            # ``128x64x128`` wins at **every volume both pairs occur at**,
-            # which is the property this table has twice been burned by not
-            # checking, and it is one row rather than three because
-            # ``_fit_to_grid`` walks ``BLOCK_M`` down 128 -> 64 -> 32 as ``M``
-            # falls 512 -> 256 -> 128.  Raced against the heuristic it
-            # replaces, quiet node, **four independently allocated operand sets
-            # per cell**, both arms sharing each build's operands so the pair is
-            # immune to the placement effect below; kernel-only, median over
-            # builds with the worst build in brackets:
-            #   (1024,2048)  8^3     0.3196 vs 0.3224 ms -- 1.010x [1.008]
-            #   (1024,2048)  6x8^2   0.2208 vs 0.2769    -- 1.253x [1.251]
-            #   (1024,2048)  4x8^2   0.1760 vs 0.2304    -- 1.308x [1.306]
-            #   (2048,2048)  8^3     0.6663 vs 0.7321    -- 1.099x [1.097]
-            #   (2048,2048)  6x8^2   0.4819 vs 0.6354    -- 1.318x [1.315]
-            #   (2048,2048)  4x8^2   0.3844 vs 0.5066    -- 1.317x [1.303]
+            # ``128x64x128`` wins at every volume both pairs occur at, which is
+            # what a row keyed on channel widths alone has to do, and it is one
+            # row rather than three because ``_fit_to_grid`` walks ``BLOCK_M``
+            # down as ``M`` falls with the sharded volumes.
             #
-            # The builds are not ceremony, and one caveat has to travel with
-            # this row.  ``(2048, 2048)`` is the one site in this project whose
-            # time depends on **where its weight lands**: at 216 MiB against a
-            # 256 MiB MALL the heuristic is bimodal, two tight states up to
-            # 14.7% apart and fixed for the life of the allocation.  Measured
-            # solo -- one config, one operand set, six rebuilds, which is what
-            # a caller actually sees -- this row is **stable**: 0.5% / 0.7% /
-            # 1.4% spread at the three volumes against the heuristic's 15% / 5%
-            # / 20%.  But at ``8^3``
-            # its 0.6681 ms sits *between* the heuristic's two states (0.6472
-            # and 0.7453), so it beats the unlucky allocation by 1.12x and
-            # **loses to the lucky one by 0.97x**.  It is shipped because the
-            # expected value and both sharded volumes are clear wins and the
-            # variance goes away, not because it dominates.
+            # One caveat travels with this row.  ``(2048, 2048)`` is the one
+            # site in this project whose time depends on *where its weight
+            # lands*: the weight nearly fills the 256 MiB MALL, so the heuristic
+            # is bimodal -- two tight states, each fixed for the life of the
+            # allocation.  This row is stable across rebuilds instead, and at
+            # the unsharded volume it sits between the heuristic's two states:
+            # clearly better than the unlucky allocation, slightly worse than
+            # the lucky one.  It is shipped because the expected value and both
+            # sharded volumes are wins and the variance goes away, not because
+            # it dominates.
             #
-            # ``(2048, 1024)`` is deliberately **absent**, and that is a result
-            # rather than an omission: ``128x256x64`` is **1.433x** at ``16^3``
-            # and **0.804x** and **0.504x** at the two sharded volumes of the
-            # same pair (two builds each, every interval tight).  The
-            # discriminator is ``BLOCK_K`` against ``M`` -- 64 wins at ``M =
-            # 4096`` and 128 wins at 2048 and 1024 -- this table is keyed per
-            # channel pair and cannot say that, and an
-            # entry would trade config B's 0.68 ms saving for config C and D's
-            # 0.23 and 0.16 ms losses.  ``_fit_to_grid`` already walks
-            # ``BLOCK_M`` with ``M``; making it walk ``BLOCK_K`` too is the
-            # change this measurement argues for, and it is not made here
-            # because one channel pair is not enough evidence to move a rule
-            # every pair goes through.
+            # ``(2048, 1024)`` is deliberately absent, and that is a result
+            # rather than an omission: the tile that wins its unsharded volume
+            # loses badly at both sharded ones.  The discriminator is
+            # ``BLOCK_K`` against ``M``, which a table keyed per channel pair
+            # cannot express.  ``_fit_to_grid`` already walks ``BLOCK_M`` with
+            # ``M``; making it walk ``BLOCK_K`` too is the change this
+            # measurement argues for, and it is not made here because one
+            # channel pair is not enough evidence to move a rule every pair goes
+            # through.
             (1024, 2048): _tuned(128, 64, 128, 8),
             (2048, 2048): _tuned(128, 64, 128, 8),
         }.items()
@@ -931,30 +868,25 @@ def to_rsck(w: torch.Tensor) -> torch.Tensor:
     """PyTorch's ``(Cout, Cin, kd, kh, kw)`` weight as ``(kd, kh, kw, Cin, Cout)``.
 
     A B tile whose row is a contiguous run wants Cout fastest-varying, which is
-    what this produces.  **It is no longer on any shipped path.**  The kernel
-    reads the parameter wherever it lies, and this copy ran once per layer per
-    *optimizer step* -- 0.786 ms/step over the 19 Conv3d sites of one
-    configuration, 8.4x the single-copy floor, because 19 small strided
-    ``permute().contiguous()`` launches are latency-bound rather than
-    bandwidth-bound, and no caching could remove it because the optimizer
-    dirties every parameter every step.  Measured against reading a
-    channels-last parameter in place, materializing this buffer is *slower* on 6
-    of the 8 hottest forward sites before the copy is charged at all.
+    what this produces.  It is no longer on any shipped path: the kernel reads
+    the parameter wherever it lies, and this copy ran once per layer per
+    *optimizer step* -- many small strided ``permute().contiguous()`` launches,
+    latency-bound rather than bandwidth-bound, which no caching could remove
+    because the optimizer dirties every parameter every step.
 
     It is kept, and still supported through ``weight_rsck=``, for the weights
     :func:`_weight_plan` refuses -- chiefly PyTorch's *default* layout, in which
-    neither channel axis is unit-stride and the gathered load is 4.8-9.0x slower
-    than copying.  A ScaFFold parameter is never in it, because the model is
-    moved to ``channels_last_3d`` at construction.
+    neither channel axis is unit-stride and the gathered load is far slower than
+    copying.  A ScaFFold parameter is never in it, because the model is moved to
+    ``channels_last_3d`` at construction.
     """
     return w.permute(2, 3, 4, 1, 0).contiguous()
 
 
 #: How the kernel's B operand is laid out -- the values of the kernel's
-#: ``W_ORDER`` constexpr.  ``_W_GENERAL`` costs nothing measurable against
-#: ``_W_N_CONTIG`` (0.96-1.05x per site), which is why there is no third value:
-#: a "coalesce along K and ``tl.trans``" order was implemented and measured at
-#: 1.05-1.55x, i.e. a real loss, and deleted.
+#: ``W_ORDER`` constexpr.  There is no third value: ``_W_GENERAL`` costs nothing
+#: measurable against ``_W_N_CONTIG``, and a "coalesce along K and ``tl.trans``"
+#: order was implemented, measured a real loss, and deleted.
 _W_N_CONTIG = 0
 _W_GENERAL = 1
 
@@ -973,8 +905,8 @@ def _weight_plan(w: torch.Tensor) -> tuple[int, int, int, int] | None:
     the three kernel axes are not one fused axis of constant stride, which is
     what the kernel's single ``dij * stride_wt`` assumes (a weight sliced along a
     kernel axis; nothing in this project produces one), or *neither* channel axis
-    is unit-stride, which is a correctness-neutral but 4.8-9.0x performance
-    cliff -- see the comment below.
+    is unit-stride, which is a correctness-neutral but severe performance cliff
+    -- see the comment below.
 
     Extents of 1 carry no observable stride, so they constrain nothing and are
     skipped -- ``k=1x1x1`` is a real corpus shape (the segmentation head), and
@@ -1002,12 +934,11 @@ def _weight_plan(w: torch.Tensor) -> tuple[int, int, int, int] | None:
     if cin == 1 or s[1] == 1:
         return (_W_GENERAL, st, s[1], s[0])
     # Neither channel axis is unit-stride -- PyTorch's *default* weight layout,
-    # where the only dense axis is the 27-element tap axis, which is not a tile
-    # axis.  Every element of the B tile is then its own cache line: measured
-    # **4.8-9.0x** slower than materializing RSCK across the eight hottest
-    # forward sites, the copy charged to every call (9.31 ms against 1.15 at
-    # ``256->128 @ 66^3``), and 2.2-6.2x on backward-data.  So this one really
-    # does have to be copied, and it is the only layout left that does.
+    # where the only dense axis is the tap axis, which is not a tile axis.
+    # Every element of the B tile is then its own cache line, several times
+    # slower than materializing RSCK even with the copy charged to every call,
+    # in both directions.  So this one really does have to be copied, and it is
+    # the only layout left that does.
     return None
 
 
@@ -1026,22 +957,21 @@ def is_supported(
     everywhere, so a false negative costs a little speed and a false positive
     costs a wrong answer.
 
-    It is also **total**.  This is the gate of a Triton -> MIOpen rung ladder, so
+    It is also *total*.  This is the gate of a Triton -> MIOpen rung ladder, so
     an argument it cannot interpret has to be a ``False`` and not an exception:
     ``padding=None`` and ``padding=1.5`` are ``TypeError`` out of :func:`_triple`
     and would otherwise take down a caller that was only asking a question.
 
-    **This gates the forward and nothing else, and the three gates do not
-    agree.**  A ``stride > 1`` call is served here and by
+    This gates the forward and nothing else, and the three gates do not agree.
+    A ``stride > 1`` call is served here and by
     :func:`~triton_conv3d.reduce_gemm.is_supported_bwd_weight`, and *refused* by
     :func:`~triton_conv3d.bwd_data.is_supported_bwd_data`, whose kernel-free
-    formulation (backward-data as the forward contraction on a flipped weight)
-    only holds at unit stride.  A caller that will differentiate the result must
-    therefore ask :func:`is_supported_all` instead: a ``True`` from this function
-    alone builds a graph node whose backward this package cannot answer, and by
-    then the caller's fallback is gone.  A forward-only caller (inference) should
-    keep asking this one -- the stride support is real, and the combined gate
-    would take it away.
+    formulation only holds at unit stride.  A caller that will differentiate the
+    result must therefore ask :func:`is_supported_all` instead: a ``True`` from
+    this function alone builds a graph node whose backward this package cannot
+    answer, and by then the caller's fallback is gone.  A forward-only caller
+    (inference) should keep asking this one -- the stride support is real, and
+    the combined gate would take it away.
     """
     if groups != 1:
         return False
@@ -1112,39 +1042,35 @@ def is_supported_all(
     dilation=1,
     groups: int = 1,
 ) -> bool:
-    """Whether **every** direction of this convolution will be served.
+    """Whether *every* direction of this convolution will be served.
 
     The gate for a caller that is going to differentiate: :func:`is_supported`
     and ``bwd_data.is_supported_bwd_data`` and
     ``reduce_gemm.is_supported_bwd_weight``, asked about the one call the caller
     has in hand and about the gradient it does not have yet.
 
-    It exists because the three direction gates genuinely disagree and the
-    disagreement is a trap.  ``stride > 1`` is supported by the forward (its
-    output-voxel unravel simply steps by ``s``) and by backward-weight (the
-    reduction is indexed by the *output* voxel, so a stride is three extra
-    multiplies), and is not supported by backward-data, which has no kernel of
-    its own: at unit stride it *is* the forward contraction on a flipped,
-    channel-transposed weight, and a stride turns that into a scatter into a
-    sub-lattice.  So a training caller that asks only the forward gate gets a
-    ``True``, builds a graph node, and discovers at ``backward()`` -- when its
-    own fallback is no longer reachable, because the node is already in the
-    graph -- that the gradient cannot be computed.
+    The three direction gates disagree, and the disagreement is a trap: a
+    training caller that asks only the forward gate gets a ``True``, builds a
+    graph node, and discovers at ``backward()`` -- when its own fallback is no
+    longer reachable -- that the gradient cannot be computed.  ``stride > 1`` is
+    supported by the forward (its output-voxel unravel simply steps by ``s``)
+    and by backward-weight (the reduction is indexed by the *output* voxel, so a
+    stride is three extra multiplies), and refused by backward-data, whose
+    kernel-free formulation turns into a scatter into a sub-lattice once the
+    stride is not 1.
 
-    The direction gates are deliberately left as they are.  Narrowing the
-    forward's to the intersection would agree with backward-data by taking a
-    capability away from inference, which asks only the forward and for which
-    strided convolution works today; and there is no single "the backward"
-    answer to agree with anyway, since backward-weight accepts the stride the
-    forward does.  The asymmetry is a fact about the three kernels; what was
-    wrong was that a caller had to know it.  Now it can ask.
+    The direction gates are deliberately left as they are: narrowing the
+    forward's to the intersection would take strided convolution away from
+    inference, which asks only the forward, and there is no single "the
+    backward" answer to agree with anyway.  The asymmetry is a fact about the
+    three kernels; what was wrong was that a caller had to know it.
 
     Total for the same reason :func:`is_supported` is: an argument that cannot
     be interpreted is a ``False``, never an exception.  The forward's gate runs
     first and validates the triples, so the arithmetic below is reached only
     with arguments it has already accepted.
 
-    The gradient is passed as a **metadata-only stand-in**: all three predicates
+    The gradient is passed as a *metadata-only stand-in*: all three predicates
     read rank, shape, dtype, device and ``is_cuda`` and never a stride, a value
     or a contiguity, so a one-element allocation expanded to the output shape
     answers exactly as the real gradient would.  ``expand`` gives every dim a
@@ -1187,9 +1113,8 @@ def _check_out(y: torch.Tensor, shape: tuple[int, ...], like: torch.Tensor) -> N
     Nothing downstream catches either failure.  The grid is sized from the
     *problem* and not from ``out``, and the store addresses come from
     ``out.stride(0/2/3/4)`` with a channel stride of 1 assumed -- so an
-    undersized buffer is an out-of-bounds device write (1920 elements into a
-    128-element allocation, observed, with no error), and an NCDHW buffer is a
-    full-rate kernel that returns a scrambled answer.
+    undersized buffer is an out-of-bounds device write with no error raised, and
+    an NCDHW buffer is a full-rate kernel that returns a scrambled answer.
 
     The shape is compared explicitly rather than inferred from the strides.
     ``reduce_gemm._layout_ok`` checks strides alone and cannot see ``Cout`` --
@@ -1246,12 +1171,12 @@ def _index_dtype(*operands: torch.Tensor):
 
     They are not free -- the AMD backend's buffer-load path requires an i32
     offset tensor -- but triton 3.7.1 narrows i64 offsets it can prove safe, so
-    the cost is paid only where the storage really is over 2 GiB.  Storage size,
-    not offset dtype, is the lever, and it is not one the kernel controls.
+    the cost is paid only where the storage really is over the buffer-op limit.
+    Storage size, not offset dtype, is the lever, and it is not one the kernel
+    controls.
 
     *Every* operand the kernel indexes has to be passed here, the weight
-    included -- it is the one this decision used to omit, on an assumption
-    ("weights are never that large") that nothing enforced.  ``numel`` is the
+    included; nothing else enforces that a weight is small.  ``numel`` is the
     right quantity for each: the largest element offset a contiguous operand
     sees is ``numel - 1``, and offsets computed for masked-off lanes can exceed
     it but are never dereferenced.
@@ -1275,19 +1200,19 @@ def conv3d_forward(
 ) -> torch.Tensor:
     """Forward 3-D convolution.  Input and output are ``channels_last_3d``.
 
-    **The weight is read where it lies**, decided from its strides.  A
+    The weight is read where it lies, decided from its strides.  A
     ``channels_last_3d`` parameter -- which is what a ScaFFold model's weights
     already are, since ``worker.py`` moves the whole model to that format --
-    costs *no* weight transform at all.  That matters because the transform was
-    per optimizer step rather than per call: the optimizer dirties every
-    parameter every step, so no amount of caching removed it.  A weight in
+    costs *no* weight transform at all.  That matters because the transform
+    would be per optimizer step rather than per call: the optimizer dirties
+    every parameter every step, so no amount of caching removes it.  A weight in
     PyTorch's *default* layout is still copied, and has to be; see
     :func:`_weight_plan`.
 
     ``weight_rsck`` remains for a caller who has an RSCK buffer already, and is
-    a wash against reading the parameter (0.96-1.10x per site, both directions).
-    It is checked rather than trusted, since it supplies every weight value the
-    kernel reads and ``w`` is then consulted only for its shape.
+    a wash against reading the parameter in either direction.  It is checked
+    rather than trusted, since it supplies every weight value the kernel reads
+    and ``w`` is then consulted only for its shape.
 
     ``weight_flip`` consumes the taps in reverse.  It exists for
     :mod:`~triton_conv3d.bwd_data`, whose gather is the forward's with the taps
@@ -1322,8 +1247,8 @@ def conv3d_forward(
     if out is None:
         # One allocation, already in the layout the kernel stores into.  Spelling
         # it ``torch.empty(shape).contiguous(memory_format=...)`` allocates NCDHW
-        # and then copies the whole thing: 2.82 ms against 0.012 ms on a 256 MiB
-        # output, 235x, on a path a training step takes about 19 times.
+        # and then copies the whole output, which dwarfs the allocation and
+        # happens once per convolution.
         y = torch.empty(
             y_shape,
             device=x.device,
@@ -1429,7 +1354,7 @@ def verify_isa(
 ) -> None:  # pragma: no cover
     """Compile and launch one configuration so its ISA can be inspected.
 
-    Run under ``AMDGCN_ENABLE_DUMP=1`` with a **cold** ``TRITON_CACHE_DIR``: a
+    Run under ``AMDGCN_ENABLE_DUMP=1`` with a *cold* ``TRITON_CACHE_DIR``: a
     cache hit skips the compile and therefore the dump, and an empty grep then
     looks exactly like a kernel with no MFMA in it.  The other trap is the
     mnemonic -- the emitted instruction is ``v_mfma_f32_16x16x16_bf16`` with no
@@ -1438,14 +1363,14 @@ def verify_isa(
 
     ``direction="bwd-data"`` runs the same kernel through
     :func:`~triton_conv3d.bwd_data.conv3d_backward_data`.  It is the *same*
-    ``@triton.jit`` function, so a reader could reasonably ask why it needs
-    checking again: because the constexprs differ.  Backward-data's ``PADDED``
-    is true where the halo'd forward's is false, its ``EVEN_K``/``EVEN_N`` are
-    computed from the swapped channel widths, and its tile comes from a
-    different table -- and every one of those changes the code that is emitted.
+    ``@triton.jit`` function and still needs checking again, because the
+    constexprs differ: backward-data's ``PADDED`` is true where the halo'd
+    forward's is false, its ``EVEN_K``/``EVEN_N`` come from the swapped channel
+    widths, and its tile comes from a different table -- each of which changes
+    the code that is emitted.
 
-    ``weight_layout`` selects which of the three B loads is compiled, and it has
-    to be gated separately for the same reason: ``W_ORDER`` is a constexpr, and
+    ``weight_layout`` selects which of the B loads is compiled, and is gated
+    separately for the same reason: ``W_ORDER`` is a constexpr, and
     ``channels_last`` (the shipped path, a transposing load) and ``rsck`` (a
     hoisted buffer, a straight load) emit different instructions for the operand
     that feeds the matrix core.

@@ -794,18 +794,17 @@ class PyTorchTrainer(BaseTrainer):
         """Log which kernel each accelerated module is using, once, on rank 0.
 
         Called from two places -- the end of :meth:`warmup` and after the first
-        training batch -- because the answer only exists once a forward has run.
+        training batch -- because the answer only exists once a forward has run:
         ``_triton_ok`` is a latch set when a rung first answers a call, so
         reporting at construction time would say "Native" about modules that
         have simply not run yet.  ``warmup_batches <= 0`` makes :meth:`warmup`
         return without running anything, so neither call site alone covers every
-        run; the flag below makes the pair idempotent rather than making either
-        one conditional on the other.
+        run; the flag below makes the pair idempotent.
 
         Rank 0 only, and one rank's answer: each rank latches independently, so
-        under DDP this is representative rather than global.  It is an
-        informational line and is deliberately not a collective -- gathering it
-        would put a barrier on a path that has no other reason for one.
+        under DDP this is representative rather than global.  Deliberately not a
+        collective -- gathering it would put a barrier on a path that has no
+        other reason for one.
         """
         if self._kernel_selection_logged or self.world_rank != 0:
             return

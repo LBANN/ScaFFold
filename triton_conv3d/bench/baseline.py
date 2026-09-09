@@ -13,54 +13,37 @@ Reproducing what ScaFFold actually runs
 
 Getting either of the following wrong makes MIOpen solve a *different problem*,
 or solve this one *differently*, and then quietly reports a number that is not
-the control.  The first version of this file got both wrong and overstated
-MIOpen's cost by up to 12x, which would have turned into a fabricated speedup
-for every kernel measured against it.  So they are enforced here, recorded in
-the output header, and regression-tested in ``tests/test_infra.py``.
+the control.  So they are enforced here, recorded in the output header, and
+regression-tested in ``tests/test_infra.py``.
 
 1.  ``torch.backends.cudnn.benchmark = True``.  ScaFFold sets this at startup
     unless ``more_determinism`` is on (``ScaFFold/worker.py:171``), and so does
     the profiling harness the reference numbers come from.  On ROCm the flag
     decides whether PyTorch asks MIOpen for an exhaustive *find* or lets it
-    answer from its AI heuristic.  The two answers are not close.  For
-    ``conv 64->64 k3 @ 128^3``, forward, measured with
-    ``MIOPEN_ENABLE_LOGGING=1``::
+    answer from its AI heuristic.  The two answers are not close: same solver
+    (``ConvHipImplicitGemm3DGroupFwdXdlops``) and same device op, but the
+    heuristic picks small MFMA tiles with narrow global loads where the search
+    picks large tiles with wide ones.  It is not a naive fallback, which is why
+    it does not look like one in a profile.
 
-        benchmark=False  findMode DYNAMIC_HYBRID(5), no search
-            DeviceGroupedConvFwdMultipleABD_Xdl_CShuffle<256,64,64,32,
-                Default,16,16,2,2,2,1,2,1,1,1>              12.235 ms
-        benchmark=True   findMode NORMAL(1), GenericSearch over 23 configs
-            DeviceGroupedConvFwdMultipleABD_Xdl_CShuffle<256,128,64,32,
-                Default,32,32,2,1,8,8,8,1,1,1>               1.746 ms
-
-    Same solver (``ConvHipImplicitGemm3DGroupFwdXdlops``), same device op --
-    only the tuning config differs.  The heuristic picks 16x16 MFMA tiles with
-    2-element global loads; the search picks 32x32 tiles with 8-element loads.
-    That is the whole 7x.  It is not a naive fallback, which is why it does not
-    look like one in a profile.
-
-2.  The shape -- and there are **three** of it.  Upstream DistConv concatenates
-    a ``k // 2`` halo onto every axis it manages and then sets that axis's
+2.  The shape -- and there are three of it.  Upstream DistConv concatenates a
+    ``k // 2`` halo onto every axis it manages and then sets that axis's
     padding to zero, so under the MIOpen rung ScaFFold's
     ``conv 64->64 k3 @ 128^3`` reaches MIOpen as a *130^3 unpadded* problem.
     MIOpen's find-db key includes the padding, so these are separate problems
-    with separate tuning::
+    with separate tuning.
 
-        padded 128^3 pad 1, benchmark=True     bwd-data  3.426 ms
-        halo'd 130^3 pad 0, benchmark=True     bwd-data  3.324 ms   <- DistConv
-        profiled ScaFFold (config A)           bwd-data  3.483 ms
-
-    ``--shape halo`` (the default) measures the form **DistConv** issues, which
-    is the form the profiled numbers this module cross-checks against were
-    measured in -- so it stays the default and the join stays valid.  It is
-    *not* the shape ScaFFold's own Triton rung runs: that adapter exchanges a
-    halo only on genuinely split axes, so the convolution it issues is padded on
-    H and W at every configuration and on all three axes at one GPU.
-    ``--shape production`` measures **that** form, which is the one to baseline
-    MIOpen in if the comparison is against a Triton kernel; ``--shape unhaloed``
-    measures the logical statement; ``--shape all`` measures each distinct one.
-    Every record says which it was, so a baseline cell can never be silently
-    compared against the wrong profile cell.
+    ``--shape halo`` (the default) measures the form DistConv issues, which is
+    the form the profiled numbers this module cross-checks against were measured
+    in -- so it stays the default and the join stays valid.  It is *not* the
+    shape ScaFFold's own Triton rung runs: that adapter exchanges a halo only on
+    genuinely split axes, so the convolution it issues is padded on H and W at
+    every configuration and on all three axes at one GPU.  ``--shape
+    production`` measures that form, which is the one to baseline MIOpen in if
+    the comparison is against a Triton kernel; ``--shape unhaloed`` measures the
+    logical statement; ``--shape all`` measures each distinct one.  Every record
+    says which it was, so a baseline cell can never be silently compared against
+    the wrong profile cell.
 
 Two more must be in the *environment* before the process starts, because MIOpen
 reads them when it builds its handle and this module cannot set them for you:
@@ -83,9 +66,8 @@ has drifted out of agreement says so rather than being believed.
 Results stream to the output file as they are produced, and ``--resume`` skips
 what is already there.  That matters because two things in this corpus do not
 merely run slowly: the scale-8 backward-weight at ``128->64 @ 128x256x256``
-takes 45 s per call, and unsharded scale 8 trips an assertion inside MIOpen that
-can take the process down with it.  Losing 40 minutes of measurements to the
-last problem in the list is avoidable, so it is avoided.
+takes tens of seconds per call, and unsharded scale 8 trips an assertion inside
+MIOpen that can take the process down with it.
 
 Usage::
 
@@ -113,8 +95,8 @@ _MEMORY_FORMAT = torch.channels_last_3d
 
 #: ScaFFold's default (``worker.py:171``), and the profiling harness's
 #: (``prof_bench.py:125``).  See the module docstring: with this off MIOpen
-#: answers from its heuristic instead of searching, and the baseline is wrong
-#: by up to 12x.  Module-level so that importing this module is enough to put a
+#: answers from its heuristic instead of searching and the result is not a
+#: control.  Module-level so that importing this module is enough to put a
 #: process in the configuration the recorded numbers were taken in.
 REQUIRE_CUDNN_BENCHMARK = True
 torch.backends.cudnn.benchmark = REQUIRE_CUDNN_BENCHMARK
@@ -211,9 +193,7 @@ def measure_one(
         # One untimed call decides whether this cell is measurable at all: with
         # cudnn.benchmark on, MIOpen's *find* runs on the first invocation --
         # it launches every candidate config -- and would otherwise be the whole
-        # measurement.  Everything after that is sized by the harness, which
-        # re-derives the same per-call time and additionally picks the round
-        # count from the precision it has reached.
+        # measurement.  Everything after it is sized by the harness.
         fn()
         torch.cuda.synchronize()
         t0 = time.perf_counter()
@@ -242,16 +222,15 @@ def measure_one(
                 target_rel=target_rel,
             )["miopen"]
             # Both statistics, because they answer different questions.  The
-            # median is the control -- it is what a step actually costs on a
-            # shared node.  The best round is the diagnostic: this node has
-            # other tenants, and a neighbour can inflate every round at once,
-            # so "did MIOpen find a good kernel" has to be asked of the best
-            # round or it gets a flaky answer.
+            # median is the control -- what a step actually costs on a shared
+            # node.  The best round is the diagnostic: a neighbour can inflate
+            # every round at once, so "did MIOpen find a good kernel" has to be
+            # asked of the best round or it gets a flaky answer.
             #
             # ``spread`` is kept because every stored baseline has it, but read
             # ``rel_ci`` instead: ``spread`` is a *range* and its expectation
-            # grows with ``rounds``, which is now chosen per cell, so two cells'
-            # spreads are no longer comparable to each other at all.
+            # grows with ``rounds``, which is chosen per cell, so two cells'
+            # spreads are not comparable to each other.
             record.update(
                 ms=meas.median,
                 best_ms=meas.best,
@@ -283,16 +262,15 @@ def measure_one(
 def cross_check(records: list[dict], problems: list[ConvProblem]) -> list[dict]:
     """Join measured cells onto the profiled ScaFFold numbers they control for.
 
-    Only the halo'd cells are joined, and the reason is narrower than it used to
-    be stated: the profile these numbers control for was taken with DistConv on
-    the path, so the calls it timed *were* the halo'd form.  The other two forms
-    have no profiled counterpart to be compared against -- not because ScaFFold
-    never runs them (it runs the production form at every site, every step) but
-    because nobody has profiled a step in them.  Joining a production-form cell
-    onto a DistConv-form profile figure is the bug this whole module is a
-    response to.  The profiled figure used is the *cheapest* of the per-config
-    measurements, because a profiled call can be slowed by contention with the
-    rest of the step but cannot be sped up by it.
+    Only the halo'd cells are joined: the profile these numbers control for was
+    taken with DistConv on the path, so the calls it timed *were* the halo'd
+    form.  The other two forms have no profiled counterpart -- not because
+    ScaFFold never runs them (it runs the production form at every site, every
+    step) but because nobody has profiled a step in them.  Joining a
+    production-form cell onto a DistConv-form profile figure is the bug this
+    module is a response to.  The profiled figure used is the *cheapest* of the
+    per-config measurements, because a profiled call can be slowed by contention
+    with the rest of the step but cannot be sped up by it.
     """
     by_key = {}
     for p in problems:

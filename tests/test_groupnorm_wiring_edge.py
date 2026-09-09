@@ -14,15 +14,10 @@
 
 """Edge cases of the GroupNorm *wiring* (``FastGroupNorm``'s three-rung ladder).
 
-Written as an adversarial review of the wiring: ``tests/test_groupnorm.py``
-covers the happy paths and the routing predicates, this file covers the places
-where the ladder, the latches and the absorbed ReLU interact with the rest of
-torch.
-
-The review left ten of these as ``xfail(strict=True)``, one per defect, each
-asserting the behaviour the module *should* have.  All ten are fixed and the
-markers are gone; the tests stay, now as regression guards.  The properties
-they pin, in the order the defects were found:
+An adversarial pass over the wiring: ``tests/test_groupnorm.py`` covers the
+happy paths and the routing predicates, this file covers where the ladder,
+the latches and the absorbed ReLU interact with the rest of torch.  Properties
+pinned here:
 
 * the fused activation is bit-identical to ``F.relu`` on NaN, the infinities
   and ``-0.0``, forward and backward, on all three rungs -- and a NaN produced
@@ -119,15 +114,14 @@ def _triton_spy(monkeypatch):
 def test_activate_handles_every_supported_activation():
     """``_activate`` must implement every activation the module advertises.
 
-    ``SUPPORTED_ACTIVATIONS`` is what the *constructor* accepts and what
-    ``is_supported`` is asked about, but the compiled and eager rungs apply it
-    through ``_activate``, which tests one literal string.  Adding a second
-    activation to both tuples (the only thing
-    ``test_supported_activations_match_the_kernels`` checks) would fuse it into
-    the Triton store and silently drop it everywhere else -- i.e. the network's
-    function would depend on the memory format of its input.  This is the guard
-    on that: for every non-``None`` activation, ``_activate`` has to *change*
-    an input that the identity would leave alone.
+    ``SUPPORTED_ACTIVATIONS`` is what the constructor accepts and what
+    ``is_supported`` checks, but the compiled and eager rungs apply the
+    activation through ``_activate``, which tests one literal string.  Adding a
+    second activation to both tuples without adding it to ``_activate`` would
+    fuse it into the Triton store and silently drop it on the other two rungs
+    -- the network's activation would depend on its input's memory format.  So
+    for every non-``None`` activation, ``_activate`` must *change* an input
+    the identity would leave alone.
     """
     x = torch.linspace(-2.0, 2.0, 64).reshape(1, 8, 2, 2, 2)
     for activation in gn_mod.SUPPORTED_ACTIVATIONS:
@@ -167,12 +161,12 @@ def test_activation_is_not_part_of_the_state():
 def test_double_conv_bytes_match_a_hand_built_pre_fusion_block():
     """Byte-for-byte state-dict identity against an independently built block.
 
-    ``test_state_dict_bytes_identical_to_plain_groupnorm_model`` compares against
-    a model produced by *converting* the fused one, which shares its
-    construction order by definition.  This builds the pre-fusion
+    ``test_state_dict_bytes_identical_to_plain_groupnorm_model`` compares
+    against a model produced by *converting* the fused one, which shares its
+    construction order by definition.  This instead builds the pre-fusion
     ``nn.Sequential`` from scratch -- ``Conv3d, GroupNorm, ReLU, Conv3d,
-    GroupNorm, ReLU`` -- and compares the serialized bytes, which is the
-    independent version of the same claim.
+    GroupNorm, ReLU`` -- so the byte comparison does not depend on that shared
+    construction.
     """
     from ScaFFold.unet.unet_parts import DoubleConv
 
@@ -228,13 +222,12 @@ def test_module_pickled_before_the_fusion_still_runs():
 def test_unsupported_activation_assigned_after_construction_is_caught():
     """``activation`` is validated where it is *used*, not only at construction.
 
-    It is a plain attribute, so it can be assigned afterwards; ``is_supported``
+    It is a plain attribute, so it can be reassigned afterward; ``is_supported``
     would then decline the Triton rung while ``_activate`` silently applied
-    nothing, i.e. the module would quietly become a bare GroupNorm.  The same
-    hole is the forward-looking risk: adding a third entry to both
-    ``SUPPORTED_ACTIVATIONS`` tuples without implementing it in ``_activate``
-    must not produce a network whose activation depends on its input's memory
-    format.  Failing loudly on the rung that cannot apply it closes both.
+    nothing, quietly turning the module into a bare GroupNorm.  The same
+    failure would follow from adding an activation to ``SUPPORTED_ACTIVATIONS``
+    without implementing it in ``_activate``, so validating on every call
+    closes both holes.
     """
     module = FastGroupNorm(_GROUPS, 16, activation="relu")
     module.activation = "gelu"
@@ -274,13 +267,12 @@ def test_base_exceptions_are_not_caught():
 def test_checkpoint_error_is_re_raised(monkeypatch, rung):
     """``CheckpointError`` is the checkpoint machinery talking, not a kernel.
 
-    It is raised by the recompute pack hook -- i.e. from inside whichever op is
-    saving a tensor -- exactly like ``_StopRecomputationError``, and it is a
-    ``RuntimeError`` subclass, so any handler wide enough to catch "a broken
-    kernel" by type catches it too.  Swallowing it latches the rung off, retries
-    on the next one and leaves the checkpoint frame in a state the machinery
-    never expected.  The allowlist has to be narrow enough that this propagates
-    untouched and nothing latches.
+    It is raised by the recompute's pack hook -- from inside whichever op is
+    saving a tensor -- exactly like ``_StopRecomputationError``, and like it is
+    a ``RuntimeError`` subclass, so a handler wide enough to catch "a broken
+    kernel" by type catches it too.  Swallowing it would latch the rung off and
+    leave the checkpoint frame in a state the machinery never expected, so the
+    allowlist must be narrow enough to let it propagate untouched.
     """
     import torch.utils.checkpoint as checkpoint_mod
 
@@ -306,20 +298,18 @@ def test_checkpoint_error_is_re_raised(monkeypatch, rung):
 def test_a_rung_failure_does_not_re_fire_saved_tensor_hooks(monkeypatch):
     """The retry has to be idempotent with respect to saved-tensor hooks.
 
-    Under non-reentrant activation checkpointing the recompute counts pack-hook
-    firings and requires the count *and* the metadata to match the forward's, so
-    a rung that packed some tensors and then failed -- with the fallback packing
+    Under non-reentrant checkpointing the recompute counts pack-hook firings
+    and requires both the count and the metadata to match the forward's, so a
+    rung that packs some tensors before failing -- with the fallback packing
     its own set on top -- corrupts the frame.  A user's offloading hook has the
-    same problem in a less dramatic way (an offload failure retried by
-    offloading a second, larger set).
+    same problem in miniature.
 
-    The property is structural rather than defensive: the ladder catches only
-    failures that are raised *before* their rung saves anything (the Triton op
-    saves in ``_setup_context``, after the launch region its ``TritonKernelError``
-    comes from; a Dynamo/Inductor error is a compile-time error, before
-    execution).  Both halves are asserted here -- a caught failure packs exactly
-    what a clean fallback packs, and an exception from *after* the packing is
-    not the ladder's to swallow.
+    This holds structurally, not by care: the ladder catches only failures
+    raised *before* their rung saves anything (the Triton op saves in
+    ``_setup_context``, after which its ``TritonKernelError`` cannot occur; a
+    Dynamo/Inductor failure is a compile-time error, before execution).
+    Asserted here: a caught failure packs exactly what a clean fallback packs,
+    and a failure *after* packing is not the ladder's to swallow.
     """
     import torch._dynamo.exc
 
@@ -404,8 +394,8 @@ def test_out_of_memory_is_not_recorded_as_a_kernel_failure(monkeypatch, rung):
     fallback allocates an output of the same size, so retrying one is a second,
     differently-shaped OOM at a call site the caller never asked about.
     Latching on it is worse still -- a per-rank, nondeterministic event that
-    permanently changes which kernel that rank runs, and therefore (measured)
-    the all-reduced gradients of the whole job.
+    permanently changes which kernel that rank runs, and therefore the
+    all-reduced gradients of the whole job.
     """
     from ScaFFold.unet.triton_group_norm import TritonKernelError
 
@@ -440,12 +430,12 @@ def test_a_global_latch_does_not_demote_a_module_that_already_used_the_rung(
     A rung that has already served a module keeps serving it; only modules that
     have never used it are steered away.  That is what makes a checkpointed
     block's forward and its recompute agree (they save different tensors on
-    different rungs, so a mid-graph change is fatal), and it is why a broken
-    install still costs exactly one attempt per module rather than one per call.
+    different rungs, so a mid-graph change is fatal), and why a broken install
+    still costs one attempt per module rather than one per call.
 
-    The corollary tested here too: because a proven module keeps retrying, the
-    warning has to be emitted on the latch's edge rather than per call, or a
-    persistently broken kernel floods the log for the rest of the run.
+    Also tested: because a proven module keeps retrying, the warning must fire
+    on the latch's edge rather than per call, or a persistently broken kernel
+    floods the log.
     """
     import logging
 
@@ -496,19 +486,19 @@ def test_a_proven_rung_does_not_degrade_while_a_backward_replays_it(monkeypatch,
     """A fallback *during a recompute* corrupts rather than degrades.
 
     The latch already refuses to demote a module that has used a rung, but the
-    fallback itself sidestepped that: the failing call still got answered from
+    fallback itself sidestepped that: a failing call still got answered from
     the next rung down, and if that call is ``torch.utils.checkpoint``'s
-    recompute of a forward that ran on the failing rung, the recomputed forward
-    saves a different set of tensors than the original did and torch rejects
-    the whole step (``CheckpointError``; on one measured shape a GPU memory
-    fault instead).  Neither is a degradation, so this one case re-raises.
+    recompute of a forward that ran on the failing rung, the recomputed
+    forward saves a different set of tensors than the original did and torch
+    rejects the whole step (``CheckpointError``, or a GPU memory fault).
+    Neither is a degradation, so this one case re-raises.
 
-    It is narrow on purpose -- ``_replaying_a_forward()`` is false in an
-    ordinary forward, where ``test_a_global_latch_does_not_demote_a_module_...``
-    still requires the fallback -- and the second half here pins the other side
-    of the narrowness: a module that has *not* used the rung degrades even
-    inside the backward, because the forward it is replaying went down the
-    ladder too and the two agree.
+    Narrow on purpose: ``_replaying_a_forward()`` is false in an ordinary
+    forward, where ``test_a_global_latch_does_not_demote_a_module_...`` still
+    requires the fallback.  The second half here pins the other side -- a
+    module that has *not* used the rung degrades even inside the backward,
+    because the forward it is replaying went down the ladder too and the two
+    agree.
     """
     import torch._dynamo.exc
     import torch.utils.checkpoint as checkpoint_mod
@@ -633,17 +623,15 @@ def test_gpu_model_double_backward_fails_loudly():
     """Same, through the wired model, which is where a user would hit it.
 
     Either rung may raise first and the message differs, so this matches both:
-    ``triton_group_norm``'s backward is a custom op with **no autograd formula**,
-    and the Triton convolution's is marked **@once_differentiable**.  Which one
-    the traversal reaches first is a routing detail -- before the block-list was
-    emptied on 2026-08-04 the ``Cin == 3`` stem was on MIOpen, which *is* twice
-    differentiable, so the walk got all the way to GroupNorm.  Now the stem's own
-    backward stops it, one op earlier.
+    ``triton_group_norm``'s backward is a custom op with no autograd formula,
+    and the Triton convolution's backward is marked ``@once_differentiable``.
+    Which one the traversal reaches first is a routing detail -- the stem
+    convolution's own backward now stops it one op earlier, before GroupNorm
+    is ever reached.
 
-    What must not change is that it raises *at all*.  Neither decorator was in
-    place on the convolution until that routing change, and without it the
-    failure was ``first`` silently arriving with no ``grad_fn`` -- a second
-    backward then contributing zero rather than erroring.
+    What must not change is that it raises *at all*: without both decorators
+    in place, ``first`` would silently arrive with no ``grad_fn`` and a second
+    backward would contribute zero rather than error.
     """
     model = _small_unet("cuda", channels_last=True)
     x = (
@@ -703,19 +691,18 @@ def test_gpu_triton_rung_inside_a_compiled_region(monkeypatch, fullgraph):
 def test_gpu_the_fallback_path_traces_under_fullgraph(monkeypatch, proven):
     """A rung failure *while Dynamo is tracing* must still fall back, not die.
 
-    The handler used to call ``logger.warning``, which Dynamo cannot trace
-    ("Unsupported: logging.Logger method not supported for non-export cases"),
-    so a caller compiling this forward with ``fullgraph=True`` got a hard error
-    instead of the fallback -- the one caller for whom the fallback matters
-    most, since the thing it is reacting to is usually a compile-time failure.
-    Nothing in ScaFFold compiles ``FastGroupNorm.forward`` today; this pins the
-    claim that it can.
+    ``logger.warning`` cannot be traced by Dynamo, so the fallback handler must
+    avoid calling it directly or a caller compiling this forward with
+    ``fullgraph=True`` gets a hard error instead of the fallback -- exactly the
+    caller for whom the fallback matters most, since what it reacts to is
+    usually a compile-time failure.  Nothing in ScaFFold compiles
+    ``FastGroupNorm.forward`` today; this pins that it can.
 
-    Both halves of the handler's guard have to trace, which is why ``proven``
-    is parametrized: with ``_triton_ok`` false Dynamo folds the ``and`` away
-    without ever looking at ``_replaying_a_forward()``, so only the ``True``
-    arm reaches it -- and a probe Dynamo cannot trace there would be the same
-    defect as the logging call, reintroduced.
+    Both halves of the handler's guard must trace, which is why ``proven`` is
+    parametrized: with ``_triton_ok`` false, Dynamo folds the ``and`` away
+    without evaluating ``_replaying_a_forward()``, so only the ``True`` arm
+    reaches it -- and an untraceable probe there would reintroduce the same
+    defect.
     """
     import torch._dynamo
 
@@ -809,16 +796,16 @@ def test_gpu_a_predicate_that_cannot_answer_falls_back_without_latching(
 ):
     """``is_supported`` raising is a routing miss, and "no" is always a valid answer.
 
-    The predicate runs *outside* the ladder's try, so anything it raises escapes
-    ``forward()`` -- which is how a ``torch.func`` transform used to turn a
-    drop-in ``nn.GroupNorm`` into a hard error.  The functorch check upstream
-    covers the one caller known to trip it; this covers the shape of the
-    problem, because ``is_supported`` inspects an *arbitrary* tensor and the set
-    of wrappers that can make an attribute read raise is not closed.  A broad
-    catch is right here and nowhere else in this module: the predicate has done
-    no work anyone can observe and a correct answer ("use the stock kernel") is
-    always available -- so it must fall back, and must not latch, because
-    nothing about the kernel has been learned.
+    The predicate runs *outside* the ladder's try, so anything it raises
+    escapes ``forward()`` -- e.g. a ``torch.func`` transform turning a drop-in
+    ``nn.GroupNorm`` into a hard error.  The functorch check upstream covers
+    the one caller known to trip it; this covers the shape of the problem,
+    since ``is_supported`` inspects an arbitrary tensor and the set of
+    wrappers whose attribute reads can raise is not closed.  A broad catch is
+    right here and nowhere else in this module: the predicate has done no
+    observable work and a correct answer ("use the stock kernel") is always
+    available, so it must fall back without latching -- nothing about the
+    kernel itself has been learned.
     """
     import logging
 
@@ -851,11 +838,11 @@ def test_gpu_a_predicate_that_cannot_answer_falls_back_without_latching(
 def test_gpu_torch_func_grad_does_not_latch_the_rungs_off():
     """A ``torch.func`` call anywhere must not demote the whole process.
 
-    ``torch.func.grad`` used to reach the kernel, fail, and latch *both* fast
-    rungs off permanently -- i.e. one transform anywhere in a process silently
-    dropped every GroupNorm in the model to the stock kernel for the rest of
-    the run.  Recording a routing miss as a kernel failure is the general shape
-    of the bug; this pins the specific instance.
+    Reaching the kernel through ``torch.func.grad`` and failing there must not
+    latch *both* fast rungs off permanently -- one transform anywhere in a
+    process must not silently drop every GroupNorm in the model to the stock
+    kernel for the rest of the run.  Recording a routing miss as a kernel
+    failure is the general shape of the bug this pins.
     """
     module, x = _cuda_norm(activation=None)
     gn_mod._triton_failed = False
@@ -876,19 +863,18 @@ def test_gpu_a_triton_failure_during_a_checkpointed_step_degrades_not_dies():
 
     Non-reentrant checkpointing compares the metadata of every tensor the
     recomputed forward saves against the forward's, and the three rungs save
-    *different* tensors -- Triton ``(input, weight, bias, mean, rstd)``, the
-    other two ``(input, weight, mean, rstd, relu_output)``.  So a rung change
-    between a block's forward and its recompute kills the step with a
-    ``CheckpointError``, which is the exact opposite of the ladder's contract
-    ("a broken Triton install must degrade a multi-node run, not kill it") and
-    is reachable whenever the ``activation_checkpointing`` option is on
-    (``worker.py:230``).  Matching the output memory format is *not* enough on
-    its own -- measured; the saved sets still differ -- so the fix is that a
-    global latch does not demote a module that has already used the rung.
+    different sets -- Triton ``(input, weight, bias, mean, rstd)``, the other
+    two ``(input, weight, mean, rstd, relu_output)``.  A rung change between a
+    block's forward and its recompute therefore kills the step with a
+    ``CheckpointError`` -- exactly the failure the ladder exists to prevent --
+    and is reachable whenever ``activation_checkpointing`` is on
+    (``worker.py:230``).  Matching the output memory format is not enough on
+    its own, since the saved sets still differ; the fix is that a global latch
+    does not demote a module that has already used the rung.
 
     The same hazard predates the Triton rung: flipping ``_compile_failed``
-    between forward and recompute dies too, which is why both latches are
-    checked here.
+    between forward and recompute fails the same way, which is why both
+    latches are checked here.
     """
     for latch in ("_triton_failed", "_compile_failed"):
         model = _small_unet("cuda", channels_last=True)
@@ -916,12 +902,13 @@ def test_gpu_a_triton_failure_during_a_checkpointed_step_degrades_not_dies():
 def test_gpu_every_rung_returns_the_inputs_memory_format(channels_last):
     """All three rungs must agree on the output layout, not just the values.
 
-    ``F.group_norm`` -- eager or Inductor-compiled -- returns a *contiguous*
-    tensor whatever it was given, so a single fallback used to re-break the
+    ``F.group_norm`` -- eager or Inductor-compiled -- returns a contiguous
+    tensor whatever it was given, so a naive fallback would re-break the
     channels-last chain for every convolution after it, which is the exact
-    thing this module exists to prevent.  It also made the rungs distinguishable
-    to anything that inspects metadata (``torch.utils.checkpoint``, a compiled
-    caller's guards), which is a correctness problem rather than a speed one.
+    thing this module exists to prevent.  It would also make the rungs
+    distinguishable to anything that inspects metadata
+    (``torch.utils.checkpoint``, a compiled caller's guards) -- a correctness
+    problem, not a speed one.
     """
     device = torch.device("cuda")
     generator = torch.Generator(device=device).manual_seed(9)
@@ -999,15 +986,13 @@ def _bits(t):
 def test_gpu_all_rungs_agree_on_nan_and_inf(poison, activation):
     """One non-finite input value must poison the same elements on every rung.
 
-    The Triton store used ``tl.maximum(y, 0.0)``, which returns the *non*-NaN
-    operand, so a diverging activation came back from the Triton rung as a
-    finite 0.0 while ``F.relu`` on the other two kept it NaN.  That is worse
-    than a numerics discrepancy: the forward looks finite while the backward is
-    still NaN, so the run sails past ScaFFold's non-finite-loss abort and
-    checkpoints a broken model -- and the model's output becomes a function of
-    its input's memory format.  ``activation=None`` is the control: all three
-    agreed there even before the fix, which is what localizes the divergence to
-    the fused activation.
+    ``tl.maximum(y, 0.0)`` returns the non-NaN operand, so a store built on it
+    would turn a NaN activation into a finite 0.0 on the Triton rung while
+    ``F.relu`` on the other two rungs keeps it NaN -- worse than a numerics
+    discrepancy, since the forward would look finite while the backward is
+    still NaN, letting a diverged run slip past ScaFFold's non-finite-loss
+    abort.  ``activation=None`` is the control: all three rungs already agree
+    there, which localizes the check to the fused activation.
     """
     device = torch.device("cuda")
     x = torch.randn(1, 64, 4, 4, 4, device=device)
@@ -1033,21 +1018,20 @@ def test_gpu_fused_activation_is_bit_identical_to_relu(activation):
     """Every special value of the *pre-activation*, on every rung, bit for bit.
 
     Poisoning the input can only produce NaN pre-activations (one NaN or Inf
-    makes the whole group's statistics NaN), so the four values that actually
-    distinguish the spellings of ReLU are reached the other way round: a zero
-    ``weight`` makes the pre-activation exactly ``bias``, elementwise, so the
-    bias vector chooses what the activation sees.  Expected, per
-    ``F.relu``: NaN stays NaN, ``+Inf`` stays ``+Inf``, ``-Inf`` and both zeros
-    become ``+0.0`` (never ``-0.0``).
+    makes the whole group's statistics NaN), so the values that distinguish
+    the spellings of ReLU are reached the other way: a zero ``weight`` makes
+    the pre-activation exactly ``bias``, elementwise, so the bias vector
+    chooses what the activation sees.  Per ``F.relu``: NaN stays NaN, ``+Inf``
+    stays ``+Inf``, ``-Inf`` and both zeros become ``+0.0`` (never ``-0.0``).
 
-    With ``activation=None`` the zeros are normalized (``+ 0.0`` maps ``-0.0``
-    to ``+0.0`` and leaves NaN, the infinities and every normal value alone)
-    before the same bitwise comparison: a ``-0.0`` bias survives to the output
-    there, and whether ``xhat * 0 + (-0.0)`` keeps the sign depends on whether
-    the kernel contracted the multiply-add into an FMA -- true of the Triton
-    *and* the Inductor rung, false of eager, and nothing to do with the
-    activation.  ``torch.equal`` is no use for either case: it reports NaN as
-    unequal to itself.
+    With ``activation=None`` the zeros are normalized first (``+ 0.0`` maps
+    ``-0.0`` to ``+0.0``, leaving NaN, the infinities and every normal value
+    alone) before the same bitwise comparison: a ``-0.0`` bias would otherwise
+    survive to the output, and whether ``xhat * 0 + (-0.0)`` keeps its sign
+    depends on whether the kernel contracted the multiply-add into an FMA --
+    true of Triton and Inductor, false of eager, and unrelated to the
+    activation.  ``torch.equal`` cannot be used for either case: it reports
+    NaN as unequal to itself.
     """
     device = torch.device("cuda")
     generator = torch.Generator(device=device).manual_seed(3)
