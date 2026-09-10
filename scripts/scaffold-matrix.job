@@ -12,6 +12,10 @@
 
 export LD_LIBRARY_PATH=/usr/lib64:$LD_LIBRARY_PATH
 
+# Use Triton compiled channels-last groupnorm instead of PyTorch compiled contiguous groupnorm, which will incur an extra channels-last conversion.
+# The Triton GN is optimized for AMD MI300A, but we have still noticed almost ~2x improved performance on H100.
+export SCAFFOLD_GROUPNORM_TRITON=1
+
 CONFIG_PATH="$(pwd)/ScaFFold/configs/benchmark_default.yml"
 
 scaffold generate_fractals \
