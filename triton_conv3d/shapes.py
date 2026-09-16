@@ -68,8 +68,11 @@ import math
 import pathlib
 from typing import Iterator, Literal, Sequence
 
-_CORPUS_PATH = pathlib.Path(__file__).resolve().parent / "scaffold_corpus.json"
-_CENSUS_PATH = pathlib.Path(__file__).resolve().parent / "scaffold_census.json"
+#: The recorded corpora live with the tests: nothing on the runtime path reads
+#: them, only ``bench/`` and ``tests/``, and both run from a checkout.
+_DATA_DIR = pathlib.Path(__file__).resolve().parent / "tests" / "data"
+_CORPUS_PATH = _DATA_DIR / "scaffold_corpus.json"
+_CENSUS_PATH = _DATA_DIR / "scaffold_census.json"
 
 Direction = Literal["fwd", "bwd-data", "bwd-weight"]
 DIRECTIONS: tuple[Direction, ...] = ("fwd", "bwd-data", "bwd-weight")
@@ -463,8 +466,11 @@ def scaffold_corpus() -> tuple[ConvProblem, ...]:
     """Every distinct convolution in the three profiled ScaFFold configurations.
 
     Ordered by measured cost, so truncating the list keeps the problems that
-    matter.  Loaded from ``scaffold_corpus.json``, which is generated from the
-    profiled shape dumps rather than written by hand.
+    matter.  Loaded from ``tests/data/scaffold_corpus.json``, a recorded
+    fixture rather than a hand-written list: the shapes come from
+    ``model-analysis/unet_shapes.py``'s dumps and the ``measured`` column from
+    the MIOpen profiles of the same configurations, so it is regenerated from
+    those inputs, not by hand.
     """
     raw = json.loads(_CORPUS_PATH.read_text())
     problems = []
@@ -557,7 +563,7 @@ def census_corpus() -> tuple[ConvProblem, ...]:
     without opting in does not try to allocate the scale-8 unsharded
     activations.
     """
-    if not _CENSUS_PATH.exists():  # pragma: no cover - shipped with the package
+    if not _CENSUS_PATH.exists():  # pragma: no cover - present in a checkout
         return ()
     raw = json.loads(_CENSUS_PATH.read_text())
     out = []
