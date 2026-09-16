@@ -29,6 +29,7 @@ Nothing here invents one.
 from __future__ import annotations
 
 import logging
+import sys
 
 import pytest
 import torch
@@ -111,12 +112,24 @@ def _gpu_input(shape, dtype=torch.bfloat16, seed=7):
     return x.to(dtype).contiguous(memory_format=_CHANNELS_LAST)
 
 
+#: The module's process-global state, restored around every test: the override
+#: and the latch, the cached allowlist, and the three log-once flags.
+_MODULE_STATE = (
+    "_triton_override",
+    "_triton_failed",
+    "_TRITON_KERNEL_FAILURES",
+    "_predicate_warned",
+    "_allowlist_warned",
+)
+
+
 @pytest.fixture(autouse=True)
 def _clean_module_state():
-    """Reset the process-global latch and override around every test."""
-    saved = (conv_mod._triton_override, conv_mod._triton_failed)
+    """Restore the module's process-global state around every test."""
+    saved = {name: getattr(conv_mod, name) for name in _MODULE_STATE}
     yield
-    conv_mod._triton_override, conv_mod._triton_failed = saved
+    for name, value in saved.items():
+        setattr(conv_mod, name, value)
 
 
 # ---------------------------------------------------------------------------
@@ -672,6 +685,80 @@ def test_a_proven_module_re_raises_rather_than_flipping_rungs_mid_backward(monke
 
     _Probe.apply(x).sum().backward()
     assert seen.get("raised") is True
+
+
+# ---------------------------------------------------------------------------
+# the failure allowlist
+# ---------------------------------------------------------------------------
+
+
+def _unresolved_allowlist(monkeypatch, *unimportable):
+    """Forget the cached allowlist and make the named modules unimportable."""
+    monkeypatch.setattr(conv_mod, "_TRITON_KERNEL_FAILURES", None)
+    for name in unimportable:
+        monkeypatch.setitem(sys.modules, name, None)
+
+
+def test_the_allowlist_is_triton_error_on_this_triton(monkeypatch):
+    from triton.errors import TritonError
+
+    _unresolved_allowlist(monkeypatch)
+    assert conv_mod._triton_kernel_failures() == (TritonError,)
+
+
+def test_the_allowlist_falls_back_to_the_triton_2x_roots(monkeypatch):
+    """Without ``triton.errors``, the two 2.x roots -- by identity, since on this
+    Triton both are ``TritonError`` subclasses and a hierarchy check would pass
+    against the root the test says is absent."""
+    import triton.compiler.errors
+    import triton.runtime.errors
+
+    _unresolved_allowlist(monkeypatch, "triton.errors")
+    resolved = conv_mod._triton_kernel_failures()
+    assert [cls.__name__ for cls in resolved] == ["CompilationError", "OutOfResources"]
+    assert resolved[0] is triton.compiler.errors.CompilationError
+    assert resolved[1] is triton.runtime.errors.OutOfResources
+    assert conv_mod._triton_kernel_failures() is resolved, "the fallback is not cached"
+
+
+@pytest.mark.gpu
+def test_an_empty_allowlist_declines_the_rung_instead_of_running_it_unguarded(
+    monkeypatch, caplog
+):
+    """An empty allowlist declines an otherwise-eligible tensor, warns once, and
+    a forward lands on ``_miopen_forward`` without importing the package."""
+    _unresolved_allowlist(
+        monkeypatch, "triton.errors", "triton.compiler.errors", "triton.runtime.errors"
+    )
+    assert conv_mod._triton_kernel_failures() == ()
+
+    conv = _gpu_conv()
+    x = _gpu_input((1, 16, 8, 8, 8))
+    monkeypatch.setattr(conv_mod, "_allowlist_warned", False)
+    with caplog.at_level(logging.WARNING):
+        assert conv_mod._routing_declines(x, None, None, False) is True
+        assert conv_mod._routing_declines(x, None, None, False) is True
+    warned = [r.message for r in caplog.records if "Triton conv3d routing" in r.message]
+    assert len(warned) == 1, "the empty allowlist was not reported exactly once"
+    assert "TritonError" in warned[0] and conv_mod.TRITON_ENV_VAR in warned[0]
+
+    reached = []
+
+    def _no_package():
+        reached.append(True)
+        raise RuntimeError("the package import was reached")
+
+    monkeypatch.setattr(conv_mod, "_get_triton_module", _no_package)
+    served = []
+    original = FastConv3d._miopen_forward
+    monkeypatch.setattr(
+        FastConv3d,
+        "_miopen_forward",
+        lambda self, input: served.append(input) or original(self, input),
+    )
+    torch.testing.assert_close(conv(x), nn.Conv3d.forward(conv, x))
+    assert len(served) == 1 and reached == []
+    assert conv._triton_ok is False
 
 
 # ---------------------------------------------------------------------------

@@ -209,9 +209,9 @@ def _platform_declines(device, override):
       fraction of the speed.  On an architecture whose legality rules differ
       from the ones ``ConvConfig.validate`` encodes, that is precisely the
       failure available.
-    * the ladders' fallback allowlist is ``triton.errors.TritonError`` and
-      deliberately nothing else, so there is no exception for it to catch even
-      in principle.
+    * the ladders' fallback allowlist is Triton's own compile and launch
+      failures and deliberately nothing else, so there is no exception for it
+      to catch even in principle.
     * every ``is_supported*`` predicate reads shape, dtype, layout and stride,
       never the GPU, and none of them should: they are *capability* predicates,
       and the kernels really are capable of computing this convolution on other

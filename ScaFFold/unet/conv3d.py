@@ -147,15 +147,18 @@ failure would be fatal at ``num_shards > 1`` while costing only speed at 1,
 which is backwards for a ladder whose reason to exist is degrading rather than
 dying.
 
-"A kernel failure" is an allowlist, not the absence of one: exactly
-``triton.errors.TritonError`` (see :func:`_triton_kernel_failures`).
+"A kernel failure" is an allowlist, not the absence of one:
+``triton.errors.TritonError``, or on Triton 2.x the pair
+``CompilationError``/``OutOfResources`` (see :func:`_triton_kernel_failures`).
 ``triton_conv3d`` has no exception type of its own -- unlike
 ``triton_group_norm``, it does not tag its launch region -- so the allowlist is
 drawn at Triton's boundary instead of at the package's.  It is nonetheless
-closed and small: every error under that root is raised while compiling a kernel
-or sizing its launch, i.e. before any device work, which is what makes the retry
-safe, and :func:`_triton_kernel_failures` names them.  Everything else
-propagates, and each exclusion is load-bearing:
+closed and small: every error under those roots is raised while compiling a
+kernel or sizing its launch, i.e. before any device work, which is what makes
+the retry safe.  A Triton with none of those roots resolves the allowlist
+empty, and :func:`_routing_declines` then declines the rung: ``except ()``
+catches nothing, so running it would turn the first failure into a dead rank.
+Everything else propagates, and each exclusion is load-bearing:
 
 * ``ValueError`` -- every one the package raises is a caller-contract violation
   (``_check_out``, ``_check_weight_rsck``, ``_triple``, ``ConvConfig.validate``).
@@ -209,6 +212,7 @@ MIOpen's backward-weight reduces with atomics and disagrees with itself bitwise
 between two identical calls.
 """
 
+import importlib
 import logging
 
 import torch
@@ -256,6 +260,9 @@ _triton_override = _env_override(TRITON_ENV_VAR)
 
 # Set once if a predicate raised while deciding; see _use_triton.
 _predicate_warned = False
+
+# Set once if the allowlist resolved empty; see _routing_declines.
+_allowlist_warned = False
 
 #: One-element tensors, one per ``(dtype, device)``, from which
 #: :func:`_metadata_probe` expands.  Bounded by the number of dtype/device pairs
@@ -312,22 +319,30 @@ def _get_triton_module():
     return _triton_module
 
 
-def _triton_kernel_failures():
-    """The ladder's allowlist: exactly ``triton.errors.TritonError``.
+#: Triton 2.x has no ``triton.errors``; its compile-time and launch-sizing
+#: failures are two unrelated ``Exception`` subclasses.
+_TRITON_2X_FAILURE_ROOTS = (
+    ("triton.compiler.errors", "CompilationError"),
+    ("triton.runtime.errors", "OutOfResources"),
+)
 
-    That single root is the parent of ``OutOfResources``, ``CompilationError``,
-    ``CompileTimeAssertionFailure``, ``UnsupportedLanguageConstruct``,
-    ``PTXASError``, ``AutotunerError`` and ``InterpreterError``;
-    ``triton.runtime.errors.TritonError`` and
-    ``triton.compiler.errors.TritonError`` are the same object.  Every one is
-    raised while compiling a kernel or sizing its launch, so nothing has
-    executed and retrying the same call on MIOpen is safe.  The module docstring
-    lists what is deliberately left out and why.
+
+def _triton_kernel_failures():
+    """The ladder's allowlist: ``triton.errors.TritonError``, or the 2.x pair.
+
+    On Triton 3.x that single root is the parent of ``OutOfResources``,
+    ``CompilationError``, ``CompileTimeAssertionFailure``,
+    ``UnsupportedLanguageConstruct``, ``PTXASError``, ``AutotunerError`` and
+    ``InterpreterError``; on 2.x the allowlist is whichever of
+    :data:`_TRITON_2X_FAILURE_ROOTS` import.  Every one is raised while
+    compiling a kernel or sizing its launch, so nothing has executed and
+    retrying the same call on MIOpen is safe.  The module docstring lists what
+    is deliberately left out and why.
 
     Resolved on demand and cached, so a CPU-only run never imports ``triton``.
-    An empty tuple (no ``triton`` at all) means "catch nothing", and the ladder
-    then re-raises -- right, because with no Triton there is nothing that could
-    have failed inside one.
+    An empty tuple -- no ``triton``, or a layout with none of those roots --
+    makes :func:`_routing_declines` refuse the rung, since ``except ()``
+    catches nothing.
     """
     global _TRITON_KERNEL_FAILURES
     if _TRITON_KERNEL_FAILURES is None:
@@ -335,9 +350,35 @@ def _triton_kernel_failures():
             from triton.errors import TritonError
 
             _TRITON_KERNEL_FAILURES = (TritonError,)
-        except ImportError:  # pragma: no cover - triton ships it
-            _TRITON_KERNEL_FAILURES = ()
+        except ImportError:
+            roots = []
+            for module_name, root_name in _TRITON_2X_FAILURE_ROOTS:
+                try:
+                    roots.append(
+                        getattr(importlib.import_module(module_name), root_name)
+                    )
+                except (ImportError, AttributeError):
+                    pass
+            _TRITON_KERNEL_FAILURES = tuple(roots)
     return _TRITON_KERNEL_FAILURES
+
+
+def _warn_once_about_the_allowlist():
+    """Log the empty-allowlist decline once, not per call."""
+    global _allowlist_warned
+    if _allowlist_warned:
+        return
+    _allowlist_warned = True
+    _warn_rung_failure(
+        "Triton conv3d routing",
+        ImportError(
+            "no Triton exception root to catch kernel failures with "
+            "(triton.errors.TritonError, or the 2.x CompilationError/"
+            "OutOfResources pair); declining rather than running unguarded"
+        ),
+        "MIOpen kernel",
+        TRITON_ENV_VAR,
+    )
 
 
 def _latch_rung_failure(error, what="Triton conv3d"):
@@ -850,6 +891,12 @@ def _routing_declines(x, dc_input, plan, proven):
     if type(x) is not torch.Tensor:
         return True
     if not x.is_cuda:
+        return True
+    # An empty allowlist would make every ``except _triton_kernel_failures()``
+    # a bare ``try``; decline instead.  After ``is_cuda`` so a CPU-only run
+    # still never imports ``triton``.
+    if not _triton_kernel_failures():
+        _warn_once_about_the_allowlist()
         return True
     # ...and not merely *a* CUDA device: the one every launch configuration in
     # both packages was raced on.  Unlike every other clause here, what this one
