@@ -9,7 +9,11 @@ package-data = { "ScaFFold" = [
 ] }
 include-package-data = true
 [tool.setuptools.packages.find]
-include = ["ScaFFold*"]
+# triton_conv3d is the sibling package ScaFFold.unet.conv3d imports.  Its test
+# suite and the recorded corpora under tests/data run from a checkout; discovery
+# here is namespace-aware, so they have to be excluded by name.
+include = ["ScaFFold*", "triton_conv3d*"]
+exclude = ["triton_conv3d.tests*"]
 
 [tool.ruff]
 line-length = 88
