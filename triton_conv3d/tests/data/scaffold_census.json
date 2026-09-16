@@ -1,27 +1,27 @@
 {
- "source": "instrumented training run, three steps per configuration, wrapped entry points",
+ "source": "conv_census.py: an instrumented training run per configuration, three steps each at n_categories 2, wrapped entry points",
  "form": "adapter",
  "note": "The shape and padding the kernel was handed, read off a real call. Every k>1 convolution here is padded: the ScaFFold adapter exchanges a halo only on genuinely split axes.",
  "configs": [
   {
    "tag": "A",
    "desc": "scale 7, 1 GPU, shards (1,1,1)",
-   "capture": "cens_A.census.json"
+   "capture": "census/cens_A.json"
   },
   {
    "tag": "B",
    "desc": "scale 8, 1 GPU, shards (1,1,1)",
-   "capture": "cens_B.census.json"
+   "capture": "census/cens_B.json"
   },
   {
    "tag": "C",
    "desc": "scale 8, 2 GPUs, shards (2,1,1)",
-   "capture": "cens_C.r0.census.json"
+   "capture": "census/cens_C.json"
   },
   {
    "tag": "D",
    "desc": "scale 8, 4 GPUs, shards (4,1,1)",
-   "capture": "cens_D.r0.census.json"
+   "capture": "census/cens_D.json"
   }
  ],
  "n_problems": 88,

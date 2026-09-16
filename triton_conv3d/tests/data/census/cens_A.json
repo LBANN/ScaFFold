@@ -1,0 +1,5461 @@
+{
+ "rank": 0,
+ "world": 1,
+ "env": {
+  "SCAFFOLD_CONV_TRITON": "1",
+  "SCAFFOLD_GROUPNORM_TRITON": null,
+  "PYTORCH_MIOPEN_SUGGEST_NHWC": "1",
+  "HIP_VISIBLE_DEVICES": "0"
+ },
+ "modules": {
+  "Conv3d down_list.0.double_conv.0 x=[1, 3, 128, 128, 128] w=[64, 3, 3, 3, 3] pad=[1, 1, 1] dc=True": {
+   "site": "down_list.0.double_conv.0",
+   "op": "Conv3d",
+   "dctensor": true,
+   "local_shape": [
+    1,
+    3,
+    128,
+    128,
+    128
+   ],
+   "global_shape": [
+    1,
+    3,
+    128,
+    128,
+    128
+   ],
+   "weight_shape": [
+    64,
+    3,
+    3,
+    3,
+    3
+   ],
+   "module_padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "param_dtype": "torch.float32",
+   "input_dtype": "torch.float32",
+   "autocast_dtype": "torch.bfloat16",
+   "input_memfmt": "channels_last_3d",
+   "weight_memfmt": "channels_last_3d",
+   "rung": "triton",
+   "n": 3
+  },
+  "Conv3d down_list.0.double_conv.3 x=[1, 64, 128, 128, 128] w=[64, 64, 3, 3, 3] pad=[1, 1, 1] dc=True": {
+   "site": "down_list.0.double_conv.3",
+   "op": "Conv3d",
+   "dctensor": true,
+   "local_shape": [
+    1,
+    64,
+    128,
+    128,
+    128
+   ],
+   "global_shape": [
+    1,
+    64,
+    128,
+    128,
+    128
+   ],
+   "weight_shape": [
+    64,
+    64,
+    3,
+    3,
+    3
+   ],
+   "module_padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "param_dtype": "torch.float32",
+   "input_dtype": "torch.float32",
+   "autocast_dtype": "torch.bfloat16",
+   "input_memfmt": "channels_last_3d",
+   "weight_memfmt": "channels_last_3d",
+   "rung": "triton",
+   "n": 3
+  },
+  "Conv3d down_list.1.maxpool_conv.1.double_conv.0 x=[1, 64, 64, 64, 64] w=[128, 64, 3, 3, 3] pad=[1, 1, 1] dc=True": {
+   "site": "down_list.1.maxpool_conv.1.double_conv.0",
+   "op": "Conv3d",
+   "dctensor": true,
+   "local_shape": [
+    1,
+    64,
+    64,
+    64,
+    64
+   ],
+   "global_shape": [
+    1,
+    64,
+    64,
+    64,
+    64
+   ],
+   "weight_shape": [
+    128,
+    64,
+    3,
+    3,
+    3
+   ],
+   "module_padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "param_dtype": "torch.float32",
+   "input_dtype": "torch.float32",
+   "autocast_dtype": "torch.bfloat16",
+   "input_memfmt": "channels_last_3d",
+   "weight_memfmt": "channels_last_3d",
+   "rung": "triton",
+   "n": 3
+  },
+  "Conv3d down_list.1.maxpool_conv.1.double_conv.3 x=[1, 128, 64, 64, 64] w=[128, 128, 3, 3, 3] pad=[1, 1, 1] dc=True": {
+   "site": "down_list.1.maxpool_conv.1.double_conv.3",
+   "op": "Conv3d",
+   "dctensor": true,
+   "local_shape": [
+    1,
+    128,
+    64,
+    64,
+    64
+   ],
+   "global_shape": [
+    1,
+    128,
+    64,
+    64,
+    64
+   ],
+   "weight_shape": [
+    128,
+    128,
+    3,
+    3,
+    3
+   ],
+   "module_padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "param_dtype": "torch.float32",
+   "input_dtype": "torch.float32",
+   "autocast_dtype": "torch.bfloat16",
+   "input_memfmt": "channels_last_3d",
+   "weight_memfmt": "channels_last_3d",
+   "rung": "triton",
+   "n": 3
+  },
+  "Conv3d down_list.2.maxpool_conv.1.double_conv.0 x=[1, 128, 32, 32, 32] w=[256, 128, 3, 3, 3] pad=[1, 1, 1] dc=True": {
+   "site": "down_list.2.maxpool_conv.1.double_conv.0",
+   "op": "Conv3d",
+   "dctensor": true,
+   "local_shape": [
+    1,
+    128,
+    32,
+    32,
+    32
+   ],
+   "global_shape": [
+    1,
+    128,
+    32,
+    32,
+    32
+   ],
+   "weight_shape": [
+    256,
+    128,
+    3,
+    3,
+    3
+   ],
+   "module_padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "param_dtype": "torch.float32",
+   "input_dtype": "torch.float32",
+   "autocast_dtype": "torch.bfloat16",
+   "input_memfmt": "channels_last_3d",
+   "weight_memfmt": "channels_last_3d",
+   "rung": "triton",
+   "n": 3
+  },
+  "Conv3d down_list.2.maxpool_conv.1.double_conv.3 x=[1, 256, 32, 32, 32] w=[256, 256, 3, 3, 3] pad=[1, 1, 1] dc=True": {
+   "site": "down_list.2.maxpool_conv.1.double_conv.3",
+   "op": "Conv3d",
+   "dctensor": true,
+   "local_shape": [
+    1,
+    256,
+    32,
+    32,
+    32
+   ],
+   "global_shape": [
+    1,
+    256,
+    32,
+    32,
+    32
+   ],
+   "weight_shape": [
+    256,
+    256,
+    3,
+    3,
+    3
+   ],
+   "module_padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "param_dtype": "torch.float32",
+   "input_dtype": "torch.float32",
+   "autocast_dtype": "torch.bfloat16",
+   "input_memfmt": "channels_last_3d",
+   "weight_memfmt": "channels_last_3d",
+   "rung": "triton",
+   "n": 3
+  },
+  "Conv3d down_list.3.maxpool_conv.1.double_conv.0 x=[1, 256, 16, 16, 16] w=[512, 256, 3, 3, 3] pad=[1, 1, 1] dc=True": {
+   "site": "down_list.3.maxpool_conv.1.double_conv.0",
+   "op": "Conv3d",
+   "dctensor": true,
+   "local_shape": [
+    1,
+    256,
+    16,
+    16,
+    16
+   ],
+   "global_shape": [
+    1,
+    256,
+    16,
+    16,
+    16
+   ],
+   "weight_shape": [
+    512,
+    256,
+    3,
+    3,
+    3
+   ],
+   "module_padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "param_dtype": "torch.float32",
+   "input_dtype": "torch.float32",
+   "autocast_dtype": "torch.bfloat16",
+   "input_memfmt": "channels_last_3d",
+   "weight_memfmt": "channels_last_3d",
+   "rung": "triton",
+   "n": 3
+  },
+  "Conv3d down_list.3.maxpool_conv.1.double_conv.3 x=[1, 512, 16, 16, 16] w=[512, 512, 3, 3, 3] pad=[1, 1, 1] dc=True": {
+   "site": "down_list.3.maxpool_conv.1.double_conv.3",
+   "op": "Conv3d",
+   "dctensor": true,
+   "local_shape": [
+    1,
+    512,
+    16,
+    16,
+    16
+   ],
+   "global_shape": [
+    1,
+    512,
+    16,
+    16,
+    16
+   ],
+   "weight_shape": [
+    512,
+    512,
+    3,
+    3,
+    3
+   ],
+   "module_padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "param_dtype": "torch.float32",
+   "input_dtype": "torch.float32",
+   "autocast_dtype": "torch.bfloat16",
+   "input_memfmt": "channels_last_3d",
+   "weight_memfmt": "channels_last_3d",
+   "rung": "triton",
+   "n": 3
+  },
+  "Conv3d down_list.4.maxpool_conv.1.double_conv.0 x=[1, 512, 8, 8, 8] w=[1024, 512, 3, 3, 3] pad=[1, 1, 1] dc=True": {
+   "site": "down_list.4.maxpool_conv.1.double_conv.0",
+   "op": "Conv3d",
+   "dctensor": true,
+   "local_shape": [
+    1,
+    512,
+    8,
+    8,
+    8
+   ],
+   "global_shape": [
+    1,
+    512,
+    8,
+    8,
+    8
+   ],
+   "weight_shape": [
+    1024,
+    512,
+    3,
+    3,
+    3
+   ],
+   "module_padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "param_dtype": "torch.float32",
+   "input_dtype": "torch.float32",
+   "autocast_dtype": "torch.bfloat16",
+   "input_memfmt": "channels_last_3d",
+   "weight_memfmt": "channels_last_3d",
+   "rung": "triton",
+   "n": 3
+  },
+  "Conv3d down_list.4.maxpool_conv.1.double_conv.3 x=[1, 1024, 8, 8, 8] w=[1024, 1024, 3, 3, 3] pad=[1, 1, 1] dc=True": {
+   "site": "down_list.4.maxpool_conv.1.double_conv.3",
+   "op": "Conv3d",
+   "dctensor": true,
+   "local_shape": [
+    1,
+    1024,
+    8,
+    8,
+    8
+   ],
+   "global_shape": [
+    1,
+    1024,
+    8,
+    8,
+    8
+   ],
+   "weight_shape": [
+    1024,
+    1024,
+    3,
+    3,
+    3
+   ],
+   "module_padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "param_dtype": "torch.float32",
+   "input_dtype": "torch.float32",
+   "autocast_dtype": "torch.bfloat16",
+   "input_memfmt": "channels_last_3d",
+   "weight_memfmt": "channels_last_3d",
+   "rung": "triton",
+   "n": 3
+  },
+  "ConvTranspose3d up_list.0.up x=[1, 1024, 8, 8, 8] w=[1024, 512, 2, 2, 2] pad=[0, 0, 0] dc=True": {
+   "site": "up_list.0.up",
+   "op": "ConvTranspose3d",
+   "dctensor": true,
+   "local_shape": [
+    1,
+    1024,
+    8,
+    8,
+    8
+   ],
+   "global_shape": [
+    1,
+    1024,
+    8,
+    8,
+    8
+   ],
+   "weight_shape": [
+    1024,
+    512,
+    2,
+    2,
+    2
+   ],
+   "module_padding": [
+    0,
+    0,
+    0
+   ],
+   "stride": [
+    2,
+    2,
+    2
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": true,
+   "param_dtype": "torch.float32",
+   "input_dtype": "torch.float32",
+   "autocast_dtype": "torch.bfloat16",
+   "input_memfmt": "channels_last_3d",
+   "weight_memfmt": "channels_last_3d",
+   "rung": "triton",
+   "n": 3
+  },
+  "Conv3d up_list.0.conv.double_conv.0 x=[1, 1024, 16, 16, 16] w=[512, 1024, 3, 3, 3] pad=[1, 1, 1] dc=True": {
+   "site": "up_list.0.conv.double_conv.0",
+   "op": "Conv3d",
+   "dctensor": true,
+   "local_shape": [
+    1,
+    1024,
+    16,
+    16,
+    16
+   ],
+   "global_shape": [
+    1,
+    1024,
+    16,
+    16,
+    16
+   ],
+   "weight_shape": [
+    512,
+    1024,
+    3,
+    3,
+    3
+   ],
+   "module_padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "param_dtype": "torch.float32",
+   "input_dtype": "torch.bfloat16",
+   "autocast_dtype": "torch.bfloat16",
+   "input_memfmt": "channels_last_3d",
+   "weight_memfmt": "channels_last_3d",
+   "rung": "triton",
+   "n": 3
+  },
+  "Conv3d up_list.0.conv.double_conv.3 x=[1, 512, 16, 16, 16] w=[512, 512, 3, 3, 3] pad=[1, 1, 1] dc=True": {
+   "site": "up_list.0.conv.double_conv.3",
+   "op": "Conv3d",
+   "dctensor": true,
+   "local_shape": [
+    1,
+    512,
+    16,
+    16,
+    16
+   ],
+   "global_shape": [
+    1,
+    512,
+    16,
+    16,
+    16
+   ],
+   "weight_shape": [
+    512,
+    512,
+    3,
+    3,
+    3
+   ],
+   "module_padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "param_dtype": "torch.float32",
+   "input_dtype": "torch.float32",
+   "autocast_dtype": "torch.bfloat16",
+   "input_memfmt": "channels_last_3d",
+   "weight_memfmt": "channels_last_3d",
+   "rung": "triton",
+   "n": 3
+  },
+  "ConvTranspose3d up_list.1.up x=[1, 512, 16, 16, 16] w=[512, 256, 2, 2, 2] pad=[0, 0, 0] dc=True": {
+   "site": "up_list.1.up",
+   "op": "ConvTranspose3d",
+   "dctensor": true,
+   "local_shape": [
+    1,
+    512,
+    16,
+    16,
+    16
+   ],
+   "global_shape": [
+    1,
+    512,
+    16,
+    16,
+    16
+   ],
+   "weight_shape": [
+    512,
+    256,
+    2,
+    2,
+    2
+   ],
+   "module_padding": [
+    0,
+    0,
+    0
+   ],
+   "stride": [
+    2,
+    2,
+    2
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": true,
+   "param_dtype": "torch.float32",
+   "input_dtype": "torch.float32",
+   "autocast_dtype": "torch.bfloat16",
+   "input_memfmt": "channels_last_3d",
+   "weight_memfmt": "channels_last_3d",
+   "rung": "triton",
+   "n": 3
+  },
+  "Conv3d up_list.1.conv.double_conv.0 x=[1, 512, 32, 32, 32] w=[256, 512, 3, 3, 3] pad=[1, 1, 1] dc=True": {
+   "site": "up_list.1.conv.double_conv.0",
+   "op": "Conv3d",
+   "dctensor": true,
+   "local_shape": [
+    1,
+    512,
+    32,
+    32,
+    32
+   ],
+   "global_shape": [
+    1,
+    512,
+    32,
+    32,
+    32
+   ],
+   "weight_shape": [
+    256,
+    512,
+    3,
+    3,
+    3
+   ],
+   "module_padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "param_dtype": "torch.float32",
+   "input_dtype": "torch.bfloat16",
+   "autocast_dtype": "torch.bfloat16",
+   "input_memfmt": "channels_last_3d",
+   "weight_memfmt": "channels_last_3d",
+   "rung": "triton",
+   "n": 3
+  },
+  "Conv3d up_list.1.conv.double_conv.3 x=[1, 256, 32, 32, 32] w=[256, 256, 3, 3, 3] pad=[1, 1, 1] dc=True": {
+   "site": "up_list.1.conv.double_conv.3",
+   "op": "Conv3d",
+   "dctensor": true,
+   "local_shape": [
+    1,
+    256,
+    32,
+    32,
+    32
+   ],
+   "global_shape": [
+    1,
+    256,
+    32,
+    32,
+    32
+   ],
+   "weight_shape": [
+    256,
+    256,
+    3,
+    3,
+    3
+   ],
+   "module_padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "param_dtype": "torch.float32",
+   "input_dtype": "torch.float32",
+   "autocast_dtype": "torch.bfloat16",
+   "input_memfmt": "channels_last_3d",
+   "weight_memfmt": "channels_last_3d",
+   "rung": "triton",
+   "n": 3
+  },
+  "ConvTranspose3d up_list.2.up x=[1, 256, 32, 32, 32] w=[256, 128, 2, 2, 2] pad=[0, 0, 0] dc=True": {
+   "site": "up_list.2.up",
+   "op": "ConvTranspose3d",
+   "dctensor": true,
+   "local_shape": [
+    1,
+    256,
+    32,
+    32,
+    32
+   ],
+   "global_shape": [
+    1,
+    256,
+    32,
+    32,
+    32
+   ],
+   "weight_shape": [
+    256,
+    128,
+    2,
+    2,
+    2
+   ],
+   "module_padding": [
+    0,
+    0,
+    0
+   ],
+   "stride": [
+    2,
+    2,
+    2
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": true,
+   "param_dtype": "torch.float32",
+   "input_dtype": "torch.float32",
+   "autocast_dtype": "torch.bfloat16",
+   "input_memfmt": "channels_last_3d",
+   "weight_memfmt": "channels_last_3d",
+   "rung": "triton",
+   "n": 3
+  },
+  "Conv3d up_list.2.conv.double_conv.0 x=[1, 256, 64, 64, 64] w=[128, 256, 3, 3, 3] pad=[1, 1, 1] dc=True": {
+   "site": "up_list.2.conv.double_conv.0",
+   "op": "Conv3d",
+   "dctensor": true,
+   "local_shape": [
+    1,
+    256,
+    64,
+    64,
+    64
+   ],
+   "global_shape": [
+    1,
+    256,
+    64,
+    64,
+    64
+   ],
+   "weight_shape": [
+    128,
+    256,
+    3,
+    3,
+    3
+   ],
+   "module_padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "param_dtype": "torch.float32",
+   "input_dtype": "torch.bfloat16",
+   "autocast_dtype": "torch.bfloat16",
+   "input_memfmt": "channels_last_3d",
+   "weight_memfmt": "channels_last_3d",
+   "rung": "triton",
+   "n": 3
+  },
+  "Conv3d up_list.2.conv.double_conv.3 x=[1, 128, 64, 64, 64] w=[128, 128, 3, 3, 3] pad=[1, 1, 1] dc=True": {
+   "site": "up_list.2.conv.double_conv.3",
+   "op": "Conv3d",
+   "dctensor": true,
+   "local_shape": [
+    1,
+    128,
+    64,
+    64,
+    64
+   ],
+   "global_shape": [
+    1,
+    128,
+    64,
+    64,
+    64
+   ],
+   "weight_shape": [
+    128,
+    128,
+    3,
+    3,
+    3
+   ],
+   "module_padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "param_dtype": "torch.float32",
+   "input_dtype": "torch.float32",
+   "autocast_dtype": "torch.bfloat16",
+   "input_memfmt": "channels_last_3d",
+   "weight_memfmt": "channels_last_3d",
+   "rung": "triton",
+   "n": 3
+  },
+  "ConvTranspose3d up_list.3.up x=[1, 128, 64, 64, 64] w=[128, 64, 2, 2, 2] pad=[0, 0, 0] dc=True": {
+   "site": "up_list.3.up",
+   "op": "ConvTranspose3d",
+   "dctensor": true,
+   "local_shape": [
+    1,
+    128,
+    64,
+    64,
+    64
+   ],
+   "global_shape": [
+    1,
+    128,
+    64,
+    64,
+    64
+   ],
+   "weight_shape": [
+    128,
+    64,
+    2,
+    2,
+    2
+   ],
+   "module_padding": [
+    0,
+    0,
+    0
+   ],
+   "stride": [
+    2,
+    2,
+    2
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": true,
+   "param_dtype": "torch.float32",
+   "input_dtype": "torch.float32",
+   "autocast_dtype": "torch.bfloat16",
+   "input_memfmt": "channels_last_3d",
+   "weight_memfmt": "channels_last_3d",
+   "rung": "triton",
+   "n": 3
+  },
+  "Conv3d up_list.3.conv.double_conv.0 x=[1, 128, 128, 128, 128] w=[64, 128, 3, 3, 3] pad=[1, 1, 1] dc=True": {
+   "site": "up_list.3.conv.double_conv.0",
+   "op": "Conv3d",
+   "dctensor": true,
+   "local_shape": [
+    1,
+    128,
+    128,
+    128,
+    128
+   ],
+   "global_shape": [
+    1,
+    128,
+    128,
+    128,
+    128
+   ],
+   "weight_shape": [
+    64,
+    128,
+    3,
+    3,
+    3
+   ],
+   "module_padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "param_dtype": "torch.float32",
+   "input_dtype": "torch.bfloat16",
+   "autocast_dtype": "torch.bfloat16",
+   "input_memfmt": "channels_last_3d",
+   "weight_memfmt": "channels_last_3d",
+   "rung": "triton",
+   "n": 3
+  },
+  "Conv3d up_list.3.conv.double_conv.3 x=[1, 64, 128, 128, 128] w=[64, 64, 3, 3, 3] pad=[1, 1, 1] dc=True": {
+   "site": "up_list.3.conv.double_conv.3",
+   "op": "Conv3d",
+   "dctensor": true,
+   "local_shape": [
+    1,
+    64,
+    128,
+    128,
+    128
+   ],
+   "global_shape": [
+    1,
+    64,
+    128,
+    128,
+    128
+   ],
+   "weight_shape": [
+    64,
+    64,
+    3,
+    3,
+    3
+   ],
+   "module_padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": false,
+   "param_dtype": "torch.float32",
+   "input_dtype": "torch.float32",
+   "autocast_dtype": "torch.bfloat16",
+   "input_memfmt": "channels_last_3d",
+   "weight_memfmt": "channels_last_3d",
+   "rung": "triton",
+   "n": 3
+  },
+  "Conv3d up_list.4.conv x=[1, 64, 128, 128, 128] w=[3, 64, 1, 1, 1] pad=[0, 0, 0] dc=True": {
+   "site": "up_list.4.conv",
+   "op": "Conv3d",
+   "dctensor": true,
+   "local_shape": [
+    1,
+    64,
+    128,
+    128,
+    128
+   ],
+   "global_shape": [
+    1,
+    64,
+    128,
+    128,
+    128
+   ],
+   "weight_shape": [
+    3,
+    64,
+    1,
+    1,
+    1
+   ],
+   "module_padding": [
+    0,
+    0,
+    0
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "bias": true,
+   "param_dtype": "torch.float32",
+   "input_dtype": "torch.float32",
+   "autocast_dtype": "torch.bfloat16",
+   "input_memfmt": "channels_last_3d",
+   "weight_memfmt": "channels_last_3d",
+   "rung": "triton",
+   "n": 3
+  }
+ },
+ "kernels": {
+  "Conv3d fwd down_list.0.double_conv.0 x=[1, 3, 128, 128, 128] w=[64, 3, 3, 3, 3] pad=[1, 1, 1] s=[1, 1, 1] via=None": {
+   "site": "down_list.0.double_conv.0",
+   "op": "Conv3d",
+   "direction": "fwd",
+   "x_shape": [
+    1,
+    3,
+    128,
+    128,
+    128
+   ],
+   "weight_shape": [
+    64,
+    3,
+    3,
+    3,
+    3
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "config": "512x64x8/g6/w8/s2/nk32/kp1",
+   "padded": true,
+   "via": null,
+   "gemm_m": 2097152,
+   "n": 3
+  },
+  "Conv3d fwd down_list.0.double_conv.3 x=[1, 64, 128, 128, 128] w=[64, 64, 3, 3, 3] pad=[1, 1, 1] s=[1, 1, 1] via=None": {
+   "site": "down_list.0.double_conv.3",
+   "op": "Conv3d",
+   "direction": "fwd",
+   "x_shape": [
+    1,
+    64,
+    128,
+    128,
+    128
+   ],
+   "weight_shape": [
+    64,
+    64,
+    3,
+    3,
+    3
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "config": "128x64x64/g6/w4/s2/nk16/kp2",
+   "padded": true,
+   "via": null,
+   "gemm_m": 2097152,
+   "n": 3
+  },
+  "Conv3d fwd down_list.1.maxpool_conv.1.double_conv.0 x=[1, 64, 64, 64, 64] w=[128, 64, 3, 3, 3] pad=[1, 1, 1] s=[1, 1, 1] via=None": {
+   "site": "down_list.1.maxpool_conv.1.double_conv.0",
+   "op": "Conv3d",
+   "direction": "fwd",
+   "x_shape": [
+    1,
+    64,
+    64,
+    64,
+    64
+   ],
+   "weight_shape": [
+    128,
+    64,
+    3,
+    3,
+    3
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "config": "128x128x64/g6/w4/s2/nk16/kp2",
+   "padded": true,
+   "via": null,
+   "gemm_m": 262144,
+   "n": 3
+  },
+  "Conv3d fwd down_list.1.maxpool_conv.1.double_conv.3 x=[1, 128, 64, 64, 64] w=[128, 128, 3, 3, 3] pad=[1, 1, 1] s=[1, 1, 1] via=None": {
+   "site": "down_list.1.maxpool_conv.1.double_conv.3",
+   "op": "Conv3d",
+   "direction": "fwd",
+   "x_shape": [
+    1,
+    128,
+    64,
+    64,
+    64
+   ],
+   "weight_shape": [
+    128,
+    128,
+    3,
+    3,
+    3
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "config": "128x128x64/g6/w4/s2/nk16/kp2",
+   "padded": true,
+   "via": null,
+   "gemm_m": 262144,
+   "n": 3
+  },
+  "Conv3d fwd down_list.2.maxpool_conv.1.double_conv.0 x=[1, 128, 32, 32, 32] w=[256, 128, 3, 3, 3] pad=[1, 1, 1] s=[1, 1, 1] via=None": {
+   "site": "down_list.2.maxpool_conv.1.double_conv.0",
+   "op": "Conv3d",
+   "direction": "fwd",
+   "x_shape": [
+    1,
+    128,
+    32,
+    32,
+    32
+   ],
+   "weight_shape": [
+    256,
+    128,
+    3,
+    3,
+    3
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "config": "128x128x64/g6/w4/s2/nk16/kp2",
+   "padded": true,
+   "via": null,
+   "gemm_m": 32768,
+   "n": 3
+  },
+  "Conv3d fwd down_list.2.maxpool_conv.1.double_conv.3 x=[1, 256, 32, 32, 32] w=[256, 256, 3, 3, 3] pad=[1, 1, 1] s=[1, 1, 1] via=None": {
+   "site": "down_list.2.maxpool_conv.1.double_conv.3",
+   "op": "Conv3d",
+   "direction": "fwd",
+   "x_shape": [
+    1,
+    256,
+    32,
+    32,
+    32
+   ],
+   "weight_shape": [
+    256,
+    256,
+    3,
+    3,
+    3
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "config": "128x128x64/g6/w4/s2/nk16/kp2",
+   "padded": true,
+   "via": null,
+   "gemm_m": 32768,
+   "n": 3
+  },
+  "Conv3d fwd down_list.3.maxpool_conv.1.double_conv.0 x=[1, 256, 16, 16, 16] w=[512, 256, 3, 3, 3] pad=[1, 1, 1] s=[1, 1, 1] via=None": {
+   "site": "down_list.3.maxpool_conv.1.double_conv.0",
+   "op": "Conv3d",
+   "direction": "fwd",
+   "x_shape": [
+    1,
+    256,
+    16,
+    16,
+    16
+   ],
+   "weight_shape": [
+    512,
+    256,
+    3,
+    3,
+    3
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "config": "128x128x64/g6/w4/s2/nk16/kp2",
+   "padded": true,
+   "via": null,
+   "gemm_m": 4096,
+   "n": 3
+  },
+  "Conv3d fwd down_list.3.maxpool_conv.1.double_conv.3 x=[1, 512, 16, 16, 16] w=[512, 512, 3, 3, 3] pad=[1, 1, 1] s=[1, 1, 1] via=None": {
+   "site": "down_list.3.maxpool_conv.1.double_conv.3",
+   "op": "Conv3d",
+   "direction": "fwd",
+   "x_shape": [
+    1,
+    512,
+    16,
+    16,
+    16
+   ],
+   "weight_shape": [
+    512,
+    512,
+    3,
+    3,
+    3
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "config": "128x128x128/g6/w8/s2/nk16/kp2",
+   "padded": true,
+   "via": null,
+   "gemm_m": 4096,
+   "n": 3
+  },
+  "Conv3d fwd down_list.4.maxpool_conv.1.double_conv.0 x=[1, 512, 8, 8, 8] w=[1024, 512, 3, 3, 3] pad=[1, 1, 1] s=[1, 1, 1] via=None": {
+   "site": "down_list.4.maxpool_conv.1.double_conv.0",
+   "op": "Conv3d",
+   "direction": "fwd",
+   "x_shape": [
+    1,
+    512,
+    8,
+    8,
+    8
+   ],
+   "weight_shape": [
+    1024,
+    512,
+    3,
+    3,
+    3
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "config": "32x128x128/g6/w8/s2/nk16/kp2",
+   "padded": true,
+   "via": null,
+   "gemm_m": 512,
+   "n": 3
+  },
+  "Conv3d fwd down_list.4.maxpool_conv.1.double_conv.3 x=[1, 1024, 8, 8, 8] w=[1024, 1024, 3, 3, 3] pad=[1, 1, 1] s=[1, 1, 1] via=None": {
+   "site": "down_list.4.maxpool_conv.1.double_conv.3",
+   "op": "Conv3d",
+   "direction": "fwd",
+   "x_shape": [
+    1,
+    1024,
+    8,
+    8,
+    8
+   ],
+   "weight_shape": [
+    1024,
+    1024,
+    3,
+    3,
+    3
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "config": "64x64x128/g6/w8/s2/nk16/kp2",
+   "padded": true,
+   "via": null,
+   "gemm_m": 512,
+   "n": 3
+  },
+  "ConvTranspose3d fwd up_list.0.up x=[1, 1024, 8, 8, 8] w=[1024, 512, 2, 2, 2] pad=[0, 0, 0] s=[2, 2, 2] via=None": {
+   "site": "up_list.0.up",
+   "op": "ConvTranspose3d",
+   "direction": "fwd",
+   "x_shape": [
+    1,
+    1024,
+    8,
+    8,
+    8
+   ],
+   "weight_shape": [
+    1024,
+    512,
+    2,
+    2,
+    2
+   ],
+   "padding": [
+    0,
+    0,
+    0
+   ],
+   "stride": [
+    2,
+    2,
+    2
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "config": "64x256x64/g6/w8/s2/nk16/kp2/tb2",
+   "padded": false,
+   "output_padding": [
+    0,
+    0,
+    0
+   ],
+   "n": 3
+  },
+  "Conv3d fwd up_list.0.conv.double_conv.0 x=[1, 1024, 16, 16, 16] w=[512, 1024, 3, 3, 3] pad=[1, 1, 1] s=[1, 1, 1] via=None": {
+   "site": "up_list.0.conv.double_conv.0",
+   "op": "Conv3d",
+   "direction": "fwd",
+   "x_shape": [
+    1,
+    1024,
+    16,
+    16,
+    16
+   ],
+   "weight_shape": [
+    512,
+    1024,
+    3,
+    3,
+    3
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "config": "128x128x128/g6/w8/s2/nk16/kp2",
+   "padded": true,
+   "via": null,
+   "gemm_m": 4096,
+   "n": 3
+  },
+  "Conv3d fwd up_list.0.conv.double_conv.3 x=[1, 512, 16, 16, 16] w=[512, 512, 3, 3, 3] pad=[1, 1, 1] s=[1, 1, 1] via=None": {
+   "site": "up_list.0.conv.double_conv.3",
+   "op": "Conv3d",
+   "direction": "fwd",
+   "x_shape": [
+    1,
+    512,
+    16,
+    16,
+    16
+   ],
+   "weight_shape": [
+    512,
+    512,
+    3,
+    3,
+    3
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "config": "128x128x128/g6/w8/s2/nk16/kp2",
+   "padded": true,
+   "via": null,
+   "gemm_m": 4096,
+   "n": 3
+  },
+  "ConvTranspose3d fwd up_list.1.up x=[1, 512, 16, 16, 16] w=[512, 256, 2, 2, 2] pad=[0, 0, 0] s=[2, 2, 2] via=None": {
+   "site": "up_list.1.up",
+   "op": "ConvTranspose3d",
+   "direction": "fwd",
+   "x_shape": [
+    1,
+    512,
+    16,
+    16,
+    16
+   ],
+   "weight_shape": [
+    512,
+    256,
+    2,
+    2,
+    2
+   ],
+   "padding": [
+    0,
+    0,
+    0
+   ],
+   "stride": [
+    2,
+    2,
+    2
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "config": "128x256x64/g6/w8/s2/nk16/kp2/tb2",
+   "padded": false,
+   "output_padding": [
+    0,
+    0,
+    0
+   ],
+   "n": 3
+  },
+  "Conv3d fwd up_list.1.conv.double_conv.0 x=[1, 512, 32, 32, 32] w=[256, 512, 3, 3, 3] pad=[1, 1, 1] s=[1, 1, 1] via=None": {
+   "site": "up_list.1.conv.double_conv.0",
+   "op": "Conv3d",
+   "direction": "fwd",
+   "x_shape": [
+    1,
+    512,
+    32,
+    32,
+    32
+   ],
+   "weight_shape": [
+    256,
+    512,
+    3,
+    3,
+    3
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "config": "128x128x64/g6/w4/s2/nk16/kp2",
+   "padded": true,
+   "via": null,
+   "gemm_m": 32768,
+   "n": 3
+  },
+  "Conv3d fwd up_list.1.conv.double_conv.3 x=[1, 256, 32, 32, 32] w=[256, 256, 3, 3, 3] pad=[1, 1, 1] s=[1, 1, 1] via=None": {
+   "site": "up_list.1.conv.double_conv.3",
+   "op": "Conv3d",
+   "direction": "fwd",
+   "x_shape": [
+    1,
+    256,
+    32,
+    32,
+    32
+   ],
+   "weight_shape": [
+    256,
+    256,
+    3,
+    3,
+    3
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "config": "128x128x64/g6/w4/s2/nk16/kp2",
+   "padded": true,
+   "via": null,
+   "gemm_m": 32768,
+   "n": 3
+  },
+  "ConvTranspose3d fwd up_list.2.up x=[1, 256, 32, 32, 32] w=[256, 128, 2, 2, 2] pad=[0, 0, 0] s=[2, 2, 2] via=None": {
+   "site": "up_list.2.up",
+   "op": "ConvTranspose3d",
+   "direction": "fwd",
+   "x_shape": [
+    1,
+    256,
+    32,
+    32,
+    32
+   ],
+   "weight_shape": [
+    256,
+    128,
+    2,
+    2,
+    2
+   ],
+   "padding": [
+    0,
+    0,
+    0
+   ],
+   "stride": [
+    2,
+    2,
+    2
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "config": "128x256x64/g6/w8/s2/nk16/kp2/tb4",
+   "padded": false,
+   "output_padding": [
+    0,
+    0,
+    0
+   ],
+   "n": 3
+  },
+  "Conv3d fwd up_list.2.conv.double_conv.0 x=[1, 256, 64, 64, 64] w=[128, 256, 3, 3, 3] pad=[1, 1, 1] s=[1, 1, 1] via=None": {
+   "site": "up_list.2.conv.double_conv.0",
+   "op": "Conv3d",
+   "direction": "fwd",
+   "x_shape": [
+    1,
+    256,
+    64,
+    64,
+    64
+   ],
+   "weight_shape": [
+    128,
+    256,
+    3,
+    3,
+    3
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "config": "128x128x64/g6/w4/s2/nk16/kp2",
+   "padded": true,
+   "via": null,
+   "gemm_m": 262144,
+   "n": 3
+  },
+  "Conv3d fwd up_list.2.conv.double_conv.3 x=[1, 128, 64, 64, 64] w=[128, 128, 3, 3, 3] pad=[1, 1, 1] s=[1, 1, 1] via=None": {
+   "site": "up_list.2.conv.double_conv.3",
+   "op": "Conv3d",
+   "direction": "fwd",
+   "x_shape": [
+    1,
+    128,
+    64,
+    64,
+    64
+   ],
+   "weight_shape": [
+    128,
+    128,
+    3,
+    3,
+    3
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "config": "128x128x64/g6/w4/s2/nk16/kp2",
+   "padded": true,
+   "via": null,
+   "gemm_m": 262144,
+   "n": 3
+  },
+  "ConvTranspose3d fwd up_list.3.up x=[1, 128, 64, 64, 64] w=[128, 64, 2, 2, 2] pad=[0, 0, 0] s=[2, 2, 2] via=None": {
+   "site": "up_list.3.up",
+   "op": "ConvTranspose3d",
+   "direction": "fwd",
+   "x_shape": [
+    1,
+    128,
+    64,
+    64,
+    64
+   ],
+   "weight_shape": [
+    128,
+    64,
+    2,
+    2,
+    2
+   ],
+   "padding": [
+    0,
+    0,
+    0
+   ],
+   "stride": [
+    2,
+    2,
+    2
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "config": "256x256x64/g6/w8/s2/nk16/kp2/tb4",
+   "padded": false,
+   "output_padding": [
+    0,
+    0,
+    0
+   ],
+   "n": 3
+  },
+  "Conv3d fwd up_list.3.conv.double_conv.0 x=[1, 128, 128, 128, 128] w=[64, 128, 3, 3, 3] pad=[1, 1, 1] s=[1, 1, 1] via=None": {
+   "site": "up_list.3.conv.double_conv.0",
+   "op": "Conv3d",
+   "direction": "fwd",
+   "x_shape": [
+    1,
+    128,
+    128,
+    128,
+    128
+   ],
+   "weight_shape": [
+    64,
+    128,
+    3,
+    3,
+    3
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "config": "128x64x64/g6/w4/s2/nk16/kp2",
+   "padded": true,
+   "via": null,
+   "gemm_m": 2097152,
+   "n": 3
+  },
+  "Conv3d fwd up_list.3.conv.double_conv.3 x=[1, 64, 128, 128, 128] w=[64, 64, 3, 3, 3] pad=[1, 1, 1] s=[1, 1, 1] via=None": {
+   "site": "up_list.3.conv.double_conv.3",
+   "op": "Conv3d",
+   "direction": "fwd",
+   "x_shape": [
+    1,
+    64,
+    128,
+    128,
+    128
+   ],
+   "weight_shape": [
+    64,
+    64,
+    3,
+    3,
+    3
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "config": "128x64x64/g6/w4/s2/nk16/kp2",
+   "padded": true,
+   "via": null,
+   "gemm_m": 2097152,
+   "n": 3
+  },
+  "Conv3d fwd up_list.4.conv x=[1, 64, 128, 128, 128] w=[3, 64, 1, 1, 1] pad=[0, 0, 0] s=[1, 1, 1] via=None": {
+   "site": "up_list.4.conv",
+   "op": "Conv3d",
+   "direction": "fwd",
+   "x_shape": [
+    1,
+    64,
+    128,
+    128,
+    128
+   ],
+   "weight_shape": [
+    3,
+    64,
+    1,
+    1,
+    1
+   ],
+   "padding": [
+    0,
+    0,
+    0
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "config": "128x16x64/g6/w4/s2/nk16/kp2",
+   "padded": false,
+   "via": null,
+   "gemm_m": 2097152,
+   "n": 3
+  },
+  "Conv3d bwd-data up_list.4.conv x=[1, 64, 128, 128, 128] w=[3, 64, 1, 1, 1] pad=[0, 0, 0] s=[1, 1, 1] via=None": {
+   "site": "up_list.4.conv",
+   "op": "Conv3d",
+   "direction": "bwd-data",
+   "x_shape": [
+    1,
+    64,
+    128,
+    128,
+    128
+   ],
+   "weight_shape": [
+    3,
+    64,
+    1,
+    1,
+    1
+   ],
+   "padding": [
+    0,
+    0,
+    0
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "config": "128x64x16/g6/w4/s2/nk16/kp1",
+   "padded": false,
+   "via": null,
+   "grad_output_shape": [
+    1,
+    3,
+    128,
+    128,
+    128
+   ],
+   "n": 3
+  },
+  "Conv3d bwd-weight up_list.4.conv x=[1, 64, 128, 128, 128] w=[3, 64, 1, 1, 1] pad=[0, 0, 0] s=[1, 1, 1] via=None": {
+   "site": "up_list.4.conv",
+   "op": "Conv3d",
+   "direction": "bwd-weight",
+   "x_shape": [
+    1,
+    64,
+    128,
+    128,
+    128
+   ],
+   "weight_shape": [
+    3,
+    64,
+    1,
+    1,
+    1
+   ],
+   "padding": [
+    0,
+    0,
+    0
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "config": "16x64x64/g6/w4/s2/nk16/kp2",
+   "padded": false,
+   "via": null,
+   "grad_output_shape": [
+    1,
+    3,
+    128,
+    128,
+    128
+   ],
+   "default_config": "16x64x64/g6/w4/s2/nk16/kp2",
+   "tuned_row": null,
+   "tuned_declined": false,
+   "n": 3
+  },
+  "Conv3d bwd-data up_list.3.conv.double_conv.3 x=[1, 64, 128, 128, 128] w=[64, 64, 3, 3, 3] pad=[1, 1, 1] s=[1, 1, 1] via=None": {
+   "site": "up_list.3.conv.double_conv.3",
+   "op": "Conv3d",
+   "direction": "bwd-data",
+   "x_shape": [
+    1,
+    64,
+    128,
+    128,
+    128
+   ],
+   "weight_shape": [
+    64,
+    64,
+    3,
+    3,
+    3
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "config": "256x64x32/g6/w4/s2/nk16/kp2",
+   "padded": true,
+   "via": null,
+   "grad_output_shape": [
+    1,
+    64,
+    128,
+    128,
+    128
+   ],
+   "n": 3
+  },
+  "Conv3d bwd-weight up_list.3.conv.double_conv.3 x=[1, 64, 128, 128, 128] w=[64, 64, 3, 3, 3] pad=[1, 1, 1] s=[1, 1, 1] via=None": {
+   "site": "up_list.3.conv.double_conv.3",
+   "op": "Conv3d",
+   "direction": "bwd-weight",
+   "x_shape": [
+    1,
+    64,
+    128,
+    128,
+    128
+   ],
+   "weight_shape": [
+    64,
+    64,
+    3,
+    3,
+    3
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "config": "64x64x64/g6/w8/s2/nk16/kp2",
+   "padded": true,
+   "via": null,
+   "grad_output_shape": [
+    1,
+    64,
+    128,
+    128,
+    128
+   ],
+   "default_config": "64x64x64/g6/w8/s2/nk16/kp2",
+   "tuned_row": "64x512x16/g6/w4/s2/nk32/kp1/tb8",
+   "tuned_declined": true,
+   "n": 3
+  },
+  "Conv3d bwd-data up_list.3.conv.double_conv.0 x=[1, 128, 128, 128, 128] w=[64, 128, 3, 3, 3] pad=[1, 1, 1] s=[1, 1, 1] via=None": {
+   "site": "up_list.3.conv.double_conv.0",
+   "op": "Conv3d",
+   "direction": "bwd-data",
+   "x_shape": [
+    1,
+    128,
+    128,
+    128,
+    128
+   ],
+   "weight_shape": [
+    64,
+    128,
+    3,
+    3,
+    3
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "config": "128x128x32/g6/w4/s2/nk16/kp2",
+   "padded": true,
+   "via": null,
+   "grad_output_shape": [
+    1,
+    64,
+    128,
+    128,
+    128
+   ],
+   "n": 3
+  },
+  "Conv3d bwd-weight up_list.3.conv.double_conv.0 x=[1, 128, 128, 128, 128] w=[64, 128, 3, 3, 3] pad=[1, 1, 1] s=[1, 1, 1] via=None": {
+   "site": "up_list.3.conv.double_conv.0",
+   "op": "Conv3d",
+   "direction": "bwd-weight",
+   "x_shape": [
+    1,
+    128,
+    128,
+    128,
+    128
+   ],
+   "weight_shape": [
+    64,
+    128,
+    3,
+    3,
+    3
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "config": "64x128x64/g6/w8/s2/nk16/kp2",
+   "padded": true,
+   "via": null,
+   "grad_output_shape": [
+    1,
+    64,
+    128,
+    128,
+    128
+   ],
+   "default_config": "64x128x64/g6/w8/s2/nk16/kp2",
+   "tuned_row": "64x512x16/g6/w4/s2/nk32/kp1/tb8",
+   "tuned_declined": true,
+   "n": 3
+  },
+  "ConvTranspose3d bwd-data up_list.3.up x=[1, 128, 64, 64, 64] w=[128, 64, 2, 2, 2] pad=[0, 0, 0] s=[2, 2, 2] via=None": {
+   "site": "up_list.3.up",
+   "op": "ConvTranspose3d",
+   "direction": "bwd-data",
+   "x_shape": [
+    1,
+    128,
+    64,
+    64,
+    64
+   ],
+   "weight_shape": [
+    128,
+    64,
+    2,
+    2,
+    2
+   ],
+   "padding": [
+    0,
+    0,
+    0
+   ],
+   "stride": [
+    2,
+    2,
+    2
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "config": "None",
+   "padded": false,
+   "grad_output_shape": [
+    1,
+    64,
+    128,
+    128,
+    128
+   ],
+   "n": 3
+  },
+  "Conv3d fwd up_list.3.up x=[1, 64, 128, 128, 128] w=[128, 64, 2, 2, 2] pad=[0, 0, 0] s=[2, 2, 2] via=convT-bwd-data": {
+   "site": "up_list.3.up",
+   "op": "Conv3d",
+   "direction": "fwd",
+   "x_shape": [
+    1,
+    64,
+    128,
+    128,
+    128
+   ],
+   "weight_shape": [
+    128,
+    64,
+    2,
+    2,
+    2
+   ],
+   "padding": [
+    0,
+    0,
+    0
+   ],
+   "stride": [
+    2,
+    2,
+    2
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "config": "128x128x64/g6/w4/s2/nk16/kp2",
+   "padded": false,
+   "via": "convT-bwd-data",
+   "gemm_m": 262144,
+   "n": 3
+  },
+  "ConvTranspose3d bwd-weight up_list.3.up x=[1, 128, 64, 64, 64] w=[128, 64, 2, 2, 2] pad=[0, 0, 0] s=[2, 2, 2] via=None": {
+   "site": "up_list.3.up",
+   "op": "ConvTranspose3d",
+   "direction": "bwd-weight",
+   "x_shape": [
+    1,
+    128,
+    64,
+    64,
+    64
+   ],
+   "weight_shape": [
+    128,
+    64,
+    2,
+    2,
+    2
+   ],
+   "padding": [
+    0,
+    0,
+    0
+   ],
+   "stride": [
+    2,
+    2,
+    2
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "config": "None",
+   "padded": false,
+   "grad_output_shape": [
+    1,
+    64,
+    128,
+    128,
+    128
+   ],
+   "n": 3
+  },
+  "Conv3d bwd-weight up_list.3.up x=[1, 64, 128, 128, 128] w=[128, 64, 2, 2, 2] pad=[0, 0, 0] s=[2, 2, 2] via=convT-bwd-weight": {
+   "site": "up_list.3.up",
+   "op": "Conv3d",
+   "direction": "bwd-weight",
+   "x_shape": [
+    1,
+    64,
+    128,
+    128,
+    128
+   ],
+   "weight_shape": [
+    128,
+    64,
+    2,
+    2,
+    2
+   ],
+   "padding": [
+    0,
+    0,
+    0
+   ],
+   "stride": [
+    2,
+    2,
+    2
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "config": "128x256x64/g6/w8/s2/nk32/kp2/tb4",
+   "padded": false,
+   "via": "convT-bwd-weight",
+   "grad_output_shape": [
+    1,
+    128,
+    64,
+    64,
+    64
+   ],
+   "default_config": "128x256x64/g6/w8/s2/nk16/kp2/tb4",
+   "tuned_row": "128x256x64/g6/w8/s2/nk32/kp2/tb4",
+   "tuned_declined": false,
+   "n": 3
+  },
+  "Conv3d bwd-data up_list.2.conv.double_conv.3 x=[1, 128, 64, 64, 64] w=[128, 128, 3, 3, 3] pad=[1, 1, 1] s=[1, 1, 1] via=None": {
+   "site": "up_list.2.conv.double_conv.3",
+   "op": "Conv3d",
+   "direction": "bwd-data",
+   "x_shape": [
+    1,
+    128,
+    64,
+    64,
+    64
+   ],
+   "weight_shape": [
+    128,
+    128,
+    3,
+    3,
+    3
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "config": "128x128x64/g6/w4/s2/nk16/kp2",
+   "padded": true,
+   "via": null,
+   "grad_output_shape": [
+    1,
+    128,
+    64,
+    64,
+    64
+   ],
+   "n": 3
+  },
+  "Conv3d bwd-weight up_list.2.conv.double_conv.3 x=[1, 128, 64, 64, 64] w=[128, 128, 3, 3, 3] pad=[1, 1, 1] s=[1, 1, 1] via=None": {
+   "site": "up_list.2.conv.double_conv.3",
+   "op": "Conv3d",
+   "direction": "bwd-weight",
+   "x_shape": [
+    1,
+    128,
+    64,
+    64,
+    64
+   ],
+   "weight_shape": [
+    128,
+    128,
+    3,
+    3,
+    3
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "config": "128x128x64/g6/w8/s2/nk16/kp2",
+   "padded": true,
+   "via": null,
+   "grad_output_shape": [
+    1,
+    128,
+    64,
+    64,
+    64
+   ],
+   "default_config": "128x128x64/g6/w8/s2/nk16/kp2",
+   "tuned_row": "128x256x64/g6/w8/s2/nk32/kp2/tb2",
+   "tuned_declined": true,
+   "n": 3
+  },
+  "Conv3d bwd-data up_list.2.conv.double_conv.0 x=[1, 256, 64, 64, 64] w=[128, 256, 3, 3, 3] pad=[1, 1, 1] s=[1, 1, 1] via=None": {
+   "site": "up_list.2.conv.double_conv.0",
+   "op": "Conv3d",
+   "direction": "bwd-data",
+   "x_shape": [
+    1,
+    256,
+    64,
+    64,
+    64
+   ],
+   "weight_shape": [
+    128,
+    256,
+    3,
+    3,
+    3
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "config": "128x256x64/g6/w8/s2/nk16/kp2",
+   "padded": true,
+   "via": null,
+   "grad_output_shape": [
+    1,
+    128,
+    64,
+    64,
+    64
+   ],
+   "n": 3
+  },
+  "Conv3d bwd-weight up_list.2.conv.double_conv.0 x=[1, 256, 64, 64, 64] w=[128, 256, 3, 3, 3] pad=[1, 1, 1] s=[1, 1, 1] via=None": {
+   "site": "up_list.2.conv.double_conv.0",
+   "op": "Conv3d",
+   "direction": "bwd-weight",
+   "x_shape": [
+    1,
+    256,
+    64,
+    64,
+    64
+   ],
+   "weight_shape": [
+    128,
+    256,
+    3,
+    3,
+    3
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "config": "128x256x64/g6/w8/s2/nk32/kp2",
+   "padded": true,
+   "via": null,
+   "grad_output_shape": [
+    1,
+    128,
+    64,
+    64,
+    64
+   ],
+   "default_config": "128x256x64/g6/w8/s2/nk16/kp2",
+   "tuned_row": "128x256x64/g6/w8/s2/nk32/kp2",
+   "tuned_declined": false,
+   "n": 3
+  },
+  "ConvTranspose3d bwd-data up_list.2.up x=[1, 256, 32, 32, 32] w=[256, 128, 2, 2, 2] pad=[0, 0, 0] s=[2, 2, 2] via=None": {
+   "site": "up_list.2.up",
+   "op": "ConvTranspose3d",
+   "direction": "bwd-data",
+   "x_shape": [
+    1,
+    256,
+    32,
+    32,
+    32
+   ],
+   "weight_shape": [
+    256,
+    128,
+    2,
+    2,
+    2
+   ],
+   "padding": [
+    0,
+    0,
+    0
+   ],
+   "stride": [
+    2,
+    2,
+    2
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "config": "None",
+   "padded": false,
+   "grad_output_shape": [
+    1,
+    128,
+    64,
+    64,
+    64
+   ],
+   "n": 3
+  },
+  "Conv3d fwd up_list.2.up x=[1, 128, 64, 64, 64] w=[256, 128, 2, 2, 2] pad=[0, 0, 0] s=[2, 2, 2] via=convT-bwd-data": {
+   "site": "up_list.2.up",
+   "op": "Conv3d",
+   "direction": "fwd",
+   "x_shape": [
+    1,
+    128,
+    64,
+    64,
+    64
+   ],
+   "weight_shape": [
+    256,
+    128,
+    2,
+    2,
+    2
+   ],
+   "padding": [
+    0,
+    0,
+    0
+   ],
+   "stride": [
+    2,
+    2,
+    2
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "config": "128x128x64/g6/w4/s2/nk16/kp2",
+   "padded": false,
+   "via": "convT-bwd-data",
+   "gemm_m": 32768,
+   "n": 3
+  },
+  "ConvTranspose3d bwd-weight up_list.2.up x=[1, 256, 32, 32, 32] w=[256, 128, 2, 2, 2] pad=[0, 0, 0] s=[2, 2, 2] via=None": {
+   "site": "up_list.2.up",
+   "op": "ConvTranspose3d",
+   "direction": "bwd-weight",
+   "x_shape": [
+    1,
+    256,
+    32,
+    32,
+    32
+   ],
+   "weight_shape": [
+    256,
+    128,
+    2,
+    2,
+    2
+   ],
+   "padding": [
+    0,
+    0,
+    0
+   ],
+   "stride": [
+    2,
+    2,
+    2
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "config": "None",
+   "padded": false,
+   "grad_output_shape": [
+    1,
+    128,
+    64,
+    64,
+    64
+   ],
+   "n": 3
+  },
+  "Conv3d bwd-weight up_list.2.up x=[1, 128, 64, 64, 64] w=[256, 128, 2, 2, 2] pad=[0, 0, 0] s=[2, 2, 2] via=convT-bwd-weight": {
+   "site": "up_list.2.up",
+   "op": "Conv3d",
+   "direction": "bwd-weight",
+   "x_shape": [
+    1,
+    128,
+    64,
+    64,
+    64
+   ],
+   "weight_shape": [
+    256,
+    128,
+    2,
+    2,
+    2
+   ],
+   "padding": [
+    0,
+    0,
+    0
+   ],
+   "stride": [
+    2,
+    2,
+    2
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "config": "256x256x32/g6/w8/s2/nk16/kp2/tb2",
+   "padded": false,
+   "via": "convT-bwd-weight",
+   "grad_output_shape": [
+    1,
+    256,
+    32,
+    32,
+    32
+   ],
+   "default_config": "256x256x32/g6/w8/s2/nk16/kp2/tb2",
+   "tuned_row": null,
+   "tuned_declined": false,
+   "n": 3
+  },
+  "Conv3d bwd-data up_list.1.conv.double_conv.3 x=[1, 256, 32, 32, 32] w=[256, 256, 3, 3, 3] pad=[1, 1, 1] s=[1, 1, 1] via=None": {
+   "site": "up_list.1.conv.double_conv.3",
+   "op": "Conv3d",
+   "direction": "bwd-data",
+   "x_shape": [
+    1,
+    256,
+    32,
+    32,
+    32
+   ],
+   "weight_shape": [
+    256,
+    256,
+    3,
+    3,
+    3
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "config": "128x256x64/g6/w8/s2/nk16/kp2",
+   "padded": true,
+   "via": null,
+   "grad_output_shape": [
+    1,
+    256,
+    32,
+    32,
+    32
+   ],
+   "n": 3
+  },
+  "Conv3d bwd-weight up_list.1.conv.double_conv.3 x=[1, 256, 32, 32, 32] w=[256, 256, 3, 3, 3] pad=[1, 1, 1] s=[1, 1, 1] via=None": {
+   "site": "up_list.1.conv.double_conv.3",
+   "op": "Conv3d",
+   "direction": "bwd-weight",
+   "x_shape": [
+    1,
+    256,
+    32,
+    32,
+    32
+   ],
+   "weight_shape": [
+    256,
+    256,
+    3,
+    3,
+    3
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "config": "256x256x32/g6/w8/s2/nk32/kp2",
+   "padded": true,
+   "via": null,
+   "grad_output_shape": [
+    1,
+    256,
+    32,
+    32,
+    32
+   ],
+   "default_config": "256x256x32/g6/w8/s2/nk16/kp2",
+   "tuned_row": "256x256x32/g6/w8/s2/nk32/kp2",
+   "tuned_declined": false,
+   "n": 3
+  },
+  "Conv3d bwd-data up_list.1.conv.double_conv.0 x=[1, 512, 32, 32, 32] w=[256, 512, 3, 3, 3] pad=[1, 1, 1] s=[1, 1, 1] via=None": {
+   "site": "up_list.1.conv.double_conv.0",
+   "op": "Conv3d",
+   "direction": "bwd-data",
+   "x_shape": [
+    1,
+    512,
+    32,
+    32,
+    32
+   ],
+   "weight_shape": [
+    256,
+    512,
+    3,
+    3,
+    3
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "config": "128x256x64/g6/w8/s2/nk16/kp2",
+   "padded": true,
+   "via": null,
+   "grad_output_shape": [
+    1,
+    256,
+    32,
+    32,
+    32
+   ],
+   "n": 3
+  },
+  "Conv3d bwd-weight up_list.1.conv.double_conv.0 x=[1, 512, 32, 32, 32] w=[256, 512, 3, 3, 3] pad=[1, 1, 1] s=[1, 1, 1] via=None": {
+   "site": "up_list.1.conv.double_conv.0",
+   "op": "Conv3d",
+   "direction": "bwd-weight",
+   "x_shape": [
+    1,
+    512,
+    32,
+    32,
+    32
+   ],
+   "weight_shape": [
+    256,
+    512,
+    3,
+    3,
+    3
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "config": "128x256x64/g6/w8/s2/nk32/kp2",
+   "padded": true,
+   "via": null,
+   "grad_output_shape": [
+    1,
+    256,
+    32,
+    32,
+    32
+   ],
+   "default_config": "256x256x32/g6/w8/s2/nk16/kp2",
+   "tuned_row": "128x256x64/g6/w8/s2/nk32/kp2",
+   "tuned_declined": false,
+   "n": 3
+  },
+  "ConvTranspose3d bwd-data up_list.1.up x=[1, 512, 16, 16, 16] w=[512, 256, 2, 2, 2] pad=[0, 0, 0] s=[2, 2, 2] via=None": {
+   "site": "up_list.1.up",
+   "op": "ConvTranspose3d",
+   "direction": "bwd-data",
+   "x_shape": [
+    1,
+    512,
+    16,
+    16,
+    16
+   ],
+   "weight_shape": [
+    512,
+    256,
+    2,
+    2,
+    2
+   ],
+   "padding": [
+    0,
+    0,
+    0
+   ],
+   "stride": [
+    2,
+    2,
+    2
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "config": "None",
+   "padded": false,
+   "grad_output_shape": [
+    1,
+    256,
+    32,
+    32,
+    32
+   ],
+   "n": 3
+  },
+  "Conv3d fwd up_list.1.up x=[1, 256, 32, 32, 32] w=[512, 256, 2, 2, 2] pad=[0, 0, 0] s=[2, 2, 2] via=convT-bwd-data": {
+   "site": "up_list.1.up",
+   "op": "Conv3d",
+   "direction": "fwd",
+   "x_shape": [
+    1,
+    256,
+    32,
+    32,
+    32
+   ],
+   "weight_shape": [
+    512,
+    256,
+    2,
+    2,
+    2
+   ],
+   "padding": [
+    0,
+    0,
+    0
+   ],
+   "stride": [
+    2,
+    2,
+    2
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "config": "128x128x64/g6/w4/s2/nk16/kp2",
+   "padded": false,
+   "via": "convT-bwd-data",
+   "gemm_m": 4096,
+   "n": 3
+  },
+  "ConvTranspose3d bwd-weight up_list.1.up x=[1, 512, 16, 16, 16] w=[512, 256, 2, 2, 2] pad=[0, 0, 0] s=[2, 2, 2] via=None": {
+   "site": "up_list.1.up",
+   "op": "ConvTranspose3d",
+   "direction": "bwd-weight",
+   "x_shape": [
+    1,
+    512,
+    16,
+    16,
+    16
+   ],
+   "weight_shape": [
+    512,
+    256,
+    2,
+    2,
+    2
+   ],
+   "padding": [
+    0,
+    0,
+    0
+   ],
+   "stride": [
+    2,
+    2,
+    2
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "config": "None",
+   "padded": false,
+   "grad_output_shape": [
+    1,
+    256,
+    32,
+    32,
+    32
+   ],
+   "n": 3
+  },
+  "Conv3d bwd-weight up_list.1.up x=[1, 256, 32, 32, 32] w=[512, 256, 2, 2, 2] pad=[0, 0, 0] s=[2, 2, 2] via=convT-bwd-weight": {
+   "site": "up_list.1.up",
+   "op": "Conv3d",
+   "direction": "bwd-weight",
+   "x_shape": [
+    1,
+    256,
+    32,
+    32,
+    32
+   ],
+   "weight_shape": [
+    512,
+    256,
+    2,
+    2,
+    2
+   ],
+   "padding": [
+    0,
+    0,
+    0
+   ],
+   "stride": [
+    2,
+    2,
+    2
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "config": "256x256x32/g6/w8/s2/nk16/kp2",
+   "padded": false,
+   "via": "convT-bwd-weight",
+   "grad_output_shape": [
+    1,
+    512,
+    16,
+    16,
+    16
+   ],
+   "default_config": "256x256x32/g6/w8/s2/nk16/kp2",
+   "tuned_row": null,
+   "tuned_declined": false,
+   "n": 3
+  },
+  "Conv3d bwd-data up_list.0.conv.double_conv.3 x=[1, 512, 16, 16, 16] w=[512, 512, 3, 3, 3] pad=[1, 1, 1] s=[1, 1, 1] via=None": {
+   "site": "up_list.0.conv.double_conv.3",
+   "op": "Conv3d",
+   "direction": "bwd-data",
+   "x_shape": [
+    1,
+    512,
+    16,
+    16,
+    16
+   ],
+   "weight_shape": [
+    512,
+    512,
+    3,
+    3,
+    3
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "config": "128x128x128/g6/w8/s2/nk16/kp2",
+   "padded": true,
+   "via": null,
+   "grad_output_shape": [
+    1,
+    512,
+    16,
+    16,
+    16
+   ],
+   "n": 3
+  },
+  "Conv3d bwd-weight up_list.0.conv.double_conv.3 x=[1, 512, 16, 16, 16] w=[512, 512, 3, 3, 3] pad=[1, 1, 1] s=[1, 1, 1] via=None": {
+   "site": "up_list.0.conv.double_conv.3",
+   "op": "Conv3d",
+   "direction": "bwd-weight",
+   "x_shape": [
+    1,
+    512,
+    16,
+    16,
+    16
+   ],
+   "weight_shape": [
+    512,
+    512,
+    3,
+    3,
+    3
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "config": "256x256x64/g6/w8/s2/nk32/kp2",
+   "padded": true,
+   "via": null,
+   "grad_output_shape": [
+    1,
+    512,
+    16,
+    16,
+    16
+   ],
+   "default_config": "256x256x32/g6/w8/s2/nk16/kp2",
+   "tuned_row": "256x256x64/g6/w8/s2/nk32/kp2",
+   "tuned_declined": false,
+   "n": 3
+  },
+  "Conv3d bwd-data up_list.0.conv.double_conv.0 x=[1, 1024, 16, 16, 16] w=[512, 1024, 3, 3, 3] pad=[1, 1, 1] s=[1, 1, 1] via=None": {
+   "site": "up_list.0.conv.double_conv.0",
+   "op": "Conv3d",
+   "direction": "bwd-data",
+   "x_shape": [
+    1,
+    1024,
+    16,
+    16,
+    16
+   ],
+   "weight_shape": [
+    512,
+    1024,
+    3,
+    3,
+    3
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "config": "128x256x64/g6/w8/s2/nk16/kp2",
+   "padded": true,
+   "via": null,
+   "grad_output_shape": [
+    1,
+    512,
+    16,
+    16,
+    16
+   ],
+   "n": 3
+  },
+  "Conv3d bwd-weight up_list.0.conv.double_conv.0 x=[1, 1024, 16, 16, 16] w=[512, 1024, 3, 3, 3] pad=[1, 1, 1] s=[1, 1, 1] via=None": {
+   "site": "up_list.0.conv.double_conv.0",
+   "op": "Conv3d",
+   "direction": "bwd-weight",
+   "x_shape": [
+    1,
+    1024,
+    16,
+    16,
+    16
+   ],
+   "weight_shape": [
+    512,
+    1024,
+    3,
+    3,
+    3
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "config": "256x256x64/g6/w8/s2/nk32/kp2",
+   "padded": true,
+   "via": null,
+   "grad_output_shape": [
+    1,
+    512,
+    16,
+    16,
+    16
+   ],
+   "default_config": "256x256x32/g6/w8/s2/nk16/kp2",
+   "tuned_row": "256x256x64/g6/w8/s2/nk32/kp2",
+   "tuned_declined": false,
+   "n": 3
+  },
+  "ConvTranspose3d bwd-data up_list.0.up x=[1, 1024, 8, 8, 8] w=[1024, 512, 2, 2, 2] pad=[0, 0, 0] s=[2, 2, 2] via=None": {
+   "site": "up_list.0.up",
+   "op": "ConvTranspose3d",
+   "direction": "bwd-data",
+   "x_shape": [
+    1,
+    1024,
+    8,
+    8,
+    8
+   ],
+   "weight_shape": [
+    1024,
+    512,
+    2,
+    2,
+    2
+   ],
+   "padding": [
+    0,
+    0,
+    0
+   ],
+   "stride": [
+    2,
+    2,
+    2
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "config": "None",
+   "padded": false,
+   "grad_output_shape": [
+    1,
+    512,
+    16,
+    16,
+    16
+   ],
+   "n": 3
+  },
+  "Conv3d fwd up_list.0.up x=[1, 512, 16, 16, 16] w=[1024, 512, 2, 2, 2] pad=[0, 0, 0] s=[2, 2, 2] via=convT-bwd-data": {
+   "site": "up_list.0.up",
+   "op": "Conv3d",
+   "direction": "fwd",
+   "x_shape": [
+    1,
+    512,
+    16,
+    16,
+    16
+   ],
+   "weight_shape": [
+    1024,
+    512,
+    2,
+    2,
+    2
+   ],
+   "padding": [
+    0,
+    0,
+    0
+   ],
+   "stride": [
+    2,
+    2,
+    2
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "config": "32x128x128/g6/w8/s2/nk16/kp2",
+   "padded": false,
+   "via": "convT-bwd-data",
+   "gemm_m": 512,
+   "n": 3
+  },
+  "ConvTranspose3d bwd-weight up_list.0.up x=[1, 1024, 8, 8, 8] w=[1024, 512, 2, 2, 2] pad=[0, 0, 0] s=[2, 2, 2] via=None": {
+   "site": "up_list.0.up",
+   "op": "ConvTranspose3d",
+   "direction": "bwd-weight",
+   "x_shape": [
+    1,
+    1024,
+    8,
+    8,
+    8
+   ],
+   "weight_shape": [
+    1024,
+    512,
+    2,
+    2,
+    2
+   ],
+   "padding": [
+    0,
+    0,
+    0
+   ],
+   "stride": [
+    2,
+    2,
+    2
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "config": "None",
+   "padded": false,
+   "grad_output_shape": [
+    1,
+    512,
+    16,
+    16,
+    16
+   ],
+   "n": 3
+  },
+  "Conv3d bwd-weight up_list.0.up x=[1, 512, 16, 16, 16] w=[1024, 512, 2, 2, 2] pad=[0, 0, 0] s=[2, 2, 2] via=convT-bwd-weight": {
+   "site": "up_list.0.up",
+   "op": "Conv3d",
+   "direction": "bwd-weight",
+   "x_shape": [
+    1,
+    512,
+    16,
+    16,
+    16
+   ],
+   "weight_shape": [
+    1024,
+    512,
+    2,
+    2,
+    2
+   ],
+   "padding": [
+    0,
+    0,
+    0
+   ],
+   "stride": [
+    2,
+    2,
+    2
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "config": "256x256x32/g6/w8/s2/nk16/kp2",
+   "padded": false,
+   "via": "convT-bwd-weight",
+   "grad_output_shape": [
+    1,
+    1024,
+    8,
+    8,
+    8
+   ],
+   "default_config": "256x256x32/g6/w8/s2/nk16/kp2",
+   "tuned_row": null,
+   "tuned_declined": false,
+   "n": 3
+  },
+  "Conv3d bwd-data down_list.4.maxpool_conv.1.double_conv.3 x=[1, 1024, 8, 8, 8] w=[1024, 1024, 3, 3, 3] pad=[1, 1, 1] s=[1, 1, 1] via=None": {
+   "site": "down_list.4.maxpool_conv.1.double_conv.3",
+   "op": "Conv3d",
+   "direction": "bwd-data",
+   "x_shape": [
+    1,
+    1024,
+    8,
+    8,
+    8
+   ],
+   "weight_shape": [
+    1024,
+    1024,
+    3,
+    3,
+    3
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "config": "32x128x128/g6/w8/s2/nk16/kp2",
+   "padded": true,
+   "via": null,
+   "grad_output_shape": [
+    1,
+    1024,
+    8,
+    8,
+    8
+   ],
+   "n": 3
+  },
+  "Conv3d bwd-weight down_list.4.maxpool_conv.1.double_conv.3 x=[1, 1024, 8, 8, 8] w=[1024, 1024, 3, 3, 3] pad=[1, 1, 1] s=[1, 1, 1] via=None": {
+   "site": "down_list.4.maxpool_conv.1.double_conv.3",
+   "op": "Conv3d",
+   "direction": "bwd-weight",
+   "x_shape": [
+    1,
+    1024,
+    8,
+    8,
+    8
+   ],
+   "weight_shape": [
+    1024,
+    1024,
+    3,
+    3,
+    3
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "config": "256x256x64/g6/w8/s2/nk16/kp2",
+   "padded": true,
+   "via": null,
+   "grad_output_shape": [
+    1,
+    1024,
+    8,
+    8,
+    8
+   ],
+   "default_config": "256x256x32/g6/w8/s2/nk16/kp2",
+   "tuned_row": "256x256x64/g6/w8/s2/nk16/kp2",
+   "tuned_declined": false,
+   "n": 3
+  },
+  "Conv3d bwd-data down_list.4.maxpool_conv.1.double_conv.0 x=[1, 512, 8, 8, 8] w=[1024, 512, 3, 3, 3] pad=[1, 1, 1] s=[1, 1, 1] via=None": {
+   "site": "down_list.4.maxpool_conv.1.double_conv.0",
+   "op": "Conv3d",
+   "direction": "bwd-data",
+   "x_shape": [
+    1,
+    512,
+    8,
+    8,
+    8
+   ],
+   "weight_shape": [
+    1024,
+    512,
+    3,
+    3,
+    3
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "config": "32x64x128/g6/w4/s2/nk16/kp2",
+   "padded": true,
+   "via": null,
+   "grad_output_shape": [
+    1,
+    1024,
+    8,
+    8,
+    8
+   ],
+   "n": 3
+  },
+  "Conv3d bwd-weight down_list.4.maxpool_conv.1.double_conv.0 x=[1, 512, 8, 8, 8] w=[1024, 512, 3, 3, 3] pad=[1, 1, 1] s=[1, 1, 1] via=None": {
+   "site": "down_list.4.maxpool_conv.1.double_conv.0",
+   "op": "Conv3d",
+   "direction": "bwd-weight",
+   "x_shape": [
+    1,
+    512,
+    8,
+    8,
+    8
+   ],
+   "weight_shape": [
+    1024,
+    512,
+    3,
+    3,
+    3
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "config": "256x256x64/g6/w8/s2/nk16/kp2",
+   "padded": true,
+   "via": null,
+   "grad_output_shape": [
+    1,
+    1024,
+    8,
+    8,
+    8
+   ],
+   "default_config": "256x256x32/g6/w8/s2/nk16/kp2",
+   "tuned_row": "256x256x64/g6/w8/s2/nk16/kp2",
+   "tuned_declined": false,
+   "n": 3
+  },
+  "Conv3d bwd-data down_list.3.maxpool_conv.1.double_conv.3 x=[1, 512, 16, 16, 16] w=[512, 512, 3, 3, 3] pad=[1, 1, 1] s=[1, 1, 1] via=None": {
+   "site": "down_list.3.maxpool_conv.1.double_conv.3",
+   "op": "Conv3d",
+   "direction": "bwd-data",
+   "x_shape": [
+    1,
+    512,
+    16,
+    16,
+    16
+   ],
+   "weight_shape": [
+    512,
+    512,
+    3,
+    3,
+    3
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "config": "128x128x128/g6/w8/s2/nk16/kp2",
+   "padded": true,
+   "via": null,
+   "grad_output_shape": [
+    1,
+    512,
+    16,
+    16,
+    16
+   ],
+   "n": 3
+  },
+  "Conv3d bwd-weight down_list.3.maxpool_conv.1.double_conv.3 x=[1, 512, 16, 16, 16] w=[512, 512, 3, 3, 3] pad=[1, 1, 1] s=[1, 1, 1] via=None": {
+   "site": "down_list.3.maxpool_conv.1.double_conv.3",
+   "op": "Conv3d",
+   "direction": "bwd-weight",
+   "x_shape": [
+    1,
+    512,
+    16,
+    16,
+    16
+   ],
+   "weight_shape": [
+    512,
+    512,
+    3,
+    3,
+    3
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "config": "256x256x64/g6/w8/s2/nk32/kp2",
+   "padded": true,
+   "via": null,
+   "grad_output_shape": [
+    1,
+    512,
+    16,
+    16,
+    16
+   ],
+   "default_config": "256x256x32/g6/w8/s2/nk16/kp2",
+   "tuned_row": "256x256x64/g6/w8/s2/nk32/kp2",
+   "tuned_declined": false,
+   "n": 3
+  },
+  "Conv3d bwd-data down_list.3.maxpool_conv.1.double_conv.0 x=[1, 256, 16, 16, 16] w=[512, 256, 3, 3, 3] pad=[1, 1, 1] s=[1, 1, 1] via=None": {
+   "site": "down_list.3.maxpool_conv.1.double_conv.0",
+   "op": "Conv3d",
+   "direction": "bwd-data",
+   "x_shape": [
+    1,
+    256,
+    16,
+    16,
+    16
+   ],
+   "weight_shape": [
+    512,
+    256,
+    3,
+    3,
+    3
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "config": "32x256x64/g6/w8/s2/nk16/kp2",
+   "padded": true,
+   "via": null,
+   "grad_output_shape": [
+    1,
+    512,
+    16,
+    16,
+    16
+   ],
+   "n": 3
+  },
+  "Conv3d bwd-weight down_list.3.maxpool_conv.1.double_conv.0 x=[1, 256, 16, 16, 16] w=[512, 256, 3, 3, 3] pad=[1, 1, 1] s=[1, 1, 1] via=None": {
+   "site": "down_list.3.maxpool_conv.1.double_conv.0",
+   "op": "Conv3d",
+   "direction": "bwd-weight",
+   "x_shape": [
+    1,
+    256,
+    16,
+    16,
+    16
+   ],
+   "weight_shape": [
+    512,
+    256,
+    3,
+    3,
+    3
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "config": "256x256x64/g6/w8/s2/nk32/kp2",
+   "padded": true,
+   "via": null,
+   "grad_output_shape": [
+    1,
+    512,
+    16,
+    16,
+    16
+   ],
+   "default_config": "256x256x32/g6/w8/s2/nk16/kp2",
+   "tuned_row": "256x256x64/g6/w8/s2/nk32/kp2",
+   "tuned_declined": false,
+   "n": 3
+  },
+  "Conv3d bwd-data down_list.2.maxpool_conv.1.double_conv.3 x=[1, 256, 32, 32, 32] w=[256, 256, 3, 3, 3] pad=[1, 1, 1] s=[1, 1, 1] via=None": {
+   "site": "down_list.2.maxpool_conv.1.double_conv.3",
+   "op": "Conv3d",
+   "direction": "bwd-data",
+   "x_shape": [
+    1,
+    256,
+    32,
+    32,
+    32
+   ],
+   "weight_shape": [
+    256,
+    256,
+    3,
+    3,
+    3
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "config": "128x256x64/g6/w8/s2/nk16/kp2",
+   "padded": true,
+   "via": null,
+   "grad_output_shape": [
+    1,
+    256,
+    32,
+    32,
+    32
+   ],
+   "n": 3
+  },
+  "Conv3d bwd-weight down_list.2.maxpool_conv.1.double_conv.3 x=[1, 256, 32, 32, 32] w=[256, 256, 3, 3, 3] pad=[1, 1, 1] s=[1, 1, 1] via=None": {
+   "site": "down_list.2.maxpool_conv.1.double_conv.3",
+   "op": "Conv3d",
+   "direction": "bwd-weight",
+   "x_shape": [
+    1,
+    256,
+    32,
+    32,
+    32
+   ],
+   "weight_shape": [
+    256,
+    256,
+    3,
+    3,
+    3
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "config": "256x256x32/g6/w8/s2/nk32/kp2",
+   "padded": true,
+   "via": null,
+   "grad_output_shape": [
+    1,
+    256,
+    32,
+    32,
+    32
+   ],
+   "default_config": "256x256x32/g6/w8/s2/nk16/kp2",
+   "tuned_row": "256x256x32/g6/w8/s2/nk32/kp2",
+   "tuned_declined": false,
+   "n": 3
+  },
+  "Conv3d bwd-data down_list.2.maxpool_conv.1.double_conv.0 x=[1, 128, 32, 32, 32] w=[256, 128, 3, 3, 3] pad=[1, 1, 1] s=[1, 1, 1] via=None": {
+   "site": "down_list.2.maxpool_conv.1.double_conv.0",
+   "op": "Conv3d",
+   "direction": "bwd-data",
+   "x_shape": [
+    1,
+    128,
+    32,
+    32,
+    32
+   ],
+   "weight_shape": [
+    256,
+    128,
+    3,
+    3,
+    3
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "config": "128x128x64/g6/w4/s2/nk16/kp2",
+   "padded": true,
+   "via": null,
+   "grad_output_shape": [
+    1,
+    256,
+    32,
+    32,
+    32
+   ],
+   "n": 3
+  },
+  "Conv3d bwd-weight down_list.2.maxpool_conv.1.double_conv.0 x=[1, 128, 32, 32, 32] w=[256, 128, 3, 3, 3] pad=[1, 1, 1] s=[1, 1, 1] via=None": {
+   "site": "down_list.2.maxpool_conv.1.double_conv.0",
+   "op": "Conv3d",
+   "direction": "bwd-weight",
+   "x_shape": [
+    1,
+    128,
+    32,
+    32,
+    32
+   ],
+   "weight_shape": [
+    256,
+    128,
+    3,
+    3,
+    3
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "config": "256x128x32/g6/w8/s2/nk16/kp2",
+   "padded": true,
+   "via": null,
+   "grad_output_shape": [
+    1,
+    256,
+    32,
+    32,
+    32
+   ],
+   "default_config": "256x128x32/g6/w8/s2/nk16/kp2",
+   "tuned_row": "128x256x64/g6/w8/s2/nk32/kp2/tb2",
+   "tuned_declined": true,
+   "n": 3
+  },
+  "Conv3d bwd-data down_list.1.maxpool_conv.1.double_conv.3 x=[1, 128, 64, 64, 64] w=[128, 128, 3, 3, 3] pad=[1, 1, 1] s=[1, 1, 1] via=None": {
+   "site": "down_list.1.maxpool_conv.1.double_conv.3",
+   "op": "Conv3d",
+   "direction": "bwd-data",
+   "x_shape": [
+    1,
+    128,
+    64,
+    64,
+    64
+   ],
+   "weight_shape": [
+    128,
+    128,
+    3,
+    3,
+    3
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "config": "128x128x64/g6/w4/s2/nk16/kp2",
+   "padded": true,
+   "via": null,
+   "grad_output_shape": [
+    1,
+    128,
+    64,
+    64,
+    64
+   ],
+   "n": 3
+  },
+  "Conv3d bwd-weight down_list.1.maxpool_conv.1.double_conv.3 x=[1, 128, 64, 64, 64] w=[128, 128, 3, 3, 3] pad=[1, 1, 1] s=[1, 1, 1] via=None": {
+   "site": "down_list.1.maxpool_conv.1.double_conv.3",
+   "op": "Conv3d",
+   "direction": "bwd-weight",
+   "x_shape": [
+    1,
+    128,
+    64,
+    64,
+    64
+   ],
+   "weight_shape": [
+    128,
+    128,
+    3,
+    3,
+    3
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "config": "128x128x64/g6/w8/s2/nk16/kp2",
+   "padded": true,
+   "via": null,
+   "grad_output_shape": [
+    1,
+    128,
+    64,
+    64,
+    64
+   ],
+   "default_config": "128x128x64/g6/w8/s2/nk16/kp2",
+   "tuned_row": "128x256x64/g6/w8/s2/nk32/kp2/tb2",
+   "tuned_declined": true,
+   "n": 3
+  },
+  "Conv3d bwd-data down_list.1.maxpool_conv.1.double_conv.0 x=[1, 64, 64, 64, 64] w=[128, 64, 3, 3, 3] pad=[1, 1, 1] s=[1, 1, 1] via=None": {
+   "site": "down_list.1.maxpool_conv.1.double_conv.0",
+   "op": "Conv3d",
+   "direction": "bwd-data",
+   "x_shape": [
+    1,
+    64,
+    64,
+    64,
+    64
+   ],
+   "weight_shape": [
+    128,
+    64,
+    3,
+    3,
+    3
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "config": "128x64x64/g6/w4/s2/nk16/kp2",
+   "padded": true,
+   "via": null,
+   "grad_output_shape": [
+    1,
+    128,
+    64,
+    64,
+    64
+   ],
+   "n": 3
+  },
+  "Conv3d bwd-weight down_list.1.maxpool_conv.1.double_conv.0 x=[1, 64, 64, 64, 64] w=[128, 64, 3, 3, 3] pad=[1, 1, 1] s=[1, 1, 1] via=None": {
+   "site": "down_list.1.maxpool_conv.1.double_conv.0",
+   "op": "Conv3d",
+   "direction": "bwd-weight",
+   "x_shape": [
+    1,
+    64,
+    64,
+    64,
+    64
+   ],
+   "weight_shape": [
+    128,
+    64,
+    3,
+    3,
+    3
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "config": "128x64x64/g6/w8/s2/nk16/kp2",
+   "padded": true,
+   "via": null,
+   "grad_output_shape": [
+    1,
+    128,
+    64,
+    64,
+    64
+   ],
+   "default_config": "128x64x64/g6/w8/s2/nk16/kp2",
+   "tuned_row": "64x512x16/g6/w4/s2/nk32/kp1/tb8",
+   "tuned_declined": true,
+   "n": 3
+  },
+  "Conv3d bwd-data down_list.0.double_conv.3 x=[1, 64, 128, 128, 128] w=[64, 64, 3, 3, 3] pad=[1, 1, 1] s=[1, 1, 1] via=None": {
+   "site": "down_list.0.double_conv.3",
+   "op": "Conv3d",
+   "direction": "bwd-data",
+   "x_shape": [
+    1,
+    64,
+    128,
+    128,
+    128
+   ],
+   "weight_shape": [
+    64,
+    64,
+    3,
+    3,
+    3
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "config": "256x64x32/g6/w4/s2/nk16/kp2",
+   "padded": true,
+   "via": null,
+   "grad_output_shape": [
+    1,
+    64,
+    128,
+    128,
+    128
+   ],
+   "n": 3
+  },
+  "Conv3d bwd-weight down_list.0.double_conv.3 x=[1, 64, 128, 128, 128] w=[64, 64, 3, 3, 3] pad=[1, 1, 1] s=[1, 1, 1] via=None": {
+   "site": "down_list.0.double_conv.3",
+   "op": "Conv3d",
+   "direction": "bwd-weight",
+   "x_shape": [
+    1,
+    64,
+    128,
+    128,
+    128
+   ],
+   "weight_shape": [
+    64,
+    64,
+    3,
+    3,
+    3
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "config": "64x64x64/g6/w8/s2/nk16/kp2",
+   "padded": true,
+   "via": null,
+   "grad_output_shape": [
+    1,
+    64,
+    128,
+    128,
+    128
+   ],
+   "default_config": "64x64x64/g6/w8/s2/nk16/kp2",
+   "tuned_row": "64x512x16/g6/w4/s2/nk32/kp1/tb8",
+   "tuned_declined": true,
+   "n": 3
+  },
+  "Conv3d bwd-weight down_list.0.double_conv.0 x=[1, 3, 128, 128, 128] w=[64, 3, 3, 3, 3] pad=[1, 1, 1] s=[1, 1, 1] via=None": {
+   "site": "down_list.0.double_conv.0",
+   "op": "Conv3d",
+   "direction": "bwd-weight",
+   "x_shape": [
+    1,
+    3,
+    128,
+    128,
+    128
+   ],
+   "weight_shape": [
+    64,
+    3,
+    3,
+    3,
+    3
+   ],
+   "padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dilation": [
+    1,
+    1,
+    1
+   ],
+   "groups": 1,
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "config": "64x16x64/g6/w4/s2/nk16/kp2",
+   "padded": true,
+   "via": null,
+   "grad_output_shape": [
+    1,
+    64,
+    128,
+    128,
+    128
+   ],
+   "default_config": "64x16x64/g6/w4/s2/nk16/kp2",
+   "tuned_row": "64x64x64/g6/w1/s2/nk16/kp2/tb16",
+   "tuned_declined": true,
+   "n": 3
+  }
+ },
+ "autograd_fn": {
+  "Conv3d down_list.0.double_conv.0 x=[1, 3, 128, 128, 128] pad=[1, 1, 1]": {
+   "site": "down_list.0.double_conv.0",
+   "op": "Conv3d",
+   "x_shape": [
+    1,
+    3,
+    128,
+    128,
+    128
+   ],
+   "weight_shape": [
+    64,
+    3,
+    3,
+    3,
+    3
+   ],
+   "kernel_padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "padded": true,
+   "n": 3
+  },
+  "Conv3d down_list.0.double_conv.3 x=[1, 64, 128, 128, 128] pad=[1, 1, 1]": {
+   "site": "down_list.0.double_conv.3",
+   "op": "Conv3d",
+   "x_shape": [
+    1,
+    64,
+    128,
+    128,
+    128
+   ],
+   "weight_shape": [
+    64,
+    64,
+    3,
+    3,
+    3
+   ],
+   "kernel_padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "padded": true,
+   "n": 3
+  },
+  "Conv3d down_list.1.maxpool_conv.1.double_conv.0 x=[1, 64, 64, 64, 64] pad=[1, 1, 1]": {
+   "site": "down_list.1.maxpool_conv.1.double_conv.0",
+   "op": "Conv3d",
+   "x_shape": [
+    1,
+    64,
+    64,
+    64,
+    64
+   ],
+   "weight_shape": [
+    128,
+    64,
+    3,
+    3,
+    3
+   ],
+   "kernel_padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "padded": true,
+   "n": 3
+  },
+  "Conv3d down_list.1.maxpool_conv.1.double_conv.3 x=[1, 128, 64, 64, 64] pad=[1, 1, 1]": {
+   "site": "down_list.1.maxpool_conv.1.double_conv.3",
+   "op": "Conv3d",
+   "x_shape": [
+    1,
+    128,
+    64,
+    64,
+    64
+   ],
+   "weight_shape": [
+    128,
+    128,
+    3,
+    3,
+    3
+   ],
+   "kernel_padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "padded": true,
+   "n": 3
+  },
+  "Conv3d down_list.2.maxpool_conv.1.double_conv.0 x=[1, 128, 32, 32, 32] pad=[1, 1, 1]": {
+   "site": "down_list.2.maxpool_conv.1.double_conv.0",
+   "op": "Conv3d",
+   "x_shape": [
+    1,
+    128,
+    32,
+    32,
+    32
+   ],
+   "weight_shape": [
+    256,
+    128,
+    3,
+    3,
+    3
+   ],
+   "kernel_padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "padded": true,
+   "n": 3
+  },
+  "Conv3d down_list.2.maxpool_conv.1.double_conv.3 x=[1, 256, 32, 32, 32] pad=[1, 1, 1]": {
+   "site": "down_list.2.maxpool_conv.1.double_conv.3",
+   "op": "Conv3d",
+   "x_shape": [
+    1,
+    256,
+    32,
+    32,
+    32
+   ],
+   "weight_shape": [
+    256,
+    256,
+    3,
+    3,
+    3
+   ],
+   "kernel_padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "padded": true,
+   "n": 3
+  },
+  "Conv3d down_list.3.maxpool_conv.1.double_conv.0 x=[1, 256, 16, 16, 16] pad=[1, 1, 1]": {
+   "site": "down_list.3.maxpool_conv.1.double_conv.0",
+   "op": "Conv3d",
+   "x_shape": [
+    1,
+    256,
+    16,
+    16,
+    16
+   ],
+   "weight_shape": [
+    512,
+    256,
+    3,
+    3,
+    3
+   ],
+   "kernel_padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "padded": true,
+   "n": 3
+  },
+  "Conv3d down_list.3.maxpool_conv.1.double_conv.3 x=[1, 512, 16, 16, 16] pad=[1, 1, 1]": {
+   "site": "down_list.3.maxpool_conv.1.double_conv.3",
+   "op": "Conv3d",
+   "x_shape": [
+    1,
+    512,
+    16,
+    16,
+    16
+   ],
+   "weight_shape": [
+    512,
+    512,
+    3,
+    3,
+    3
+   ],
+   "kernel_padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "padded": true,
+   "n": 3
+  },
+  "Conv3d down_list.4.maxpool_conv.1.double_conv.0 x=[1, 512, 8, 8, 8] pad=[1, 1, 1]": {
+   "site": "down_list.4.maxpool_conv.1.double_conv.0",
+   "op": "Conv3d",
+   "x_shape": [
+    1,
+    512,
+    8,
+    8,
+    8
+   ],
+   "weight_shape": [
+    1024,
+    512,
+    3,
+    3,
+    3
+   ],
+   "kernel_padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "padded": true,
+   "n": 3
+  },
+  "Conv3d down_list.4.maxpool_conv.1.double_conv.3 x=[1, 1024, 8, 8, 8] pad=[1, 1, 1]": {
+   "site": "down_list.4.maxpool_conv.1.double_conv.3",
+   "op": "Conv3d",
+   "x_shape": [
+    1,
+    1024,
+    8,
+    8,
+    8
+   ],
+   "weight_shape": [
+    1024,
+    1024,
+    3,
+    3,
+    3
+   ],
+   "kernel_padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "padded": true,
+   "n": 3
+  },
+  "ConvTranspose3d up_list.0.up x=[1, 1024, 8, 8, 8] pad=[0, 0, 0]": {
+   "site": "up_list.0.up",
+   "op": "ConvTranspose3d",
+   "x_shape": [
+    1,
+    1024,
+    8,
+    8,
+    8
+   ],
+   "weight_shape": [
+    1024,
+    512,
+    2,
+    2,
+    2
+   ],
+   "kernel_padding": [
+    0,
+    0,
+    0
+   ],
+   "stride": [
+    2,
+    2,
+    2
+   ],
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "padded": false,
+   "n": 3
+  },
+  "Conv3d up_list.0.conv.double_conv.0 x=[1, 1024, 16, 16, 16] pad=[1, 1, 1]": {
+   "site": "up_list.0.conv.double_conv.0",
+   "op": "Conv3d",
+   "x_shape": [
+    1,
+    1024,
+    16,
+    16,
+    16
+   ],
+   "weight_shape": [
+    512,
+    1024,
+    3,
+    3,
+    3
+   ],
+   "kernel_padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "padded": true,
+   "n": 3
+  },
+  "Conv3d up_list.0.conv.double_conv.3 x=[1, 512, 16, 16, 16] pad=[1, 1, 1]": {
+   "site": "up_list.0.conv.double_conv.3",
+   "op": "Conv3d",
+   "x_shape": [
+    1,
+    512,
+    16,
+    16,
+    16
+   ],
+   "weight_shape": [
+    512,
+    512,
+    3,
+    3,
+    3
+   ],
+   "kernel_padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "padded": true,
+   "n": 3
+  },
+  "ConvTranspose3d up_list.1.up x=[1, 512, 16, 16, 16] pad=[0, 0, 0]": {
+   "site": "up_list.1.up",
+   "op": "ConvTranspose3d",
+   "x_shape": [
+    1,
+    512,
+    16,
+    16,
+    16
+   ],
+   "weight_shape": [
+    512,
+    256,
+    2,
+    2,
+    2
+   ],
+   "kernel_padding": [
+    0,
+    0,
+    0
+   ],
+   "stride": [
+    2,
+    2,
+    2
+   ],
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "padded": false,
+   "n": 3
+  },
+  "Conv3d up_list.1.conv.double_conv.0 x=[1, 512, 32, 32, 32] pad=[1, 1, 1]": {
+   "site": "up_list.1.conv.double_conv.0",
+   "op": "Conv3d",
+   "x_shape": [
+    1,
+    512,
+    32,
+    32,
+    32
+   ],
+   "weight_shape": [
+    256,
+    512,
+    3,
+    3,
+    3
+   ],
+   "kernel_padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "padded": true,
+   "n": 3
+  },
+  "Conv3d up_list.1.conv.double_conv.3 x=[1, 256, 32, 32, 32] pad=[1, 1, 1]": {
+   "site": "up_list.1.conv.double_conv.3",
+   "op": "Conv3d",
+   "x_shape": [
+    1,
+    256,
+    32,
+    32,
+    32
+   ],
+   "weight_shape": [
+    256,
+    256,
+    3,
+    3,
+    3
+   ],
+   "kernel_padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "padded": true,
+   "n": 3
+  },
+  "ConvTranspose3d up_list.2.up x=[1, 256, 32, 32, 32] pad=[0, 0, 0]": {
+   "site": "up_list.2.up",
+   "op": "ConvTranspose3d",
+   "x_shape": [
+    1,
+    256,
+    32,
+    32,
+    32
+   ],
+   "weight_shape": [
+    256,
+    128,
+    2,
+    2,
+    2
+   ],
+   "kernel_padding": [
+    0,
+    0,
+    0
+   ],
+   "stride": [
+    2,
+    2,
+    2
+   ],
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "padded": false,
+   "n": 3
+  },
+  "Conv3d up_list.2.conv.double_conv.0 x=[1, 256, 64, 64, 64] pad=[1, 1, 1]": {
+   "site": "up_list.2.conv.double_conv.0",
+   "op": "Conv3d",
+   "x_shape": [
+    1,
+    256,
+    64,
+    64,
+    64
+   ],
+   "weight_shape": [
+    128,
+    256,
+    3,
+    3,
+    3
+   ],
+   "kernel_padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "padded": true,
+   "n": 3
+  },
+  "Conv3d up_list.2.conv.double_conv.3 x=[1, 128, 64, 64, 64] pad=[1, 1, 1]": {
+   "site": "up_list.2.conv.double_conv.3",
+   "op": "Conv3d",
+   "x_shape": [
+    1,
+    128,
+    64,
+    64,
+    64
+   ],
+   "weight_shape": [
+    128,
+    128,
+    3,
+    3,
+    3
+   ],
+   "kernel_padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "padded": true,
+   "n": 3
+  },
+  "ConvTranspose3d up_list.3.up x=[1, 128, 64, 64, 64] pad=[0, 0, 0]": {
+   "site": "up_list.3.up",
+   "op": "ConvTranspose3d",
+   "x_shape": [
+    1,
+    128,
+    64,
+    64,
+    64
+   ],
+   "weight_shape": [
+    128,
+    64,
+    2,
+    2,
+    2
+   ],
+   "kernel_padding": [
+    0,
+    0,
+    0
+   ],
+   "stride": [
+    2,
+    2,
+    2
+   ],
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "padded": false,
+   "n": 3
+  },
+  "Conv3d up_list.3.conv.double_conv.0 x=[1, 128, 128, 128, 128] pad=[1, 1, 1]": {
+   "site": "up_list.3.conv.double_conv.0",
+   "op": "Conv3d",
+   "x_shape": [
+    1,
+    128,
+    128,
+    128,
+    128
+   ],
+   "weight_shape": [
+    64,
+    128,
+    3,
+    3,
+    3
+   ],
+   "kernel_padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "padded": true,
+   "n": 3
+  },
+  "Conv3d up_list.3.conv.double_conv.3 x=[1, 64, 128, 128, 128] pad=[1, 1, 1]": {
+   "site": "up_list.3.conv.double_conv.3",
+   "op": "Conv3d",
+   "x_shape": [
+    1,
+    64,
+    128,
+    128,
+    128
+   ],
+   "weight_shape": [
+    64,
+    64,
+    3,
+    3,
+    3
+   ],
+   "kernel_padding": [
+    1,
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "padded": true,
+   "n": 3
+  },
+  "Conv3d up_list.4.conv x=[1, 64, 128, 128, 128] pad=[0, 0, 0]": {
+   "site": "up_list.4.conv",
+   "op": "Conv3d",
+   "x_shape": [
+    1,
+    64,
+    128,
+    128,
+    128
+   ],
+   "weight_shape": [
+    3,
+    64,
+    1,
+    1,
+    1
+   ],
+   "kernel_padding": [
+    0,
+    0,
+    0
+   ],
+   "stride": [
+    1,
+    1,
+    1
+   ],
+   "dtype": "torch.bfloat16",
+   "memfmt": "channels_last_3d",
+   "padded": false,
+   "n": 3
+  }
+ }
+}

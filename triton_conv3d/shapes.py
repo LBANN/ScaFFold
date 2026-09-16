@@ -466,11 +466,9 @@ def scaffold_corpus() -> tuple[ConvProblem, ...]:
     """Every distinct convolution in the three profiled ScaFFold configurations.
 
     Ordered by measured cost, so truncating the list keeps the problems that
-    matter.  Loaded from ``tests/data/scaffold_corpus.json``, a recorded
-    fixture rather than a hand-written list: the shapes come from
-    ``model-analysis/unet_shapes.py``'s dumps and the ``measured`` column from
-    the MIOpen profiles of the same configurations, so it is regenerated from
-    those inputs, not by hand.
+    matter.  Loaded from ``tests/data/scaffold_corpus.json``, which
+    ``tests/data/make_corpus.py`` regenerates from ``unet_shapes.py`` and the
+    profile record beside it.
     """
     raw = json.loads(_CORPUS_PATH.read_text())
     problems = []
@@ -538,20 +536,20 @@ def production_corpus() -> tuple[ConvProblem, ...]:
 def census_corpus() -> tuple[ConvProblem, ...]:
     """Every convolution an instrumented ScaFFold step actually issued.
 
-    Recorded by a census harness that wraps ``FastConv3d`` /
-    ``FastConvTranspose3d`` and the six kernel entry points and runs real
-    training steps at each of the four configurations the benchmark harness uses
-    (A = scale 7 / 1 GPU, B = scale 8 / 1 GPU, C = scale 8 / 2 GPUs, D = scale 8
-    / 4 GPUs).  Every problem here is in :attr:`ConvProblem.form` ``"adapter"``
-    by construction: it is the shape and padding the kernel was handed, read off
-    the call.
+    Recorded by ``tests/data/conv_census.py``, which wraps ``FastConv3d`` /
+    ``FastConvTranspose3d`` and the six kernel entry points around real
+    training steps at each of the four benchmark configurations (A = scale 7 /
+    1 GPU, B = scale 8 / 1 GPU, C = scale 8 / 2 GPUs, D = scale 8 / 4 GPUs);
+    ``tests/data/make_census.py`` folds the captures.  Every problem here is
+    in :attr:`ConvProblem.form` ``"adapter"`` by construction: the shape and
+    padding the kernel was handed, read off the call.
 
     Why this exists beside :func:`scaffold_corpus` rather than being folded into
     it:
 
     * it covers a configuration the profiled corpus does not (scale 8 on one
-      GPU), and a *network depth* it does not -- the shape dumps behind
-      :func:`scaffold_corpus` were taken at ``unet_bottleneck_dim = 4``, a
+      GPU), and a *network depth* it does not -- :func:`scaffold_corpus`'s
+      scale-8 configurations were traced at ``unet_bottleneck_dim = 4``, a
       four-layer model, while every step-level measurement runs the shipped
       default of 3, a five-layer one with twice the bottleneck width;
     * it carries no ``measured`` MIOpen data and no cost ordering, so it is not
