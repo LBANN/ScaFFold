@@ -35,6 +35,9 @@ activation=None)``
     Drop-in for ``F.group_norm`` (plus an optionally fused ReLU) with
     first-order autograd.  Accepts anything ``F.group_norm`` accepts; inputs
     the Triton kernel cannot serve fall back to ``F.group_norm`` internally.
+    ``activation`` defaults to ``None`` because this is a stand-alone
+    replacement for ``F.group_norm``; ScaFFold itself always passes
+    ``"relu"`` (both of ``unet_parts.DoubleConv``'s sites fuse their ReLU).
 
 ``is_supported(input, num_groups, weight=None, bias=None, activation=None)``
     Cheap, side-effect-free predicate: ``True`` exactly when the native Triton
