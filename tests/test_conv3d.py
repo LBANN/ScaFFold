@@ -18,8 +18,9 @@
 is the test to trust most: every other property here fails loudly, but a
 wrong halo plan produces a plausible wrong gradient at every shard boundary,
 since the halo DistConv adds below autograd is invisible to a module-level
-adapter. The exchange itself needs real ranks and lives in a separate
-multi-rank harness.
+adapter. The exchange itself needs real ranks:
+:func:`test_two_ranks_agree_on_the_exchange_whatever_one_of_them_decides`
+launches ``tests/helpers/rank_scripts/conv3d_shards_2rank.py`` for it.
 
 Tolerances come from ``triton_conv3d.reference``'s policy: an fp64 reference
 and a dtype/K-derived bound, or MIOpen's own error where that is looser.
@@ -29,16 +30,20 @@ Nothing here invents one.
 from __future__ import annotations
 
 import logging
+import re
 import sys
+from pathlib import Path
 
 import pytest
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 
 from ScaFFold.unet import conv3d as conv_mod
 from ScaFFold.unet.conv3d import FastConv3d, FastConvTranspose3d
 from ScaFFold.unet.unet_model import UNet
 from ScaFFold.unet.unet_parts import DoubleConv, OutConv, Up
+from tests.helpers import mpi_runner
 
 _CHANNELS_LAST = torch.channels_last_3d
 
@@ -112,6 +117,44 @@ def _gpu_input(shape, dtype=torch.bfloat16, seed=7):
     return x.to(dtype).contiguous(memory_format=_CHANNELS_LAST)
 
 
+class _FakeP2POp:
+    """``dist.P2POp`` without a process group: the exchange only records it."""
+
+    def __init__(self, op, tensor, peer, group=None, tag=0):
+        self.op, self.tensor, self.peer = op, tensor, peer
+
+
+def _fake_mesh(monkeypatch, agreed):
+    """A fake process group whose ``all_reduce`` answers ``agreed``.
+
+    ``P2POp`` needs a real group to be constructed, so it is recorded instead,
+    and ``batch_isend_irecv`` posts nothing: the receive buffers stay zero, so
+    the exchanged tensor equals the module's own zero padding and
+    :func:`_padded_reference` is an exact reference.  Returns the votes seen
+    and the ops posted.
+    """
+    votes, posted = [], []
+    monkeypatch.setattr(dist, "is_available", lambda: True)
+    monkeypatch.setattr(dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(dist, "get_backend", lambda group=None: "gloo")
+
+    def _all_reduce(tensor, op=None, group=None, async_op=False):
+        votes.append((int(tensor.item()), op))
+        tensor.fill_(int(agreed))
+
+    monkeypatch.setattr(dist, "all_reduce", _all_reduce)
+    monkeypatch.setattr(dist, "P2POp", _FakeP2POp)
+    monkeypatch.setattr(dist, "batch_isend_irecv", lambda ops: posted.extend(ops) or [])
+    return votes, posted
+
+
+def _padded_reference(conv, x):
+    """What the exchange computes when nothing arrives: the module's own padding."""
+    return nn.functional.conv3d(
+        x, conv.weight, conv.bias, conv.stride, conv.padding, conv.dilation, conv.groups
+    )
+
+
 #: The module's process-global state, restored around every test: the override
 #: and the latch, the cached allowlist, and the three log-once flags.
 _MODULE_STATE = (
@@ -120,6 +163,7 @@ _MODULE_STATE = (
     "_TRITON_KERNEL_FAILURES",
     "_predicate_warned",
     "_allowlist_warned",
+    "_disagreement_warned",
 )
 
 
@@ -297,8 +341,7 @@ def test_the_gate_asks_the_predicates_about_the_tensor_the_kernel_will_see():
     The sharded answer is ``False`` only because this process has no process
     group to exchange over: the plan is still made, and the predicates are
     asked about the halo'd extent -- ``8 -> 10`` on D -- at the padding the
-    exchange leaves behind. The multi-rank half needs real ranks and lives in
-    a separate harness.
+    exchange leaves behind. The multi-rank half is the two-rank test below.
     """
     conv = _gpu_conv()
     x = _gpu_input((1, 16, 8, 8, 8))
@@ -347,8 +390,8 @@ def test_a_sharded_dctensor_forward_goes_to_miopen_without_a_process_group(monke
     monkeypatch.setattr(
         FastConv3d,
         "_triton_forward",
-        lambda self, local, plan=None: (
-            fast_calls.append(local) or original(self, local, plan)
+        lambda self, local, plan=None, kernel=True: (
+            fast_calls.append(local) or original(self, local, plan, kernel)
         ),
     )
 
@@ -400,8 +443,8 @@ def test_a_kernel_failure_after_the_halo_falls_back_without_exchanging_twice(
     module's own padding on the unexchanged shard, the result has an
     independent reference: what ``nn.Conv3d`` computes on the original input.
 
-    The multi-rank half, with real slabs on a real mesh, needs real ranks and
-    lives in a separate harness.
+    The multi-rank half, with real slabs on a real mesh, is the two-rank test
+    below.
     """
     import distconv
     import distconv.distconv as dc
@@ -449,8 +492,9 @@ def test_a_kernel_failure_after_the_halo_falls_back_without_exchanging_twice(
     monkeypatch.setattr(conv_mod, "_exchange_forward", _adapter_exchange)
     monkeypatch.setattr(conv_mod, "_exchange_backward", _adapter_backward)
     monkeypatch.setattr(dc, "forward_halo_exchange", _distconv_exchange)
-    # The gate declines a sharded plan in a process with no group, which is a
-    # routing condition and not the one under test.
+    # The gate declines a sharded plan in a process with no group, and the
+    # exchange is agreed across one; neither is the condition under test.
+    _fake_mesh(monkeypatch, agreed=1)
     monkeypatch.setattr(conv_mod, "_use_triton", lambda *a, **kw: True)
     monkeypatch.setattr(conv_mod, "_triton_failed", False)
 
@@ -615,7 +659,7 @@ def test_latch_spares_a_proven_module_and_demotes_the_others(monkeypatch, caplog
     proven._triton_ok = True
     attempts = []
 
-    def _fails(self, local, plan=None):
+    def _fails(self, local, plan=None, kernel=True):
         attempts.append(self)
         raise _Boom("kernel is broken")
 
@@ -663,7 +707,7 @@ def test_a_proven_module_re_raises_rather_than_flipping_rungs_mid_backward(monke
     monkeypatch.setattr(
         FastConv3d,
         "_triton_forward",
-        lambda self, local, plan=None: (_ for _ in ()).throw(_Boom()),
+        lambda self, local, plan=None, kernel=True: (_ for _ in ()).throw(_Boom()),
     )
 
     x = _gpu_input((1, 16, 8, 8, 8)).float().requires_grad_(True)
@@ -759,6 +803,252 @@ def test_an_empty_allowlist_declines_the_rung_instead_of_running_it_unguarded(
     torch.testing.assert_close(conv(x), nn.Conv3d.forward(conv, x))
     assert len(served) == 1 and reached == []
     assert conv._triton_ok is False
+
+
+# ---------------------------------------------------------------------------
+# the agreed exchange
+# ---------------------------------------------------------------------------
+
+
+def test_a_peer_that_declines_sends_this_rank_to_miopen(monkeypatch, caplog):
+    """A local ``True`` outvoted by the mesh lands on ``_miopen_forward``, with one
+    collective per module, the latch skipped in the vote, and one log line."""
+    import distconv
+
+    votes, posted = _fake_mesh(monkeypatch, agreed=0)
+    asked = []
+    monkeypatch.setattr(
+        conv_mod,
+        "_use_triton",
+        lambda module, x, dc, plan, proven=False: asked.append(proven) or True,
+    )
+    served = []
+    monkeypatch.setattr(
+        FastConv3d, "_miopen_forward", lambda self, input: served.append(input) or input
+    )
+    monkeypatch.setattr(conv_mod, "_disagreement_warned", False)
+
+    conv = _seeded_conv()
+    strategy = _StubStrategy((2, 1, 1))
+    x = torch.randn(1, 16, 8, 8, 8)
+    with caplog.at_level(logging.WARNING, logger=conv_mod.__name__):
+        for _ in range(3):
+            conv(distconv.DCTensor.from_shard(x, strategy))
+
+    assert asked == [True], "the local verdict was not asked once, latch skipped"
+    assert votes == [(1, dist.ReduceOp.MIN)], "the collective was not taken once"
+    assert len(served) == 3 and posted == [], "a call reached the adapter's exchange"
+    assert conv._exchange_agreed is False and conv._triton_ok is False
+    assert sum("a peer declined" in r.message for r in caplog.records) == 1
+
+
+@pytest.mark.gpu
+def test_peers_that_agree_take_the_rung_after_one_collective(monkeypatch):
+    """Agreed ``1``: the exchange, then the kernel, one vote for the module's life."""
+    import distconv
+
+    votes, posted = _fake_mesh(monkeypatch, agreed=1)
+    launched = []
+    original = conv_mod._TritonConv3dFn.apply
+    monkeypatch.setattr(
+        conv_mod._TritonConv3dFn,
+        "apply",
+        staticmethod(lambda *a: launched.append(a) or original(*a)),
+    )
+
+    conv = _gpu_conv()
+    x = _gpu_input((1, 16, 8, 8, 8))
+    strategy = _StubStrategy((2, 1, 1))
+    outs = [conv(distconv.DCTensor.from_shard(x, strategy)) for _ in range(3)]
+
+    assert votes == [(1, dist.ReduceOp.MIN)]
+    assert conv._exchange_agreed is True and conv._triton_ok is True
+    assert len(launched) == 3
+    # Shard 0 of 2 has one neighbour, on its plus face: a send and a receive.
+    assert [op.op for op in posted] == [dist.isend, dist.irecv] * 3
+    for out in outs:
+        torch.testing.assert_close(
+            out._tensor.float(),
+            _padded_reference(conv, x).float(),
+            rtol=2e-2,
+            atol=2e-2,
+        )
+
+
+def test_a_latched_unproven_module_still_exchanges_and_skips_only_the_kernel(
+    monkeypatch,
+):
+    """Latched and unproven on an agreed module: ``_Halo3d`` then ``F.conv3d``,
+    neither ``_miopen_forward`` nor the kernel, and the module is then proven."""
+    import distconv
+
+    votes, posted = _fake_mesh(monkeypatch, agreed=1)
+    monkeypatch.setattr(conv_mod, "_use_triton", lambda *a, **kw: True)
+    monkeypatch.setattr(conv_mod, "_triton_failed", True)
+    served, launched = [], []
+    monkeypatch.setattr(
+        FastConv3d, "_miopen_forward", lambda self, input: served.append(input) or input
+    )
+    monkeypatch.setattr(
+        conv_mod._TritonConv3dFn, "apply", staticmethod(lambda *a: launched.append(a))
+    )
+
+    conv = _seeded_conv()
+    x = torch.randn(1, 16, 8, 8, 8)
+    out = conv(distconv.DCTensor.from_shard(x, _StubStrategy((2, 1, 1))))
+
+    assert served == [] and launched == []
+    assert len(posted) == 2, "the exchange was not posted"
+    assert votes == [(1, dist.ReduceOp.MIN)]
+    assert conv._triton_ok is True
+    torch.testing.assert_close(out._tensor, _padded_reference(conv, x))
+
+
+def test_a_local_verdict_that_flips_after_the_agreement_only_drops_the_kernel(
+    monkeypatch,
+):
+    """A later shape the predicate declines still exchanges here and only drops
+    the kernel; the local verdict is re-asked per new key, not per call."""
+    import distconv
+
+    votes, posted = _fake_mesh(monkeypatch, agreed=1)
+    asked = []
+    monkeypatch.setattr(
+        conv_mod,
+        "_use_triton",
+        lambda module, x, dc, plan, proven=False: (
+            asked.append(tuple(x.shape)) or x.shape[2] == 8
+        ),
+    )
+    served, launched = [], []
+    monkeypatch.setattr(
+        FastConv3d, "_miopen_forward", lambda self, input: served.append(input) or input
+    )
+    monkeypatch.setattr(
+        conv_mod._TritonConv3dFn,
+        "apply",
+        staticmethod(
+            lambda x, w, b, *rest: (
+                launched.append(x) or nn.functional.conv3d(x, w, b, *rest)
+            )
+        ),
+    )
+
+    conv = _seeded_conv()
+    strategy = _StubStrategy((2, 1, 1))
+    first = torch.randn(1, 16, 8, 8, 8)
+    later = torch.randn(1, 16, 6, 8, 8)
+
+    conv(distconv.DCTensor.from_shard(first, strategy))
+    assert conv._exchange_agreed is True and len(launched) == 1
+    out = conv(distconv.DCTensor.from_shard(later, strategy))
+    conv(distconv.DCTensor.from_shard(later, strategy))
+
+    assert asked == [(1, 16, 8, 8, 8), (1, 16, 6, 8, 8)]
+    assert votes == [(1, dist.ReduceOp.MIN)], "the agreement was taken again"
+    assert served == [] and len(launched) == 1
+    assert len(posted) == 6, "a call skipped the exchange"
+    torch.testing.assert_close(out._tensor, _padded_reference(conv, later))
+
+
+def test_a_shard_that_grows_too_thin_after_the_agreement_is_an_error(monkeypatch):
+    """Agreed ``True``, then a plan of ``None``: raise, rather than exchange alone."""
+    import distconv
+
+    _fake_mesh(monkeypatch, agreed=1)
+    monkeypatch.setattr(conv_mod, "_use_triton", lambda *a, **kw: True)
+    monkeypatch.setattr(
+        conv_mod._TritonConv3dFn,
+        "apply",
+        staticmethod(lambda x, w, b, *rest: nn.functional.conv3d(x, w, b, *rest)),
+    )
+    served = []
+    monkeypatch.setattr(
+        FastConv3d, "_miopen_forward", lambda self, input: served.append(input) or input
+    )
+
+    conv = _seeded_conv()
+    strategy = _StubStrategy((2, 1, 1))
+    conv(distconv.DCTensor.from_shard(torch.randn(1, 16, 8, 8, 8), strategy))
+    assert conv._exchange_agreed is True
+
+    thin = torch.randn(1, 16, 1, 8, 8)
+    with pytest.raises(
+        RuntimeError,
+        match=r"FastConv3d\(16, 32, .*\(1, 16, 1, 8, 8\).*SCAFFOLD_CONV_TRITON=0",
+    ):
+        conv(distconv.DCTensor.from_shard(thin, strategy))
+    assert served == [], "the thin shard went to DistConv's exchange alone"
+
+
+def test_a_call_with_nothing_to_exchange_takes_no_collective(monkeypatch):
+    """A plain tensor, an unsplit mesh, and ``k = 1`` on a split one never vote:
+    nobody exchanges on them."""
+    import distconv
+
+    votes, _ = _fake_mesh(monkeypatch, agreed=0)
+    conv = _seeded_conv()
+    x = torch.randn(1, 16, 8, 8, 8)
+
+    conv(x)
+    conv(distconv.DCTensor.from_shard(x, _StubStrategy((1, 1, 1))))
+    head = _seeded_conv(kernel_size=1, padding=0)
+    head(distconv.DCTensor.from_shard(x, _StubStrategy((2, 1, 1))))
+
+    assert votes == []
+    assert conv._exchange_agreed is None and head._exchange_agreed is None
+
+
+_RESULT = re.compile(
+    r"RESULT scenario=(\w+) rank=(\d) agreed=(True|False|None) local=(True|False) "
+    r"triton_ok=(True|False) kernel=(True|False) match=(True|False|skipped) "
+    r"miopen=(\d+) votes=(\d+)"
+)
+
+
+@pytest.mark.gpu
+def test_two_ranks_agree_on_the_exchange_whatever_one_of_them_decides():
+    """The real exchange on a real two-rank mesh, checked against ``F.conv3d`` on
+    the whole volume, then a local decline, a latch, and a thin shard -- each
+    must leave both ranks on the same side of the exchange.  A timeout is a
+    failure, since a hang is the regression."""
+    if torch.cuda.device_count() < 2:
+        pytest.skip("two CUDA devices are needed")
+    script = (
+        Path(__file__).resolve().parent
+        / "helpers"
+        / "rank_scripts"
+        / "conv3d_shards_2rank.py"
+    )
+    rc, out, err = mpi_runner.torchrun_gloo(str(script), n=2, timeout=900)
+    assert rc != -1, f"2-rank job hung\nstdout:\n{out}\nstderr:\n{err[-3000:]}"
+    assert rc == 0, f"2-rank job failed rc={rc}\nstdout:\n{out}\nstderr:\n{err[-3000:]}"
+    assert out.count("DONE") == 2, f"a rank did not finish\nstdout:\n{out}"
+
+    results = {}
+    for scenario, rank, *fields in _RESULT.findall(out):
+        names = ("agreed", "local", "triton_ok", "kernel", "match", "miopen", "votes")
+        results[scenario, rank] = dict(zip(names, fields))
+    expected = {
+        # Both ranks on the rung; both outputs are slices of the global answer.
+        ("uniform", "0"): "True True True True True 0 1",
+        ("uniform", "1"): "True True True True True 0 1",
+        # Rank 1's platform declines: rank 0 is outvoted, both go to DistConv.
+        ("peer_declines", "0"): "False True False False skipped 1 1",
+        ("peer_declines", "1"): "False False False False skipped 1 1",
+        # Rank 0 latched and unproven: it exchanges here and skips the kernel.
+        ("rank0_latched", "0"): "True True True False True 0 1",
+        ("rank0_latched", "1"): "True True True True True 0 1",
+        # Rank 1's shard is thinner than the halo: its plan is None, it votes
+        # no, and both go to DistConv rather than one of them.
+        ("thin_shard", "0"): "False True False False skipped 1 1",
+        ("thin_shard", "1"): "False False False False skipped 1 1",
+    }
+    assert set(results) == set(expected), f"missing results\nstdout:\n{out}"
+    for key, fields in expected.items():
+        assert " ".join(results[key].values()) == fields, (
+            f"{key[0]} rank {key[1]}: {results[key]}\nstdout:\n{out}"
+        )
 
 
 # ---------------------------------------------------------------------------

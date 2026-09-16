@@ -84,6 +84,16 @@ the rung is taken, and returns ``None`` for anything it could not read.  The
 failure mode of getting this wrong is a plausible-looking wrong gradient at
 scale, not a crash, so "no evidence of a problem" is not good enough.
 
+No rank-local input decides whether this rank exchanges here.  Every routing
+input -- the thin-shard check, the device, the layout, the ``is_supported``
+gate, the override, the latch -- is a fact about one rank, while the exchange
+is a collective: a rank declining alone would exchange through DistConv while
+its neighbour posted receives against this module, and the mesh would hang.
+So whether to exchange here is the ``MIN`` of every rank's local verdict,
+agreed once per module instance (:meth:`FastConv3d._agreed_to_exchange`); the
+latch and any later local change only choose the *kernel* run on the exchanged
+tensor, which communicates nothing.
+
 The exchange sends plain-contiguous buffers, which ``forward_halo_exchange``
 does not: it sends ``.contiguous(memory_format=channels_last_3d)``, which for
 ``C > 1`` is not plain-contiguous, and ``ProcessGroupGloo`` rejects it.  That,
@@ -198,10 +208,14 @@ both ``backward`` methods type-check slot 0 to turn the ``AttributeError`` into
 an actionable message.
 
 A latch is process-local, so under DDP one rank can end up on a different kernel
-from its peers.  The two rungs agree to fp32 rounding, not bitwise, so a rank
-that latches shifts its gradients and therefore the all-reduced ones.  That is
-the price of degrading instead of dying, and why the latch is as narrow as it is
-and why ``torch.OutOfMemoryError`` latches nothing.
+from its peers.  It never decides whether this rank *exchanges* here: that is
+agreed across the mesh (see "Sharding is the whole difficulty"), and a latched,
+unproven rank on an agreed module still exchanges through :class:`_Halo3d` and
+only hands the exchanged tensor to ``F.conv3d`` instead of the kernel.  The
+two rungs agree to fp32 rounding, not bitwise, so a rank that latches shifts
+its gradients and therefore the all-reduced ones.  That is the price of
+degrading instead of dying, and why the latch is as narrow as it is and why
+``torch.OutOfMemoryError`` latches nothing.
 
 Determinism
 ===========
@@ -263,6 +277,9 @@ _predicate_warned = False
 
 # Set once if the allowlist resolved empty; see _routing_declines.
 _allowlist_warned = False
+
+# Set once if a peer's decline outvoted this rank; see _agreed_to_exchange.
+_disagreement_warned = False
 
 #: One-element tensors, one per ``(dtype, device)``, from which
 #: :func:`_metadata_probe` expands.  Bounded by the number of dtype/device pairs
@@ -591,7 +608,9 @@ def _halo_plan(dc_input, strategy, x, weight, stride, padding, dilation):
       ``k = 2h + 1`` the halo'd input is ``D_loc + 2h`` long and produces exactly
       ``D_loc`` outputs at zero padding, aligned with the shard's global offset.
     * the shard is at least ``2 * halo`` thick, so the backward's two
-      accumulation regions do not overlap.
+      accumulation regions do not overlap.  The one check here that reads
+      the *local* shard, so a ragged split can answer differently on
+      neighbouring ranks; :meth:`FastConv3d._agreed_to_exchange` agrees it.
     * ``shard_to_rank`` is callable, since the exchange has to name its
       neighbours.
 
@@ -876,6 +895,9 @@ def _routing_declines(x, dc_input, plan, proven):
     with a failure behind it (the module docstring says which), and a copy would
     drift away from them.  Every clause is a pure predicate, so their order
     costs only the time to reach the answer.
+
+    Every clause is rank-local, so for a call that may exchange the answer is
+    only a vote; :meth:`FastConv3d._agreed_to_exchange` takes the ``MIN``.
     """
     if _triton_override is False:
         return True
@@ -1006,6 +1028,48 @@ def _use_triton(module, x, dc_input, plan, proven=False):
     except Exception as e:
         _warn_once_about_the_predicate(e)
         return False
+
+
+def _verdict_key(x, plan):
+    """Everything a local verdict reads, so it is recomputed only on a change."""
+    return (
+        tuple(x.shape),
+        x.dtype,
+        x.dim() == 5 and x.is_contiguous(memory_format=torch.channels_last_3d),
+        x.device,
+        None if plan is None else (tuple(plan.exchanges), tuple(plan.padding)),
+    )
+
+
+def _mesh_agrees(verdict, device):
+    """``MIN`` of ``int(verdict)`` over the default process group.
+
+    The ``.item()`` is a host sync, which is why the caller does this once per
+    module instance and not per call.
+    """
+    if "nccl" in dist.get_backend():
+        vote_device = device if device.type == "cuda" else torch.device("cuda")
+    else:
+        vote_device = torch.device("cpu")
+    vote = torch.tensor([int(bool(verdict))], dtype=torch.int64, device=vote_device)
+    dist.all_reduce(vote, op=dist.ReduceOp.MIN)
+    return bool(vote.item())
+
+
+def _warn_once_about_disagreement(module, local):
+    """Log that a peer's decline outvoted this rank, once per process."""
+    global _disagreement_warned
+    if _disagreement_warned:
+        return
+    _disagreement_warned = True
+    logger.warning(
+        f"Triton conv3d: this rank could serve {type(module).__name__}("
+        f"{module.in_channels}, {module.out_channels}, "
+        f"kernel_size={module.kernel_size}) for its {tuple(local.shape)} shard, "
+        "but a peer declined (its own log says why), so every rank runs this "
+        "module on MIOpen; the halo exchange is a collective and must not be "
+        "split across two implementations."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1202,11 +1266,46 @@ class FastConv3d(nn.Conv3d):
     #: nn.Module.__setattr__ is not free.
     _triton_ok = False
 
+    #: Whether every rank exchanges through this module: ``None`` until the
+    #: first call that may exchange, then the mesh-wide ``MIN`` of the local
+    #: verdicts, fixed for the life of the instance.  Plain class attributes,
+    #: like ``_triton_ok``.
+    _exchange_agreed = None
+
+    #: This rank's own verdict (the latch excluded) and the
+    #: :func:`_verdict_key` it was computed under.
+    _local_verdict = False
+    _local_key = None
+
     #: How this ladder is named in the startup kernel-selection line; see
     #: :func:`ScaFFold.unet._rungs.kernel_selection`.
     _rung_label = "Convolution"
 
-    def _triton_forward(self, local, plan=None):
+    def _agreed_to_exchange(self, local, dc_input, plan):
+        """Whether every rank exchanges this call through :class:`_Halo3d`.
+
+        The local verdict is :func:`_use_triton` with ``proven=True`` -- the
+        latch stays rank-local and chooses the kernel in
+        :meth:`_triton_forward` instead -- cached under :func:`_verdict_key`.
+        The agreed verdict is its ``MIN`` over the process group, taken once
+        per instance; after that no rank consults its own verdict about
+        whether to exchange.  Without a process group nothing is agreed or
+        cached.
+        """
+        if not (dist.is_available() and dist.is_initialized()):
+            return False
+        key = _verdict_key(local, plan)
+        if self._local_key != key:
+            self._local_verdict = _use_triton(self, local, dc_input, plan, proven=True)
+            self._local_key = key
+        if self._exchange_agreed is None:
+            agreed = _mesh_agrees(self._local_verdict, local.device)
+            self._exchange_agreed = agreed
+            if agreed != self._local_verdict:
+                _warn_once_about_disagreement(self, local)
+        return self._exchange_agreed
+
+    def _triton_forward(self, local, plan=None, kernel=True):
         """Run the Triton rung -- and its fallback -- on an unwrapped tensor.
 
         ``plan`` is :func:`_halo_plan`'s answer, or ``None`` for a tensor that
@@ -1223,6 +1322,10 @@ class FastConv3d(nn.Conv3d):
         the pair :func:`_halo_plan` proved equal to the module's own padding on
         the unexchanged shard.
 
+        ``kernel=False`` takes that same fallback without trying the kernel:
+        the exchange was agreed with the peers but this rank's own verdict (the
+        latch, or a local verdict that changed since) says not to launch.
+
         At one shard nothing has been sent and the exception is re-raised
         unchanged, so :meth:`forward`'s handler re-runs the whole call on the
         rung that defines the semantics -- which is also the only rung that can
@@ -1237,31 +1340,33 @@ class FastConv3d(nn.Conv3d):
         if exchanged:
             x = _Halo3d.apply(x, plan)
             padding = plan.padding
-        try:
-            return _TritonConv3dFn.apply(
-                x, weight, bias, self.stride, padding, self.dilation
-            )
-        except _triton_kernel_failures() as e:
-            if not exchanged:
-                raise
-            _latch_rung_failure(e)
-            # The one call this fallback must not answer either, for the same
-            # reason :meth:`forward`'s does not: a module already proven on the
-            # rung, failing while a backward is in flight, is a checkpoint
-            # recompute of a forward that ran on Triton, and the honest answer
-            # is the original exception rather than a differently-produced
-            # tensor substituted into a graph node that already holds one.
-            if self._triton_ok and _replaying_a_forward():
-                raise
-            # ``nn.Conv3d.forward``'s own body for ``padding_mode="zeros"``,
-            # which :func:`_use_triton` has already checked, on the halo'd
-            # operands.  A plain tensor, so DistConv's ``__torch_dispatch__``
-            # does not see it and no second exchange happens; ``grad_x`` still
-            # flows back through :class:`_Halo3d` and ``grad_weight`` is still
-            # computed against the halo'd input, as ``distconv_backward`` does.
-            return F.conv3d(
-                x, weight, bias, self.stride, padding, self.dilation, self.groups
-            )
+        if kernel:
+            try:
+                return _TritonConv3dFn.apply(
+                    x, weight, bias, self.stride, padding, self.dilation
+                )
+            except _triton_kernel_failures() as e:
+                if not exchanged:
+                    raise
+                _latch_rung_failure(e)
+                # The one call this fallback must not answer either, for the
+                # same reason :meth:`forward`'s does not: a module already
+                # proven on the rung, failing while a backward is in flight, is
+                # a checkpoint recompute of a forward that ran on Triton, and
+                # the honest answer is the original exception rather than a
+                # differently-produced tensor substituted into a graph node
+                # that already holds one.
+                if self._triton_ok and _replaying_a_forward():
+                    raise
+        # ``nn.Conv3d.forward``'s own body for ``padding_mode="zeros"``, which
+        # :func:`_use_triton` has already checked, on the halo'd operands.  A
+        # plain tensor, so DistConv's ``__torch_dispatch__`` does not see it and
+        # no second exchange happens; ``grad_x`` still flows back through
+        # :class:`_Halo3d` and ``grad_weight`` is still computed against the
+        # halo'd input, as ``distconv_backward`` does.
+        return F.conv3d(
+            x, weight, bias, self.stride, padding, self.dilation, self.groups
+        )
 
     def _miopen_forward(self, input):
         """The semantics-defining rung.
@@ -1278,13 +1383,14 @@ class FastConv3d(nn.Conv3d):
         # peek is a plain attribute read, no autograd involvement) and at the
         # tensor itself otherwise.
         local_view = input._tensor if distconv is not None else input
+        dc_input = input if distconv is not None else None
         # None for a plain tensor, and None also for a DCTensor whose strategy
         # this module cannot prove it can serve -- _use_triton tells the two
         # apart from ``dc_input``.
         plan = (
             _halo_plan(
-                input,
-                input._parallel_strategy,
+                dc_input,
+                dc_input._parallel_strategy,
                 local_view,
                 self.weight,
                 self.stride,
@@ -1295,17 +1401,41 @@ class FastConv3d(nn.Conv3d):
             else None
         )
 
-        if _use_triton(
-            self,
-            local_view,
-            input if distconv is not None else None,
-            plan,
-            proven=self._triton_ok,
-        ):
+        kernel = True
+        if dc_input is not None and (plan is None or plan.exchanges):
+            # A call some rank may exchange on.  A plan's exchanges are fixed
+            # by facts every rank shares; the shard's extent, the one local
+            # fact, can only turn the plan into ``None`` -- so ``None`` votes
+            # too, or its peers would block in the collective it skipped.
+            if plan is None and self._exchange_agreed:
+                raise RuntimeError(
+                    f"FastConv3d({self.in_channels}, {self.out_channels}, "
+                    f"kernel_size={self.kernel_size}): the local shard "
+                    f"{tuple(local_view.shape)} is thinner than this module's "
+                    "halo exchange allows, but the mesh already agreed to "
+                    "exchange through it, and one rank going to DistConv's "
+                    "exchange alone would hang the mesh. Give every shard at "
+                    "least 2 * (kernel // 2) voxels on each split dim, or set "
+                    f"{TRITON_ENV_VAR}=0."
+                )
+            # Only this rank's own verdict decides whether the kernel runs on
+            # the exchanged tensor; the latch lands there, never on the exchange.
+            take_rung = self._agreed_to_exchange(local_view, dc_input, plan)
+            kernel = self._local_verdict and not (
+                _triton_failed and not self._triton_ok
+            )
+        else:
+            take_rung = _use_triton(
+                self, local_view, dc_input, plan, proven=self._triton_ok
+            )
+
+        if take_rung:
             triton_failures = _triton_kernel_failures()
             try:
                 out = _run_local(
-                    input, distconv, lambda local: self._triton_forward(local, plan)
+                    input,
+                    distconv,
+                    lambda local: self._triton_forward(local, plan, kernel=kernel),
                 )
             except triton_failures as e:
                 # Every allowlisted exception is raised while compiling or
