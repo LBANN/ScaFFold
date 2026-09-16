@@ -1,0 +1,4325 @@
+{
+ "source": "torch.profiler traces of ScaFFold training steps on one MI300A per rank, reduced to the convolution kernels; ms are per step, so a problem at two sites carries both calls",
+ "configs": {
+  "A": {
+   "roofs": {
+    "hbm_TB_s": 3.3,
+    "fp32_TFLOP_s": 82.6,
+    "bf16_TFLOP_s": 600.0
+   },
+   "points": [
+    {
+     "direction": "bwd-data",
+     "shape_w": [
+      64,
+      64,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      64,
+      128,
+      128,
+      128
+     ],
+     "calls": 2,
+     "ms": 6.965773199999999,
+     "ms_per_call": 3.4828865999999996,
+     "flops": 927712935936,
+     "bytes": 1099745280,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "direction": "bwd-weight",
+     "shape_w": [
+      64,
+      64,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      64,
+      128,
+      128,
+      128
+     ],
+     "calls": 2,
+     "ms": 6.736167399999999,
+     "ms_per_call": 3.3680836999999997,
+     "flops": 927712935936,
+     "bytes": 1099745280,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "direction": "bwd-weight",
+     "shape_w": [
+      64,
+      128,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      64,
+      128,
+      128,
+      128
+     ],
+     "calls": 1,
+     "ms": 5.864816599999999,
+     "ms_per_call": 5.864816599999999,
+     "flops": 927712935936,
+     "bytes": 831309824,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "direction": "fwd",
+     "shape_w": [
+      64,
+      128,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      64,
+      128,
+      128,
+      128
+     ],
+     "calls": 1,
+     "ms": 4.377196,
+     "ms_per_call": 4.377196,
+     "flops": 927712935936,
+     "bytes": 831309824,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_fwd_multiple_abd_xdl_cshuffle"
+     ]
+    },
+    {
+     "direction": "bwd-data",
+     "shape_w": [
+      64,
+      128,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      64,
+      128,
+      128,
+      128
+     ],
+     "calls": 1,
+     "ms": 3.9947728,
+     "ms_per_call": 3.9947728,
+     "flops": 927712935936,
+     "bytes": 831309824,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "direction": "fwd",
+     "shape_w": [
+      64,
+      64,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      64,
+      128,
+      128,
+      128
+     ],
+     "calls": 2,
+     "ms": 3.8698826000000004,
+     "ms_per_call": 1.9349413000000002,
+     "flops": 927712935936,
+     "bytes": 1099745280,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_fwd_multiple_abd_xdl_cshuffle"
+     ]
+    },
+    {
+     "direction": "bwd-data",
+     "shape_w": [
+      128,
+      128,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      128,
+      64,
+      64,
+      64
+     ],
+     "calls": 2,
+     "ms": 2.340128,
+     "ms_per_call": 1.170064,
+     "flops": 463856467968,
+     "bytes": 283185152,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "direction": "bwd-weight",
+     "shape_w": [
+      128,
+      256,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      128,
+      64,
+      64,
+      64
+     ],
+     "calls": 1,
+     "ms": 1.9355754,
+     "ms_per_call": 1.9355754,
+     "flops": 463856467968,
+     "bytes": 216076288,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "direction": "fwd",
+     "shape_w": [
+      128,
+      256,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      128,
+      64,
+      64,
+      64
+     ],
+     "calls": 1,
+     "ms": 1.9287111999999997,
+     "ms_per_call": 1.9287111999999997,
+     "flops": 463856467968,
+     "bytes": 216076288,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_fwd_multiple_abd_xdl_cshuffle"
+     ]
+    },
+    {
+     "direction": "bwd-weight",
+     "shape_w": [
+      128,
+      128,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      128,
+      64,
+      64,
+      64
+     ],
+     "calls": 2,
+     "ms": 1.8784518,
+     "ms_per_call": 0.9392259,
+     "flops": 463856467968,
+     "bytes": 283185152,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "direction": "bwd-data",
+     "shape_w": [
+      128,
+      256,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      128,
+      64,
+      64,
+      64
+     ],
+     "calls": 1,
+     "ms": 1.6550452,
+     "ms_per_call": 1.6550452,
+     "flops": 463856467968,
+     "bytes": 216076288,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "direction": "bwd-data",
+     "shape_w": [
+      512,
+      512,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      512,
+      16,
+      16,
+      16
+     ],
+     "calls": 2,
+     "ms": 1.2805607999999995,
+     "ms_per_call": 0.6402803999999997,
+     "flops": 115964116992,
+     "bytes": 48644096,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "direction": "bwd-data",
+     "shape_w": [
+      256,
+      256,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      256,
+      32,
+      32,
+      32
+     ],
+     "calls": 2,
+     "ms": 1.2778908000000002,
+     "ms_per_call": 0.6389454000000001,
+     "flops": 231928233984,
+     "bytes": 80879616,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "direction": "bwd-data",
+     "shape_w": [
+      256,
+      512,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      256,
+      32,
+      32,
+      32
+     ],
+     "calls": 1,
+     "ms": 1.204611,
+     "ms_per_call": 1.204611,
+     "flops": 231928233984,
+     "bytes": 64102400,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "direction": "fwd",
+     "shape_w": [
+      128,
+      128,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      128,
+      64,
+      64,
+      64
+     ],
+     "calls": 2,
+     "ms": 1.1320158,
+     "ms_per_call": 0.5660079,
+     "flops": 463856467968,
+     "bytes": 283185152,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_fwd_xdl_cshuffle_v3"
+     ]
+    },
+    {
+     "direction": "bwd-weight",
+     "shape_w": [
+      256,
+      256,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      256,
+      32,
+      32,
+      32
+     ],
+     "calls": 2,
+     "ms": 1.0160068,
+     "ms_per_call": 0.5080034,
+     "flops": 231928233984,
+     "bytes": 80879616,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "direction": "bwd-weight",
+     "shape_w": [
+      256,
+      512,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      256,
+      32,
+      32,
+      32
+     ],
+     "calls": 1,
+     "ms": 0.9492030000000001,
+     "ms_per_call": 0.9492030000000001,
+     "flops": 231928233984,
+     "bytes": 64102400,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "direction": "bwd-data",
+     "shape_w": [
+      128,
+      64,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      128,
+      64,
+      64,
+      64
+     ],
+     "calls": 1,
+     "ms": 0.8503742000000001,
+     "ms_per_call": 0.8503742000000001,
+     "flops": 115964116992,
+     "bytes": 104350720,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "direction": "fwd",
+     "shape_w": [
+      256,
+      512,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      256,
+      32,
+      32,
+      32
+     ],
+     "calls": 1,
+     "ms": 0.8415982,
+     "ms_per_call": 0.8415982,
+     "flops": 231928233984,
+     "bytes": 64102400,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_fwd_xdl_cshuffle_v3_2lds"
+     ]
+    },
+    {
+     "direction": "bwd-data",
+     "shape_w": [
+      512,
+      1024,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      512,
+      16,
+      16,
+      16
+     ],
+     "calls": 1,
+     "ms": 0.7960936,
+     "ms_per_call": 0.7960936,
+     "flops": 115964116992,
+     "bytes": 44449792,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "direction": "fwd",
+     "shape_w": [
+      256,
+      256,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      256,
+      32,
+      32,
+      32
+     ],
+     "calls": 2,
+     "ms": 0.7612944000000001,
+     "ms_per_call": 0.3806472000000001,
+     "flops": 231928233984,
+     "bytes": 80879616,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_fwd_xdl_cshuffle_v3_2lds"
+     ]
+    },
+    {
+     "direction": "bwd-weight",
+     "shape_w": [
+      64,
+      3,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      64,
+      128,
+      128,
+      128
+     ],
+     "calls": 1,
+     "ms": 0.697061,
+     "ms_per_call": 0.697061,
+     "flops": 21743271936,
+     "bytes": 281627824,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_bwd_weight_xdl_cshuffle_v3"
+     ]
+    },
+    {
+     "direction": "bwd-data",
+     "shape_w": [
+      1024,
+      1024,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      1024,
+      8,
+      8,
+      8
+     ],
+     "calls": 1,
+     "ms": 0.602052,
+     "ms_per_call": 0.602052,
+     "flops": 28991029248,
+     "bytes": 59719680,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "direction": "fwd",
+     "shape_w": [
+      64,
+      3,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      64,
+      128,
+      128,
+      128
+     ],
+     "calls": 1,
+     "ms": 0.599212,
+     "ms_per_call": 0.599212,
+     "flops": 21743271936,
+     "bytes": 281627824,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_fwd_multiple_abd_xdl_cshuffle"
+     ]
+    },
+    {
+     "direction": "bwd-weight",
+     "shape_w": [
+      512,
+      512,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      512,
+      16,
+      16,
+      16
+     ],
+     "calls": 2,
+     "ms": 0.5551070000000001,
+     "ms_per_call": 0.27755350000000006,
+     "flops": 115964116992,
+     "bytes": 48644096,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "direction": "fwd",
+     "shape_w": [
+      512,
+      1024,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      512,
+      16,
+      16,
+      16
+     ],
+     "calls": 1,
+     "ms": 0.5310596,
+     "ms_per_call": 0.5310596,
+     "flops": 115964116992,
+     "bytes": 44449792,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_fwd_xdl_cshuffle_v3"
+     ]
+    },
+    {
+     "direction": "bwd-weight",
+     "shape_w": [
+      128,
+      64,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      128,
+      64,
+      64,
+      64
+     ],
+     "calls": 1,
+     "ms": 0.476603,
+     "ms_per_call": 0.476603,
+     "flops": 115964116992,
+     "bytes": 104350720,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "direction": "bwd-data",
+     "shape_w": [
+      256,
+      128,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      256,
+      32,
+      32,
+      32
+     ],
+     "calls": 1,
+     "ms": 0.46573100000000006,
+     "ms_per_call": 0.46573100000000006,
+     "flops": 57982058496,
+     "bytes": 28608512,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "direction": "bwd-weight",
+     "shape_w": [
+      512,
+      1024,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      512,
+      16,
+      16,
+      16
+     ],
+     "calls": 1,
+     "ms": 0.459491,
+     "ms_per_call": 0.459491,
+     "flops": 115964116992,
+     "bytes": 44449792,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "direction": "fwd",
+     "shape_w": [
+      512,
+      512,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      512,
+      16,
+      16,
+      16
+     ],
+     "calls": 2,
+     "ms": 0.44883180000000006,
+     "ms_per_call": 0.22441590000000003,
+     "flops": 115964116992,
+     "bytes": 48644096,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_fwd_xdl_cshuffle_v3"
+     ]
+    },
+    {
+     "direction": "bwd-data",
+     "shape_w": [
+      6,
+      64,
+      1,
+      1,
+      1
+     ],
+     "shape_out": [
+      1,
+      6,
+      128,
+      128,
+      128
+     ],
+     "calls": 1,
+     "ms": 0.43209780000000003,
+     "ms_per_call": 0.43209780000000003,
+     "flops": 1610612736,
+     "bytes": 293602048,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_batched_gemm_xdl_cshuffle_v3_multi_d",
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "direction": "bwd-data",
+     "shape_w": [
+      1024,
+      512,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      1024,
+      8,
+      8,
+      8
+     ],
+     "calls": 1,
+     "ms": 0.41720240000000003,
+     "ms_per_call": 0.41720240000000003,
+     "flops": 14495514624,
+     "bytes": 30384128,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "direction": "bwd-data",
+     "shape_w": [
+      128,
+      64,
+      2,
+      2,
+      2
+     ],
+     "shape_out": [
+      1,
+      64,
+      128,
+      128,
+      128
+     ],
+     "calls": 1,
+     "ms": 0.4025302,
+     "ms_per_call": 0.4025302,
+     "flops": 34359738368,
+     "bytes": 335675392,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "direction": "bwd-data",
+     "shape_w": [
+      512,
+      256,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      512,
+      16,
+      16,
+      16
+     ],
+     "calls": 1,
+     "ms": 0.31440959999999996,
+     "ms_per_call": 0.31440959999999996,
+     "flops": 28991029248,
+     "bytes": 14258176,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "direction": "bwd-weight",
+     "shape_w": [
+      256,
+      128,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      256,
+      32,
+      32,
+      32
+     ],
+     "calls": 1,
+     "ms": 0.3010976,
+     "ms_per_call": 0.3010976,
+     "flops": 57982058496,
+     "bytes": 28608512,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "direction": "fwd",
+     "shape_w": [
+      128,
+      64,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      128,
+      64,
+      64,
+      64
+     ],
+     "calls": 1,
+     "ms": 0.2942094,
+     "ms_per_call": 0.2942094,
+     "flops": 115964116992,
+     "bytes": 104350720,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_fwd_xdl_cshuffle_v3"
+     ]
+    },
+    {
+     "direction": "bwd-weight",
+     "shape_w": [
+      128,
+      64,
+      2,
+      2,
+      2
+     ],
+     "shape_out": [
+      1,
+      64,
+      128,
+      128,
+      128
+     ],
+     "calls": 1,
+     "ms": 0.241129,
+     "ms_per_call": 0.241129,
+     "flops": 34359738368,
+     "bytes": 335675392,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "direction": "bwd-weight",
+     "shape_w": [
+      1024,
+      1024,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      1024,
+      8,
+      8,
+      8
+     ],
+     "calls": 1,
+     "ms": 0.22791300000000003,
+     "ms_per_call": 0.22791300000000003,
+     "flops": 28991029248,
+     "bytes": 59719680,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "direction": "fwd",
+     "shape_w": [
+      1024,
+      1024,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      1024,
+      8,
+      8,
+      8
+     ],
+     "calls": 1,
+     "ms": 0.22668900000000006,
+     "ms_per_call": 0.22668900000000006,
+     "flops": 28991029248,
+     "bytes": 59719680,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_fwd_xdl_cshuffle_v3"
+     ]
+    },
+    {
+     "direction": "fwd",
+     "shape_w": [
+      256,
+      128,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      256,
+      32,
+      32,
+      32
+     ],
+     "calls": 1,
+     "ms": 0.2262728,
+     "ms_per_call": 0.2262728,
+     "flops": 57982058496,
+     "bytes": 28608512,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_fwd_xdl_cshuffle_v3_2lds"
+     ]
+    },
+    {
+     "direction": "bwd-data",
+     "shape_w": [
+      128,
+      64,
+      2,
+      2,
+      2
+     ],
+     "shape_out": [
+      1,
+      64,
+      128,
+      128,
+      128
+     ],
+     "calls": 1,
+     "ms": 0.20419479999999995,
+     "ms_per_call": 0.20419479999999995,
+     "flops": 34359738368,
+     "bytes": 335675392,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_fwd_multiple_abd_xdl_cshuffle"
+     ]
+    },
+    {
+     "direction": "bwd-weight",
+     "shape_w": [
+      256,
+      128,
+      2,
+      2,
+      2
+     ],
+     "shape_out": [
+      1,
+      128,
+      64,
+      64,
+      64
+     ],
+     "calls": 1,
+     "ms": 0.1750082,
+     "ms_per_call": 0.1750082,
+     "flops": 17179869184,
+     "bytes": 84410368,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "direction": "bwd-weight",
+     "shape_w": [
+      512,
+      256,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      512,
+      16,
+      16,
+      16
+     ],
+     "calls": 1,
+     "ms": 0.1558644,
+     "ms_per_call": 0.1558644,
+     "flops": 28991029248,
+     "bytes": 14258176,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "direction": "fwd",
+     "shape_w": [
+      512,
+      256,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      512,
+      16,
+      16,
+      16
+     ],
+     "calls": 1,
+     "ms": 0.12507999999999997,
+     "ms_per_call": 0.12507999999999997,
+     "flops": 28991029248,
+     "bytes": 14258176,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_fwd_xdl_cshuffle_v3"
+     ]
+    },
+    {
+     "direction": "bwd-data",
+     "shape_w": [
+      256,
+      128,
+      2,
+      2,
+      2
+     ],
+     "shape_out": [
+      1,
+      128,
+      64,
+      64,
+      64
+     ],
+     "calls": 1,
+     "ms": 0.12073600000000002,
+     "ms_per_call": 0.12073600000000002,
+     "flops": 17179869184,
+     "bytes": 84410368,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "direction": "bwd-weight",
+     "shape_w": [
+      1024,
+      512,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      1024,
+      8,
+      8,
+      8
+     ],
+     "calls": 1,
+     "ms": 0.11696,
+     "ms_per_call": 0.11696,
+     "flops": 14495514624,
+     "bytes": 30384128,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "direction": "fwd",
+     "shape_w": [
+      1024,
+      512,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      1024,
+      8,
+      8,
+      8
+     ],
+     "calls": 1,
+     "ms": 0.11122400000000002,
+     "ms_per_call": 0.11122400000000002,
+     "flops": 14495514624,
+     "bytes": 30384128,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_fwd_xdl_cshuffle_v3"
+     ]
+    },
+    {
+     "direction": "fwd",
+     "shape_w": [
+      6,
+      64,
+      1,
+      1,
+      1
+     ],
+     "shape_out": [
+      1,
+      6,
+      128,
+      128,
+      128
+     ],
+     "calls": 1,
+     "ms": 0.098064,
+     "ms_per_call": 0.098064,
+     "flops": 1610612736,
+     "bytes": 293602048,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_fwd_xdl_cshuffle_v3"
+     ]
+    },
+    {
+     "direction": "bwd-data",
+     "shape_w": [
+      256,
+      128,
+      2,
+      2,
+      2
+     ],
+     "shape_out": [
+      1,
+      128,
+      64,
+      64,
+      64
+     ],
+     "calls": 1,
+     "ms": 0.0906798,
+     "ms_per_call": 0.0906798,
+     "flops": 17179869184,
+     "bytes": 84410368,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_fwd_xdl_cshuffle_v3_2lds"
+     ]
+    },
+    {
+     "direction": "bwd-weight",
+     "shape_w": [
+      512,
+      256,
+      2,
+      2,
+      2
+     ],
+     "shape_out": [
+      1,
+      256,
+      32,
+      32,
+      32
+     ],
+     "calls": 1,
+     "ms": 0.08210360000000001,
+     "ms_per_call": 0.08210360000000001,
+     "flops": 8589934592,
+     "bytes": 23068672,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "direction": "bwd-data",
+     "shape_w": [
+      512,
+      256,
+      2,
+      2,
+      2
+     ],
+     "shape_out": [
+      1,
+      256,
+      32,
+      32,
+      32
+     ],
+     "calls": 1,
+     "ms": 0.06497159999999999,
+     "ms_per_call": 0.06497159999999999,
+     "flops": 8589934592,
+     "bytes": 23068672,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "direction": "bwd-data",
+     "shape_w": [
+      1024,
+      512,
+      2,
+      2,
+      2
+     ],
+     "shape_out": [
+      1,
+      512,
+      16,
+      16,
+      16
+     ],
+     "calls": 1,
+     "ms": 0.0560394,
+     "ms_per_call": 0.0560394,
+     "flops": 4294967296,
+     "bytes": 13631488,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "direction": "bwd-weight",
+     "shape_w": [
+      1024,
+      512,
+      2,
+      2,
+      2
+     ],
+     "shape_out": [
+      1,
+      512,
+      16,
+      16,
+      16
+     ],
+     "calls": 1,
+     "ms": 0.0500474,
+     "ms_per_call": 0.0500474,
+     "flops": 4294967296,
+     "bytes": 13631488,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "direction": "bwd-data",
+     "shape_w": [
+      512,
+      256,
+      2,
+      2,
+      2
+     ],
+     "shape_out": [
+      1,
+      256,
+      32,
+      32,
+      32
+     ],
+     "calls": 1,
+     "ms": 0.045799400000000004,
+     "ms_per_call": 0.045799400000000004,
+     "flops": 8589934592,
+     "bytes": 23068672,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_fwd_xdl_cshuffle_v3"
+     ]
+    },
+    {
+     "direction": "bwd-data",
+     "shape_w": [
+      1024,
+      512,
+      2,
+      2,
+      2
+     ],
+     "shape_out": [
+      1,
+      512,
+      16,
+      16,
+      16
+     ],
+     "calls": 1,
+     "ms": 0.0430394,
+     "ms_per_call": 0.0430394,
+     "flops": 4294967296,
+     "bytes": 13631488,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_fwd_xdl_cshuffle_v3"
+     ]
+    }
+   ]
+  },
+  "B": {
+   "roofs": {
+    "hbm_TB_s": 3.3,
+    "fp32_TFLOP_s": 82.6,
+    "bf16_TFLOP_s": 600.0
+   },
+   "points": [
+    {
+     "direction": "bwd-weight",
+     "shape_w": [
+      64,
+      128,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      64,
+      128,
+      256,
+      256
+     ],
+     "calls": 1,
+     "ms": 45401.1314925,
+     "ms_per_call": 45401.1314925,
+     "flops": 3710851743744,
+     "bytes": 3289434112,
+     "act_bytes": 2,
+     "solvers": [
+      "unknown"
+     ]
+    },
+    {
+     "direction": "bwd-data",
+     "shape_w": [
+      64,
+      128,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      64,
+      128,
+      256,
+      256
+     ],
+     "calls": 1,
+     "ms": 8199.9801325,
+     "ms_per_call": 8199.9801325,
+     "flops": 3710851743744,
+     "bytes": 3289434112,
+     "act_bytes": 2,
+     "solvers": [
+      "unknown"
+     ]
+    },
+    {
+     "direction": "bwd-weight",
+     "shape_w": [
+      64,
+      64,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      64,
+      128,
+      256,
+      256
+     ],
+     "calls": 2,
+     "ms": 25.9167195,
+     "ms_per_call": 12.95835975,
+     "flops": 3710851743744,
+     "bytes": 4363175936,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "direction": "bwd-data",
+     "shape_w": [
+      64,
+      64,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      64,
+      128,
+      256,
+      256
+     ],
+     "calls": 2,
+     "ms": 25.426656,
+     "ms_per_call": 12.713328,
+     "flops": 3710851743744,
+     "bytes": 4363175936,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "direction": "fwd",
+     "shape_w": [
+      64,
+      128,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      64,
+      128,
+      256,
+      256
+     ],
+     "calls": 1,
+     "ms": 18.8609605,
+     "ms_per_call": 18.8609605,
+     "flops": 3710851743744,
+     "bytes": 3289434112,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_fwd_multiple_d_grouped_gemm_xdl_cshuffle"
+     ]
+    },
+    {
+     "direction": "fwd",
+     "shape_w": [
+      64,
+      64,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      64,
+      128,
+      256,
+      256
+     ],
+     "calls": 2,
+     "ms": 13.952502500000001,
+     "ms_per_call": 6.976251250000001,
+     "flops": 3710851743744,
+     "bytes": 4363175936,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_fwd_multiple_abd_xdl_cshuffle"
+     ]
+    },
+    {
+     "direction": "bwd-data",
+     "shape_w": [
+      128,
+      128,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      128,
+      64,
+      128,
+      128
+     ],
+     "calls": 2,
+     "ms": 8.554731499999999,
+     "ms_per_call": 4.2773657499999995,
+     "flops": 1855425871872,
+     "bytes": 1109725184,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "direction": "bwd-weight",
+     "shape_w": [
+      128,
+      256,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      128,
+      64,
+      128,
+      128
+     ],
+     "calls": 1,
+     "ms": 7.4120025,
+     "ms_per_call": 7.4120025,
+     "flops": 1855425871872,
+     "bytes": 841289728,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "direction": "bwd-weight",
+     "shape_w": [
+      128,
+      128,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      128,
+      64,
+      128,
+      128
+     ],
+     "calls": 2,
+     "ms": 7.089618499999999,
+     "ms_per_call": 3.5448092499999997,
+     "flops": 1855425871872,
+     "bytes": 1109725184,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "direction": "bwd-data",
+     "shape_w": [
+      128,
+      256,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      128,
+      64,
+      128,
+      128
+     ],
+     "calls": 1,
+     "ms": 6.3417335,
+     "ms_per_call": 6.3417335,
+     "flops": 1855425871872,
+     "bytes": 841289728,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "direction": "fwd",
+     "shape_w": [
+      128,
+      256,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      128,
+      64,
+      128,
+      128
+     ],
+     "calls": 1,
+     "ms": 6.274173000000001,
+     "ms_per_call": 6.274173000000001,
+     "flops": 1855425871872,
+     "bytes": 841289728,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_fwd_multiple_abd_xdl_cshuffle"
+     ]
+    },
+    {
+     "direction": "fwd",
+     "shape_w": [
+      128,
+      128,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      128,
+      64,
+      128,
+      128
+     ],
+     "calls": 2,
+     "ms": 5.065991,
+     "ms_per_call": 2.5329955,
+     "flops": 1855425871872,
+     "bytes": 1109725184,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_fwd_multiple_abd_xdl_cshuffle"
+     ]
+    },
+    {
+     "direction": "bwd-data",
+     "shape_w": [
+      256,
+      256,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      256,
+      32,
+      64,
+      64
+     ],
+     "calls": 2,
+     "ms": 4.7582085,
+     "ms_per_call": 2.37910425,
+     "flops": 927712935936,
+     "bytes": 292954112,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "direction": "bwd-data",
+     "shape_w": [
+      256,
+      512,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      256,
+      32,
+      64,
+      64
+     ],
+     "calls": 1,
+     "ms": 3.9987380000000003,
+     "ms_per_call": 3.9987380000000003,
+     "flops": 927712935936,
+     "bytes": 225845248,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "direction": "fwd",
+     "shape_w": [
+      256,
+      512,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      256,
+      32,
+      64,
+      64
+     ],
+     "calls": 1,
+     "ms": 3.766741,
+     "ms_per_call": 3.766741,
+     "flops": 927712935936,
+     "bytes": 225845248,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_fwd_multiple_abd_xdl_cshuffle"
+     ]
+    },
+    {
+     "direction": "bwd-weight",
+     "shape_w": [
+      256,
+      512,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      256,
+      32,
+      64,
+      64
+     ],
+     "calls": 1,
+     "ms": 3.4461285,
+     "ms_per_call": 3.4461285,
+     "flops": 927712935936,
+     "bytes": 225845248,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "direction": "bwd-weight",
+     "shape_w": [
+      256,
+      256,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      256,
+      32,
+      64,
+      64
+     ],
+     "calls": 2,
+     "ms": 3.4186365,
+     "ms_per_call": 1.70931825,
+     "flops": 927712935936,
+     "bytes": 292954112,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "direction": "bwd-weight",
+     "shape_w": [
+      64,
+      3,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      64,
+      128,
+      256,
+      256
+     ],
+     "calls": 1,
+     "ms": 3.172046,
+     "ms_per_call": 3.172046,
+     "flops": 86973087744,
+     "bytes": 1125672112,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_bwd_weight_xdl_cshuffle_v3"
+     ]
+    },
+    {
+     "direction": "bwd-data",
+     "shape_w": [
+      128,
+      64,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      128,
+      64,
+      128,
+      128
+     ],
+     "calls": 1,
+     "ms": 3.1461859999999997,
+     "ms_per_call": 3.1461859999999997,
+     "flops": 463856467968,
+     "bytes": 411649024,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "direction": "bwd-data",
+     "shape_w": [
+      512,
+      512,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      512,
+      16,
+      32,
+      32
+     ],
+     "calls": 2,
+     "ms": 2.7844919999999997,
+     "ms_per_call": 1.3922459999999999,
+     "flops": 463856467968,
+     "bytes": 104480768,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "direction": "fwd",
+     "shape_w": [
+      256,
+      256,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      256,
+      32,
+      64,
+      64
+     ],
+     "calls": 2,
+     "ms": 2.6846455,
+     "ms_per_call": 1.34232275,
+     "flops": 927712935936,
+     "bytes": 292954112,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_fwd_xdl_cshuffle_v3"
+     ]
+    },
+    {
+     "direction": "fwd",
+     "shape_w": [
+      64,
+      3,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      64,
+      128,
+      256,
+      256
+     ],
+     "calls": 1,
+     "ms": 2.4063944999999998,
+     "ms_per_call": 2.4063944999999998,
+     "flops": 86973087744,
+     "bytes": 1125672112,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_fwd_multiple_abd_xdl_cshuffle"
+     ]
+    },
+    {
+     "direction": "bwd-data",
+     "shape_w": [
+      512,
+      1024,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      512,
+      16,
+      32,
+      32
+     ],
+     "calls": 1,
+     "ms": 2.3372435,
+     "ms_per_call": 2.3372435,
+     "flops": 463856467968,
+     "bytes": 87703552,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "direction": "fwd",
+     "shape_w": [
+      512,
+      1024,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      512,
+      16,
+      32,
+      32
+     ],
+     "calls": 1,
+     "ms": 2.2222079999999997,
+     "ms_per_call": 2.2222079999999997,
+     "flops": 463856467968,
+     "bytes": 87703552,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_fwd_xdl_cshuffle_v3"
+     ]
+    },
+    {
+     "direction": "bwd-weight",
+     "shape_w": [
+      128,
+      64,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      128,
+      64,
+      128,
+      128
+     ],
+     "calls": 1,
+     "ms": 1.8766955,
+     "ms_per_call": 1.8766955,
+     "flops": 463856467968,
+     "bytes": 411649024,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "direction": "bwd-weight",
+     "shape_w": [
+      512,
+      512,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      512,
+      16,
+      32,
+      32
+     ],
+     "calls": 2,
+     "ms": 1.8518240000000001,
+     "ms_per_call": 0.9259120000000001,
+     "flops": 463856467968,
+     "bytes": 104480768,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "direction": "bwd-data",
+     "shape_w": [
+      6,
+      64,
+      1,
+      1,
+      1
+     ],
+     "shape_out": [
+      1,
+      6,
+      128,
+      256,
+      256
+     ],
+     "calls": 1,
+     "ms": 1.7305380000000001,
+     "ms_per_call": 1.7305380000000001,
+     "flops": 6442450944,
+     "bytes": 1174405888,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_batched_gemm_xdl_cshuffle_v3_multi_d",
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "direction": "bwd-weight",
+     "shape_w": [
+      512,
+      1024,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      512,
+      16,
+      32,
+      32
+     ],
+     "calls": 1,
+     "ms": 1.7248539999999999,
+     "ms_per_call": 1.7248539999999999,
+     "flops": 463856467968,
+     "bytes": 87703552,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "direction": "bwd-data",
+     "shape_w": [
+      128,
+      64,
+      2,
+      2,
+      2
+     ],
+     "shape_out": [
+      1,
+      64,
+      128,
+      256,
+      256
+     ],
+     "calls": 1,
+     "ms": 1.6491325000000001,
+     "ms_per_call": 1.6491325000000001,
+     "flops": 137438953472,
+     "bytes": 1342308352,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "direction": "fwd",
+     "shape_w": [
+      512,
+      512,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      512,
+      16,
+      32,
+      32
+     ],
+     "calls": 2,
+     "ms": 1.6448425000000002,
+     "ms_per_call": 0.8224212500000001,
+     "flops": 463856467968,
+     "bytes": 104480768,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_fwd_xdl_cshuffle_v3"
+     ]
+    },
+    {
+     "direction": "bwd-data",
+     "shape_w": [
+      256,
+      128,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      256,
+      32,
+      64,
+      64
+     ],
+     "calls": 1,
+     "ms": 1.5800075,
+     "ms_per_call": 1.5800075,
+     "flops": 231928233984,
+     "bytes": 106792960,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "direction": "bwd-data",
+     "shape_w": [
+      1024,
+      1024,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      1024,
+      8,
+      16,
+      16
+     ],
+     "calls": 1,
+     "ms": 1.5750725,
+     "ms_per_call": 1.5750725,
+     "flops": 115964116992,
+     "bytes": 67452928,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "direction": "fwd",
+     "shape_w": [
+      128,
+      64,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      128,
+      64,
+      128,
+      128
+     ],
+     "calls": 1,
+     "ms": 1.26438,
+     "ms_per_call": 1.26438,
+     "flops": 463856467968,
+     "bytes": 411649024,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_fwd_multiple_abd_xdl_cshuffle"
+     ]
+    },
+    {
+     "direction": "bwd-weight",
+     "shape_w": [
+      128,
+      64,
+      2,
+      2,
+      2
+     ],
+     "shape_out": [
+      1,
+      64,
+      128,
+      256,
+      256
+     ],
+     "calls": 1,
+     "ms": 1.2134695000000002,
+     "ms_per_call": 1.2134695000000002,
+     "flops": 137438953472,
+     "bytes": 1342308352,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "direction": "bwd-weight",
+     "shape_w": [
+      256,
+      128,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      256,
+      32,
+      64,
+      64
+     ],
+     "calls": 1,
+     "ms": 0.924137,
+     "ms_per_call": 0.924137,
+     "flops": 231928233984,
+     "bytes": 106792960,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "direction": "bwd-data",
+     "shape_w": [
+      512,
+      256,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      512,
+      16,
+      32,
+      32
+     ],
+     "calls": 1,
+     "ms": 0.7795855,
+     "ms_per_call": 0.7795855,
+     "flops": 115964116992,
+     "bytes": 34508800,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "direction": "bwd-data",
+     "shape_w": [
+      1024,
+      512,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      1024,
+      8,
+      16,
+      16
+     ],
+     "calls": 1,
+     "ms": 0.7379300000000001,
+     "ms_per_call": 0.7379300000000001,
+     "flops": 57982058496,
+     "bytes": 35823616,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "direction": "bwd-data",
+     "shape_w": [
+      128,
+      64,
+      2,
+      2,
+      2
+     ],
+     "shape_out": [
+      1,
+      64,
+      128,
+      256,
+      256
+     ],
+     "calls": 1,
+     "ms": 0.70984,
+     "ms_per_call": 0.70984,
+     "flops": 137438953472,
+     "bytes": 1342308352,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_fwd_multiple_d_grouped_gemm_xdl_cshuffle"
+     ]
+    },
+    {
+     "direction": "fwd",
+     "shape_w": [
+      256,
+      128,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      256,
+      32,
+      64,
+      64
+     ],
+     "calls": 1,
+     "ms": 0.659944,
+     "ms_per_call": 0.659944,
+     "flops": 231928233984,
+     "bytes": 106792960,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_fwd_multiple_d_grouped_gemm_xdl_cshuffle"
+     ]
+    },
+    {
+     "direction": "bwd-weight",
+     "shape_w": [
+      1024,
+      1024,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      1024,
+      8,
+      16,
+      16
+     ],
+     "calls": 1,
+     "ms": 0.537629,
+     "ms_per_call": 0.537629,
+     "flops": 115964116992,
+     "bytes": 67452928,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "direction": "fwd",
+     "shape_w": [
+      6,
+      64,
+      1,
+      1,
+      1
+     ],
+     "shape_out": [
+      1,
+      6,
+      128,
+      256,
+      256
+     ],
+     "calls": 1,
+     "ms": 0.5187984999999999,
+     "ms_per_call": 0.5187984999999999,
+     "flops": 6442450944,
+     "bytes": 1174405888,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_fwd_xdl_cshuffle_v3"
+     ]
+    },
+    {
+     "direction": "bwd-weight",
+     "shape_w": [
+      512,
+      256,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      512,
+      16,
+      32,
+      32
+     ],
+     "calls": 1,
+     "ms": 0.49540300000000004,
+     "ms_per_call": 0.49540300000000004,
+     "flops": 115964116992,
+     "bytes": 34508800,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "direction": "bwd-data",
+     "shape_w": [
+      256,
+      128,
+      2,
+      2,
+      2
+     ],
+     "shape_out": [
+      1,
+      128,
+      64,
+      128,
+      128
+     ],
+     "calls": 1,
+     "ms": 0.4456825,
+     "ms_per_call": 0.4456825,
+     "flops": 68719476736,
+     "bytes": 336068608,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "direction": "fwd",
+     "shape_w": [
+      1024,
+      1024,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      1024,
+      8,
+      16,
+      16
+     ],
+     "calls": 1,
+     "ms": 0.4419825,
+     "ms_per_call": 0.4419825,
+     "flops": 115964116992,
+     "bytes": 67452928,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_fwd_xdl_cshuffle_v3"
+     ]
+    },
+    {
+     "direction": "bwd-weight",
+     "shape_w": [
+      256,
+      128,
+      2,
+      2,
+      2
+     ],
+     "shape_out": [
+      1,
+      128,
+      64,
+      128,
+      128
+     ],
+     "calls": 1,
+     "ms": 0.44074300000000005,
+     "ms_per_call": 0.44074300000000005,
+     "flops": 68719476736,
+     "bytes": 336068608,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "direction": "fwd",
+     "shape_w": [
+      512,
+      256,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      512,
+      16,
+      32,
+      32
+     ],
+     "calls": 1,
+     "ms": 0.409583,
+     "ms_per_call": 0.409583,
+     "flops": 115964116992,
+     "bytes": 34508800,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_fwd_xdl_cshuffle_v3_2lds"
+     ]
+    },
+    {
+     "direction": "bwd-data",
+     "shape_w": [
+      256,
+      128,
+      2,
+      2,
+      2
+     ],
+     "shape_out": [
+      1,
+      128,
+      64,
+      128,
+      128
+     ],
+     "calls": 1,
+     "ms": 0.37861199999999995,
+     "ms_per_call": 0.37861199999999995,
+     "flops": 68719476736,
+     "bytes": 336068608,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_fwd_multiple_abd_xdl_cshuffle"
+     ]
+    },
+    {
+     "direction": "bwd-weight",
+     "shape_w": [
+      1024,
+      512,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      1024,
+      8,
+      16,
+      16
+     ],
+     "calls": 1,
+     "ms": 0.30729700000000004,
+     "ms_per_call": 0.30729700000000004,
+     "flops": 57982058496,
+     "bytes": 35823616,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "direction": "bwd-weight",
+     "shape_w": [
+      512,
+      256,
+      2,
+      2,
+      2
+     ],
+     "shape_out": [
+      1,
+      256,
+      32,
+      64,
+      64
+     ],
+     "calls": 1,
+     "ms": 0.23550100000000002,
+     "ms_per_call": 0.23550100000000002,
+     "flops": 34359738368,
+     "bytes": 85983232,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "direction": "fwd",
+     "shape_w": [
+      1024,
+      512,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      1024,
+      8,
+      16,
+      16
+     ],
+     "calls": 1,
+     "ms": 0.227181,
+     "ms_per_call": 0.227181,
+     "flops": 57982058496,
+     "bytes": 35823616,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_fwd_xdl_cshuffle_v3"
+     ]
+    },
+    {
+     "direction": "bwd-data",
+     "shape_w": [
+      512,
+      256,
+      2,
+      2,
+      2
+     ],
+     "shape_out": [
+      1,
+      256,
+      32,
+      64,
+      64
+     ],
+     "calls": 1,
+     "ms": 0.18425999999999998,
+     "ms_per_call": 0.18425999999999998,
+     "flops": 34359738368,
+     "bytes": 85983232,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "direction": "bwd-weight",
+     "shape_w": [
+      1024,
+      512,
+      2,
+      2,
+      2
+     ],
+     "shape_out": [
+      1,
+      512,
+      16,
+      32,
+      32
+     ],
+     "calls": 1,
+     "ms": 0.14881999999999998,
+     "ms_per_call": 0.14881999999999998,
+     "flops": 17179869184,
+     "bytes": 29360128,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "direction": "bwd-data",
+     "shape_w": [
+      512,
+      256,
+      2,
+      2,
+      2
+     ],
+     "shape_out": [
+      1,
+      256,
+      32,
+      64,
+      64
+     ],
+     "calls": 1,
+     "ms": 0.14338,
+     "ms_per_call": 0.14338,
+     "flops": 34359738368,
+     "bytes": 85983232,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_fwd_xdl_cshuffle_v3_2lds"
+     ]
+    },
+    {
+     "direction": "bwd-data",
+     "shape_w": [
+      1024,
+      512,
+      2,
+      2,
+      2
+     ],
+     "shape_out": [
+      1,
+      512,
+      16,
+      32,
+      32
+     ],
+     "calls": 1,
+     "ms": 0.1153345,
+     "ms_per_call": 0.1153345,
+     "flops": 17179869184,
+     "bytes": 29360128,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "direction": "bwd-data",
+     "shape_w": [
+      1024,
+      512,
+      2,
+      2,
+      2
+     ],
+     "shape_out": [
+      1,
+      512,
+      16,
+      32,
+      32
+     ],
+     "calls": 1,
+     "ms": 0.0815995,
+     "ms_per_call": 0.0815995,
+     "flops": 17179869184,
+     "bytes": 29360128,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_fwd_xdl_cshuffle_v3"
+     ]
+    }
+   ]
+  },
+  "C": {
+   "roofs": {
+    "hbm_TB_s": 3.3,
+    "fp32_TFLOP_s": 82.6,
+    "bf16_TFLOP_s": 600.0
+   },
+   "points": [
+    {
+     "direction": "bwd-data",
+     "shape_w": [
+      64,
+      64,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      64,
+      64,
+      256,
+      256
+     ],
+     "calls": 2,
+     "ms": 13.071952199999998,
+     "ms_per_call": 6.535976099999999,
+     "flops": 1855425871872,
+     "bytes": 2198849536,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "direction": "bwd-weight",
+     "shape_w": [
+      64,
+      128,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      64,
+      64,
+      256,
+      256
+     ],
+     "calls": 1,
+     "ms": 12.2944824,
+     "ms_per_call": 12.2944824,
+     "flops": 1855425871872,
+     "bytes": 1661978624,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "direction": "bwd-weight",
+     "shape_w": [
+      64,
+      64,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      64,
+      64,
+      256,
+      256
+     ],
+     "calls": 2,
+     "ms": 12.0946394,
+     "ms_per_call": 6.0473197,
+     "flops": 1855425871872,
+     "bytes": 2198849536,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "direction": "fwd",
+     "shape_w": [
+      64,
+      128,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      64,
+      64,
+      256,
+      256
+     ],
+     "calls": 1,
+     "ms": 8.274889,
+     "ms_per_call": 8.274889,
+     "flops": 1855425871872,
+     "bytes": 1661978624,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_fwd_multiple_abd_xdl_cshuffle"
+     ]
+    },
+    {
+     "direction": "bwd-data",
+     "shape_w": [
+      64,
+      128,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      64,
+      64,
+      256,
+      256
+     ],
+     "calls": 1,
+     "ms": 8.134588400000002,
+     "ms_per_call": 8.134588400000002,
+     "flops": 1855425871872,
+     "bytes": 1661978624,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "direction": "fwd",
+     "shape_w": [
+      64,
+      64,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      64,
+      64,
+      256,
+      256
+     ],
+     "calls": 2,
+     "ms": 7.563052600000001,
+     "ms_per_call": 3.7815263000000003,
+     "flops": 1855425871872,
+     "bytes": 2198849536,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_fwd_multiple_abd_xdl_cshuffle"
+     ]
+    },
+    {
+     "direction": "bwd-data",
+     "shape_w": [
+      128,
+      128,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      128,
+      32,
+      128,
+      128
+     ],
+     "calls": 2,
+     "ms": 4.3724102,
+     "ms_per_call": 2.1862051,
+     "flops": 927712935936,
+     "bytes": 564400128,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "direction": "bwd-data",
+     "shape_w": [
+      128,
+      256,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      128,
+      32,
+      128,
+      128
+     ],
+     "calls": 1,
+     "ms": 3.8658167999999997,
+     "ms_per_call": 3.8658167999999997,
+     "flops": 927712935936,
+     "bytes": 430182400,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "direction": "bwd-weight",
+     "shape_w": [
+      128,
+      256,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      128,
+      32,
+      128,
+      128
+     ],
+     "calls": 1,
+     "ms": 3.7908962,
+     "ms_per_call": 3.7908962,
+     "flops": 927712935936,
+     "bytes": 430182400,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "direction": "bwd-weight",
+     "shape_w": [
+      128,
+      128,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      128,
+      32,
+      128,
+      128
+     ],
+     "calls": 2,
+     "ms": 3.759783399999999,
+     "ms_per_call": 1.8798916999999995,
+     "flops": 927712935936,
+     "bytes": 564400128,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "direction": "fwd",
+     "shape_w": [
+      128,
+      256,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      128,
+      32,
+      128,
+      128
+     ],
+     "calls": 1,
+     "ms": 3.7216512,
+     "ms_per_call": 3.7216512,
+     "flops": 927712935936,
+     "bytes": 430182400,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_fwd_multiple_abd_xdl_cshuffle"
+     ]
+    },
+    {
+     "direction": "fwd",
+     "shape_w": [
+      128,
+      128,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      128,
+      32,
+      128,
+      128
+     ],
+     "calls": 2,
+     "ms": 2.802560599999999,
+     "ms_per_call": 1.4012802999999996,
+     "flops": 927712935936,
+     "bytes": 564400128,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_fwd_multiple_abd_xdl_cshuffle"
+     ]
+    },
+    {
+     "direction": "bwd-data",
+     "shape_w": [
+      256,
+      256,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      256,
+      16,
+      64,
+      64
+     ],
+     "calls": 2,
+     "ms": 2.5592682000000004,
+     "ms_per_call": 1.2796341000000002,
+     "flops": 463856467968,
+     "bytes": 154476544,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "direction": "bwd-data",
+     "shape_w": [
+      256,
+      512,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      256,
+      16,
+      64,
+      64
+     ],
+     "calls": 1,
+     "ms": 2.4556321999999997,
+     "ms_per_call": 2.4556321999999997,
+     "flops": 463856467968,
+     "bytes": 120922112,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "direction": "fwd",
+     "shape_w": [
+      256,
+      512,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      256,
+      16,
+      64,
+      64
+     ],
+     "calls": 1,
+     "ms": 2.0743972,
+     "ms_per_call": 2.0743972,
+     "flops": 463856467968,
+     "bytes": 120922112,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_fwd_xdl_cshuffle_v3"
+     ]
+    },
+    {
+     "direction": "bwd-weight",
+     "shape_w": [
+      256,
+      256,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      256,
+      16,
+      64,
+      64
+     ],
+     "calls": 2,
+     "ms": 1.968621,
+     "ms_per_call": 0.9843105,
+     "flops": 463856467968,
+     "bytes": 154476544,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "direction": "bwd-weight",
+     "shape_w": [
+      256,
+      512,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      256,
+      16,
+      64,
+      64
+     ],
+     "calls": 1,
+     "ms": 1.7405722000000001,
+     "ms_per_call": 1.7405722000000001,
+     "flops": 463856467968,
+     "bytes": 120922112,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "direction": "bwd-data",
+     "shape_w": [
+      128,
+      64,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      128,
+      32,
+      128,
+      128
+     ],
+     "calls": 1,
+     "ms": 1.6875415999999999,
+     "ms_per_call": 1.6875415999999999,
+     "flops": 231928233984,
+     "bytes": 208208896,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "direction": "bwd-data",
+     "shape_w": [
+      512,
+      512,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      512,
+      8,
+      32,
+      32
+     ],
+     "calls": 2,
+     "ms": 1.6378202000000002,
+     "ms_per_call": 0.8189101000000001,
+     "flops": 231928233984,
+     "bytes": 68763648,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "direction": "fwd",
+     "shape_w": [
+      256,
+      256,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      256,
+      16,
+      64,
+      64
+     ],
+     "calls": 2,
+     "ms": 1.5205529999999998,
+     "ms_per_call": 0.7602764999999999,
+     "flops": 463856467968,
+     "bytes": 154476544,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_fwd_xdl_cshuffle_v3"
+     ]
+    },
+    {
+     "direction": "bwd-data",
+     "shape_w": [
+      512,
+      1024,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      512,
+      8,
+      32,
+      32
+     ],
+     "calls": 1,
+     "ms": 1.4804898,
+     "ms_per_call": 1.4804898,
+     "flops": 231928233984,
+     "bytes": 60375040,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "direction": "bwd-weight",
+     "shape_w": [
+      64,
+      3,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      64,
+      64,
+      256,
+      256
+     ],
+     "calls": 1,
+     "ms": 1.4546758,
+     "ms_per_call": 1.4546758,
+     "flops": 43486543872,
+     "bytes": 563240624,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_bwd_weight_xdl_cshuffle_v3"
+     ]
+    },
+    {
+     "direction": "fwd",
+     "shape_w": [
+      512,
+      1024,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      512,
+      8,
+      32,
+      32
+     ],
+     "calls": 1,
+     "ms": 1.2632922,
+     "ms_per_call": 1.2632922,
+     "flops": 231928233984,
+     "bytes": 60375040,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_fwd_xdl_cshuffle_v3"
+     ]
+    },
+    {
+     "direction": "fwd",
+     "shape_w": [
+      64,
+      3,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      64,
+      64,
+      256,
+      256
+     ],
+     "calls": 1,
+     "ms": 1.2132577999999998,
+     "ms_per_call": 1.2132577999999998,
+     "flops": 43486543872,
+     "bytes": 563240624,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_fwd_multiple_abd_xdl_cshuffle"
+     ]
+    },
+    {
+     "direction": "fwd",
+     "shape_w": [
+      512,
+      512,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      512,
+      8,
+      32,
+      32
+     ],
+     "calls": 2,
+     "ms": 1.1699982,
+     "ms_per_call": 0.5849991,
+     "flops": 231928233984,
+     "bytes": 68763648,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_fwd_xdl_cshuffle_v3"
+     ]
+    },
+    {
+     "direction": "bwd-weight",
+     "shape_w": [
+      512,
+      512,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      512,
+      8,
+      32,
+      32
+     ],
+     "calls": 2,
+     "ms": 1.0142447999999997,
+     "ms_per_call": 0.5071223999999999,
+     "flops": 231928233984,
+     "bytes": 68763648,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "direction": "bwd-weight",
+     "shape_w": [
+      512,
+      1024,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      512,
+      8,
+      32,
+      32
+     ],
+     "calls": 1,
+     "ms": 0.9532458,
+     "ms_per_call": 0.9532458,
+     "flops": 231928233984,
+     "bytes": 60375040,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "direction": "bwd-data",
+     "shape_w": [
+      1024,
+      1024,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      1024,
+      4,
+      16,
+      16
+     ],
+     "calls": 1,
+     "ms": 0.9524474000000002,
+     "ms_per_call": 0.9524474000000002,
+     "flops": 57982058496,
+     "bytes": 62701568,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "direction": "bwd-weight",
+     "shape_w": [
+      128,
+      64,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      128,
+      32,
+      128,
+      128
+     ],
+     "calls": 1,
+     "ms": 0.9152229999999999,
+     "ms_per_call": 0.9152229999999999,
+     "flops": 231928233984,
+     "bytes": 208208896,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "direction": "bwd-data",
+     "shape_w": [
+      6,
+      64,
+      1,
+      1,
+      1
+     ],
+     "shape_out": [
+      1,
+      6,
+      64,
+      256,
+      256
+     ],
+     "calls": 1,
+     "ms": 0.8846234000000001,
+     "ms_per_call": 0.8846234000000001,
+     "flops": 3221225472,
+     "bytes": 587203328,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_batched_gemm_xdl_cshuffle_v3_multi_d",
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "direction": "bwd-data",
+     "shape_w": [
+      128,
+      64,
+      2,
+      2,
+      2
+     ],
+     "shape_out": [
+      1,
+      64,
+      64,
+      256,
+      256
+     ],
+     "calls": 1,
+     "ms": 0.8154062,
+     "ms_per_call": 0.8154062,
+     "flops": 68719476736,
+     "bytes": 671219712,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "direction": "bwd-data",
+     "shape_w": [
+      256,
+      128,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      256,
+      16,
+      64,
+      64
+     ],
+     "calls": 1,
+     "ms": 0.7486138,
+     "ms_per_call": 0.7486138,
+     "flops": 115964116992,
+     "bytes": 55396352,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "direction": "bwd-data",
+     "shape_w": [
+      512,
+      256,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      512,
+      8,
+      32,
+      32
+     ],
+     "calls": 1,
+     "ms": 0.707733,
+     "ms_per_call": 0.707733,
+     "flops": 57982058496,
+     "bytes": 21385216,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "direction": "bwd-data",
+     "shape_w": [
+      1024,
+      512,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      1024,
+      4,
+      16,
+      16
+     ],
+     "calls": 1,
+     "ms": 0.5983006,
+     "ms_per_call": 0.5983006,
+     "flops": 28991029248,
+     "bytes": 32399360,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "direction": "fwd",
+     "shape_w": [
+      128,
+      64,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      128,
+      32,
+      128,
+      128
+     ],
+     "calls": 1,
+     "ms": 0.5931162000000001,
+     "ms_per_call": 0.5931162000000001,
+     "flops": 231928233984,
+     "bytes": 208208896,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_fwd_multiple_d_grouped_gemm_xdl_cshuffle"
+     ]
+    },
+    {
+     "direction": "bwd-weight",
+     "shape_w": [
+      256,
+      128,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      256,
+      16,
+      64,
+      64
+     ],
+     "calls": 1,
+     "ms": 0.5563140000000001,
+     "ms_per_call": 0.5563140000000001,
+     "flops": 115964116992,
+     "bytes": 55396352,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "direction": "bwd-weight",
+     "shape_w": [
+      128,
+      64,
+      2,
+      2,
+      2
+     ],
+     "shape_out": [
+      1,
+      64,
+      64,
+      256,
+      256
+     ],
+     "calls": 1,
+     "ms": 0.5537913999999999,
+     "ms_per_call": 0.5537913999999999,
+     "flops": 68719476736,
+     "bytes": 671219712,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "direction": "bwd-data",
+     "shape_w": [
+      128,
+      64,
+      2,
+      2,
+      2
+     ],
+     "shape_out": [
+      1,
+      64,
+      64,
+      256,
+      256
+     ],
+     "calls": 1,
+     "ms": 0.5072715999999999,
+     "ms_per_call": 0.5072715999999999,
+     "flops": 68719476736,
+     "bytes": 671219712,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_fwd_xdl_cshuffle_v3"
+     ]
+    },
+    {
+     "direction": "fwd",
+     "shape_w": [
+      256,
+      128,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      256,
+      16,
+      64,
+      64
+     ],
+     "calls": 1,
+     "ms": 0.4106064,
+     "ms_per_call": 0.4106064,
+     "flops": 115964116992,
+     "bytes": 55396352,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_fwd_multiple_abd_xdl_cshuffle"
+     ]
+    },
+    {
+     "direction": "bwd-weight",
+     "shape_w": [
+      1024,
+      1024,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      1024,
+      4,
+      16,
+      16
+     ],
+     "calls": 1,
+     "ms": 0.32105779999999995,
+     "ms_per_call": 0.32105779999999995,
+     "flops": 57982058496,
+     "bytes": 62701568,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "direction": "fwd",
+     "shape_w": [
+      1024,
+      1024,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      1024,
+      4,
+      16,
+      16
+     ],
+     "calls": 1,
+     "ms": 0.31513779999999997,
+     "ms_per_call": 0.31513779999999997,
+     "flops": 57982058496,
+     "bytes": 62701568,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_fwd_xdl_cshuffle_v3"
+     ]
+    },
+    {
+     "direction": "bwd-weight",
+     "shape_w": [
+      512,
+      256,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      512,
+      8,
+      32,
+      32
+     ],
+     "calls": 1,
+     "ms": 0.28819,
+     "ms_per_call": 0.28819,
+     "flops": 57982058496,
+     "bytes": 21385216,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "direction": "fwd",
+     "shape_w": [
+      6,
+      64,
+      1,
+      1,
+      1
+     ],
+     "shape_out": [
+      1,
+      6,
+      64,
+      256,
+      256
+     ],
+     "calls": 1,
+     "ms": 0.2790414,
+     "ms_per_call": 0.2790414,
+     "flops": 3221225472,
+     "bytes": 587203328,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_fwd_xdl_cshuffle_v3"
+     ]
+    },
+    {
+     "direction": "bwd-weight",
+     "shape_w": [
+      256,
+      128,
+      2,
+      2,
+      2
+     ],
+     "shape_out": [
+      1,
+      128,
+      32,
+      128,
+      128
+     ],
+     "calls": 1,
+     "ms": 0.242225,
+     "ms_per_call": 0.242225,
+     "flops": 34359738368,
+     "bytes": 168296448,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "direction": "bwd-data",
+     "shape_w": [
+      256,
+      128,
+      2,
+      2,
+      2
+     ],
+     "shape_out": [
+      1,
+      128,
+      32,
+      128,
+      128
+     ],
+     "calls": 1,
+     "ms": 0.22738500000000003,
+     "ms_per_call": 0.22738500000000003,
+     "flops": 34359738368,
+     "bytes": 168296448,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "direction": "fwd",
+     "shape_w": [
+      512,
+      256,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      512,
+      8,
+      32,
+      32
+     ],
+     "calls": 1,
+     "ms": 0.219117,
+     "ms_per_call": 0.219117,
+     "flops": 57982058496,
+     "bytes": 21385216,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_fwd_xdl_cshuffle_v3"
+     ]
+    },
+    {
+     "direction": "bwd-weight",
+     "shape_w": [
+      1024,
+      512,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      1024,
+      4,
+      16,
+      16
+     ],
+     "calls": 1,
+     "ms": 0.165624,
+     "ms_per_call": 0.165624,
+     "flops": 28991029248,
+     "bytes": 32399360,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "direction": "bwd-data",
+     "shape_w": [
+      256,
+      128,
+      2,
+      2,
+      2
+     ],
+     "shape_out": [
+      1,
+      128,
+      32,
+      128,
+      128
+     ],
+     "calls": 1,
+     "ms": 0.1591926,
+     "ms_per_call": 0.1591926,
+     "flops": 34359738368,
+     "bytes": 168296448,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_fwd_multiple_abd_xdl_cshuffle"
+     ]
+    },
+    {
+     "direction": "fwd",
+     "shape_w": [
+      1024,
+      512,
+      3,
+      3,
+      3
+     ],
+     "shape_out": [
+      1,
+      1024,
+      4,
+      16,
+      16
+     ],
+     "calls": 1,
+     "ms": 0.1531762,
+     "ms_per_call": 0.1531762,
+     "flops": 28991029248,
+     "bytes": 32399360,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_fwd_xdl_cshuffle_v3"
+     ]
+    },
+    {
+     "direction": "bwd-weight",
+     "shape_w": [
+      512,
+      256,
+      2,
+      2,
+      2
+     ],
+     "shape_out": [
+      1,
+      256,
+      16,
+      64,
+      64
+     ],
+     "calls": 1,
+     "ms": 0.1359684,
+     "ms_per_call": 0.1359684,
+     "flops": 17179869184,
+     "bytes": 44040192,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "direction": "bwd-data",
+     "shape_w": [
+      512,
+      256,
+      2,
+      2,
+      2
+     ],
+     "shape_out": [
+      1,
+      256,
+      16,
+      64,
+      64
+     ],
+     "calls": 1,
+     "ms": 0.12382420000000002,
+     "ms_per_call": 0.12382420000000002,
+     "flops": 17179869184,
+     "bytes": 44040192,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "direction": "bwd-data",
+     "shape_w": [
+      512,
+      256,
+      2,
+      2,
+      2
+     ],
+     "shape_out": [
+      1,
+      256,
+      16,
+      64,
+      64
+     ],
+     "calls": 1,
+     "ms": 0.0871896,
+     "ms_per_call": 0.0871896,
+     "flops": 17179869184,
+     "bytes": 44040192,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_fwd_xdl_cshuffle_v3"
+     ]
+    },
+    {
+     "direction": "bwd-weight",
+     "shape_w": [
+      1024,
+      512,
+      2,
+      2,
+      2
+     ],
+     "shape_out": [
+      1,
+      512,
+      8,
+      32,
+      32
+     ],
+     "calls": 1,
+     "ms": 0.0815198,
+     "ms_per_call": 0.0815198,
+     "flops": 8589934592,
+     "bytes": 18874368,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_batched_gemm_xdlops_bwd_weight"
+     ]
+    },
+    {
+     "direction": "bwd-data",
+     "shape_w": [
+      1024,
+      512,
+      2,
+      2,
+      2
+     ],
+     "shape_out": [
+      1,
+      512,
+      8,
+      32,
+      32
+     ],
+     "calls": 1,
+     "ms": 0.0733018,
+     "ms_per_call": 0.0733018,
+     "flops": 8589934592,
+     "bytes": 18874368,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_bwd_data_multiple_d_xdl_cshuffle"
+     ]
+    },
+    {
+     "direction": "bwd-data",
+     "shape_w": [
+      1024,
+      512,
+      2,
+      2,
+      2
+     ],
+     "shape_out": [
+      1,
+      512,
+      8,
+      32,
+      32
+     ],
+     "calls": 1,
+     "ms": 0.0610874,
+     "ms_per_call": 0.0610874,
+     "flops": 8589934592,
+     "bytes": 18874368,
+     "act_bytes": 2,
+     "solvers": [
+      "kernel_grouped_conv_fwd_xdl_cshuffle_v3"
+     ]
+    }
+   ]
+  }
+ }
+}
