@@ -253,9 +253,19 @@ class BaseTrainer:
         """Set up the optimizer, scheduler, gradient scaler, and loss function."""
         # Set up optimizer
         if self.config.optimizer == "ADAM":
-            self.log.info("Using ADAM optimizer.")
+            # Fused Adam does the whole update in one kernel; parameters are
+            # replicated, so this is the one cost spatial sharding does not
+            # shrink. CUDA only: the fused kernels are device-specific. Fused
+            # and foreach accumulate in different orders, so the two are not
+            # bitwise comparable; each is reproducible with itself, including
+            # across checkpoint/resume (the fused path keeps ``step`` on the
+            # device).
+            fused = self.device.type == "cuda"
+            self.log.info(f"Using ADAM optimizer{' (fused)' if fused else ''}.")
             self.optimizer = optim.Adam(
-                self.model.parameters(), lr=self.config.starting_learning_rate
+                self.model.parameters(),
+                lr=self.config.starting_learning_rate,
+                fused=fused,
             )
         elif self.config.optimizer == "SGD":
             self.log.info("Using SGD optimizer.")
