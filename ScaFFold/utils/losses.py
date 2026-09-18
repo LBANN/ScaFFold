@@ -153,13 +153,11 @@ def compute_sharded_cross_entropy_loss(
         # identical to cross-entropy over the raw logits but avoids a second
         # full upcast.
         #
-        # reduction="none" plus an explicit .sum(), not reduction="sum": the
-        # fused CUDA reduction accumulates with atomicAdd, so its summation
-        # order follows whichever order the blocks retire in and the loss
-        # value varies run to run. It has no deterministic implementation, and
-        # `more_determinism` passes warn_only=True, so there it would only
-        # warn and stay nondeterministic. The separate .sum() is a
-        # fixed-order reduction and is bitwise reproducible.
+        # reduction="none" plus .sum(), not reduction="sum": the fused CUDA
+        # reduction accumulates with atomicAdd, so its result depends on block
+        # retire order, and it has no deterministic implementation
+        # (`more_determinism` uses warn_only=True, so it would only warn). The
+        # separate .sum() is a fixed-order reduction.
         if log_probs is not None:
             local_ce = F.nll_loss(
                 log_probs,
@@ -176,26 +174,21 @@ def compute_sharded_cross_entropy_loss(
             )
         local_ce_sum = local_ce.sum()
 
-        # Neither branch below may read device memory from the host: that
-        # drains the pipeline mid-step, since the host stops submitting until
-        # the read returns and the queue runs dry behind it.
-        # torch.cuda.set_sync_debug_mode("error") catches a regression.
+        # Neither branch may read device memory from the host: a sync here
+        # drains the launch queue mid-step. set_sync_debug_mode("error")
+        # catches a regression.
         if class_weights is None:
             # Sum the actual local voxel counts across spatial shards. We use
             # an all-reduced count instead of numel()*num_shards because shard
             # sizes can differ at chunk boundaries.
             #
-            # new_full rather than new_tensor: numel() is shape metadata the
-            # host already has, and full() fills on the device with the value
-            # as a kernel argument, where new_tensor would stage that float
-            # through a pageable host-to-device copy.
+            # new_full rather than new_tensor: the value travels as a kernel
+            # argument, not a pageable host-to-device copy.
             local_normalizer = local_ce_sum.new_full((), float(local_labels.numel()))
         else:
             # Weighted CE divides by sum(weight[target_i]) over all voxels.
-            # Gather the per-voxel weights and sum them, which is that
-            # definition transcribed. Not torch.bincount: it sizes its output
-            # from the largest label, so it reads that label back to the host
-            # even when minlength already fixes the width.
+            # Not torch.bincount: it reads the largest label back to the host
+            # to size its output, even with minlength given.
             local_normalizer = class_weights.to(dtype=local_ce_sum.dtype)[
                 local_labels
             ].sum()

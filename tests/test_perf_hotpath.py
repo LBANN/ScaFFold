@@ -70,17 +70,13 @@ def test_ce_log_probs_path_matches_cross_entropy():
 
 @pytest.mark.gpu
 def test_gpu_ce_numerator_is_bitwise_reproducible():
-    # Pins that the CE numerator is summed outside the loss kernel:
-    # reduction="sum" on CUDA accumulates with atomicAdd, so its value depends
-    # on block retire order and changes between otherwise identical calls.
-    # Both entry points (precomputed log_probs via NLL, and raw logits via CE)
-    # go through the same reduction, so both are checked, bitwise rather than
-    # allclose.
+    # The CE numerator is summed outside the loss kernel: reduction="sum" on
+    # CUDA accumulates with atomicAdd and varies between identical calls. Both
+    # entry points (log_probs via NLL, raw logits via CE) are checked bitwise.
     #
-    # The volume is load-bearing, not incidental: the atomics only collide
-    # once the shape puts many blocks in flight, so shrinking this test for
-    # speed would quietly turn it into one that passes either way. 128**3 with
-    # 7 classes is scale 7 with the shipped n_categories.
+    # The volume is load-bearing: the atomics only collide with many blocks in
+    # flight, so a smaller shape passes either way. 128**3 with 7 classes is
+    # scale 7 at the shipped n_categories.
     torch.manual_seed(3)
     device = torch.device("cuda")
     b, c, n = 1, 7, 128
@@ -102,16 +98,10 @@ def test_gpu_ce_numerator_is_bitwise_reproducible():
 
 @pytest.mark.gpu
 def test_gpu_ce_does_not_synchronize():
-    # Pins that the CE term issues no host-device sync. It runs once per
-    # training step, so a sync in it drains the whole launch queue mid-step:
-    # the host stops submitting until the read comes back, and the GPU runs
-    # out of queued work behind it. A sync is invisible in the loss value, so
-    # only a test catches one. set_sync_debug_mode is documented as a
-    # prototype that does not catch every synchronizing op, so this is a
-    # floor, not a proof.
-    #
-    # The shape matters only in that it covers both normalizer branches and
-    # both entry points; the debug mode does the checking, so it stays small.
+    # The CE term issues no host-device sync; one would drain the launch queue
+    # mid-step and is invisible in the loss value. set_sync_debug_mode does
+    # not catch every synchronizing op, so this is a floor, not a proof. The
+    # shape only has to reach both normalizer branches and both entry points.
     torch.manual_seed(5)
     device = torch.device("cuda")
     b, c, n = 1, 7, 64
@@ -120,8 +110,7 @@ def test_gpu_ce_does_not_synchronize():
     weights = torch.rand(c, device=device) + 0.5
     log_probs = F.log_softmax(preds.float(), dim=1)
 
-    # .item() is itself a sync: keep the results on device and inspect them
-    # after the debug mode is back off.
+    # .item() is itself a sync: inspect the results after the mode is off.
     outs = []
     torch.cuda.synchronize()
     torch.cuda.set_sync_debug_mode("error")
@@ -142,13 +131,10 @@ def test_gpu_ce_does_not_synchronize():
 
 @pytest.mark.gpu
 def test_gpu_ce_survives_strict_deterministic_algorithms():
-    # Pins that the CE path is legal under strict determinism.
-    # more_determinism sets use_deterministic_algorithms(warn_only=True), so a
-    # nondeterministic kernel only warns there and the run stays
-    # irreproducible -- a regression in this path would be invisible under the
-    # config that is supposed to catch it. Strict mode raises instead, since
-    # the fused loss reduction has no deterministic implementation. The shape
-    # only has to be a valid volume, so it stays small.
+    # The CE path is legal under strict determinism. more_determinism uses
+    # warn_only=True, so a nondeterministic kernel would only warn there;
+    # strict mode raises, since the fused loss reduction has no deterministic
+    # implementation.
     torch.manual_seed(4)
     device = torch.device("cuda")
     b, c = 1, 5
