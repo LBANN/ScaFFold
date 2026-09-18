@@ -20,6 +20,7 @@ handling, and validation host-sync avoidance. Each asserts the fast path is
 numerically equivalent to the straightforward reference it replaced.
 """
 
+import pytest
 import torch
 import torch.nn.functional as F
 
@@ -65,6 +66,94 @@ def test_ce_log_probs_path_matches_cross_entropy():
         plain = compute_sharded_cross_entropy_loss(preds, labels, None, (1,), "cpu", w)
         assert torch.allclose(fused, ref, atol=1e-6)
         assert torch.allclose(plain, ref, atol=1e-6)
+
+
+@pytest.mark.gpu
+def test_gpu_ce_numerator_is_bitwise_reproducible():
+    # The CE numerator is summed outside the loss kernel: reduction="sum" on
+    # CUDA accumulates with atomicAdd and varies between identical calls. Both
+    # entry points (log_probs via NLL, raw logits via CE) are checked bitwise.
+    #
+    # The volume is load-bearing: the atomics only collide with many blocks in
+    # flight, so a smaller shape passes either way. 128**3 with 7 classes is
+    # scale 7 at the shipped n_categories.
+    torch.manual_seed(3)
+    device = torch.device("cuda")
+    b, c, n = 1, 7, 128
+    preds = torch.randn(b, c, n, n, n, device=device)
+    labels = torch.randint(0, c, (b, n, n, n), device=device)
+    weights = torch.rand(c, device=device) + 0.5
+    log_probs = F.log_softmax(preds.float(), dim=1)
+
+    for w in (None, weights):
+        for kwargs in ({"log_probs": log_probs}, {}):
+            values = {
+                compute_sharded_cross_entropy_loss(
+                    preds, labels, None, (1,), "cuda", w, **kwargs
+                ).item()
+                for _ in range(50)
+            }
+            assert len(values) == 1, f"{len(values)} distinct CE values: {values}"
+
+
+@pytest.mark.gpu
+def test_gpu_ce_does_not_synchronize():
+    # The CE term issues no host-device sync; one would drain the launch queue
+    # mid-step and is invisible in the loss value. set_sync_debug_mode does
+    # not catch every synchronizing op, so this is a floor, not a proof. The
+    # shape only has to reach both normalizer branches and both entry points.
+    torch.manual_seed(5)
+    device = torch.device("cuda")
+    b, c, n = 1, 7, 64
+    preds = torch.randn(b, c, n, n, n, device=device)
+    labels = torch.randint(0, c, (b, n, n, n), device=device)
+    weights = torch.rand(c, device=device) + 0.5
+    log_probs = F.log_softmax(preds.float(), dim=1)
+
+    # .item() is itself a sync: inspect the results after the mode is off.
+    outs = []
+    torch.cuda.synchronize()
+    torch.cuda.set_sync_debug_mode("error")
+    try:
+        for w in (weights, None):
+            for kwargs in ({"log_probs": log_probs}, {}):
+                outs.append(
+                    compute_sharded_cross_entropy_loss(
+                        preds, labels, None, (1,), "cuda", w, **kwargs
+                    )
+                )
+    finally:
+        torch.cuda.set_sync_debug_mode("default")
+
+    torch.cuda.synchronize()
+    assert all(torch.isfinite(o) for o in outs)
+
+
+@pytest.mark.gpu
+def test_gpu_ce_survives_strict_deterministic_algorithms():
+    # The CE path is legal under strict determinism. more_determinism uses
+    # warn_only=True, so a nondeterministic kernel would only warn there;
+    # strict mode raises, since the fused loss reduction has no deterministic
+    # implementation.
+    torch.manual_seed(4)
+    device = torch.device("cuda")
+    b, c = 1, 5
+    preds = torch.randn(b, c, 16, 16, 16, device=device)
+    labels = torch.randint(0, c, (b, 16, 16, 16), device=device)
+    weights = torch.rand(c, device=device) + 0.5
+    log_probs = F.log_softmax(preds.float(), dim=1)
+
+    was_deterministic = torch.are_deterministic_algorithms_enabled()
+    was_warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
+    torch.use_deterministic_algorithms(True)
+    try:
+        for w in (None, weights):
+            for kwargs in ({"log_probs": log_probs}, {}):
+                compute_sharded_cross_entropy_loss(
+                    preds, labels, None, (1,), "cuda", w, **kwargs
+                )
+    finally:
+        torch.use_deterministic_algorithms(was_deterministic, warn_only=was_warn_only)
 
 
 def test_ce_uses_single_spatial_collective(monkeypatch):

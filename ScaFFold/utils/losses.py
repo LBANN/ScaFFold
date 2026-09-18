@@ -128,7 +128,7 @@ def compute_sharded_cross_entropy_loss(
 
     Each rank only sees a local spatial shard, so we cannot use the local
     `reduction="mean"` result directly. Instead we:
-    1. compute the local CE numerator with `reduction="sum"`,
+    1. compute the local CE numerator by summing the per-voxel losses,
     2. build the correct global denominator,
     3. all-reduce numerator and denominator together across the spatial mesh
        in a single collective, and
@@ -146,40 +146,52 @@ def compute_sharded_cross_entropy_loss(
 
     autocast_device = device_type if device_type != "mps" else "cpu"
     with torch.autocast(autocast_device, enabled=False):
-        # Accumulate CE in full precision. Using reduction="sum" gives us the
-        # numerator of the final global mean; if class weights are present,
-        # PyTorch applies the target-class weight to each voxel here. When the
-        # caller already computed log-softmax, NLL over it is identical to
-        # cross-entropy over the raw logits but avoids a second full upcast.
+        # Accumulate CE in full precision. Summing the per-voxel losses gives
+        # us the numerator of the final global mean; if class weights are
+        # present, PyTorch applies the target-class weight to each voxel here.
+        # When the caller already computed log-softmax, NLL over it is
+        # identical to cross-entropy over the raw logits but avoids a second
+        # full upcast.
+        #
+        # reduction="none" plus .sum(), not reduction="sum": the fused CUDA
+        # reduction accumulates with atomicAdd, so its result depends on block
+        # retire order, and it has no deterministic implementation
+        # (`more_determinism` uses warn_only=True, so it would only warn). The
+        # separate .sum() is a fixed-order reduction.
         if log_probs is not None:
-            local_ce_sum = F.nll_loss(
+            local_ce = F.nll_loss(
                 log_probs,
                 local_labels,
                 weight=class_weights,
-                reduction="sum",
+                reduction="none",
             )
         else:
-            local_ce_sum = F.cross_entropy(
+            local_ce = F.cross_entropy(
                 local_preds.float(),
                 local_labels,
                 weight=class_weights,
-                reduction="sum",
+                reduction="none",
             )
+        local_ce_sum = local_ce.sum()
 
+        # Neither branch may read device memory from the host: a sync here
+        # drains the launch queue mid-step. set_sync_debug_mode("error")
+        # catches a regression.
         if class_weights is None:
             # Sum the actual local voxel counts across spatial shards. We use
             # an all-reduced count instead of numel()*num_shards because shard
             # sizes can differ at chunk boundaries.
-            local_normalizer = local_ce_sum.new_tensor(float(local_labels.numel()))
+            #
+            # new_full rather than new_tensor: the value travels as a kernel
+            # argument, not a pageable host-to-device copy.
+            local_normalizer = local_ce_sum.new_full((), float(local_labels.numel()))
         else:
             # Weighted CE divides by sum(weight[target_i]) over all voxels.
-            # Build that denominator from the local label histogram.
-            local_class_counts = torch.bincount(
-                local_labels.reshape(-1), minlength=class_weights.numel()
-            ).to(dtype=local_ce_sum.dtype)
-            local_normalizer = torch.dot(
-                local_class_counts, class_weights.to(dtype=local_ce_sum.dtype)
-            )
+            # Not torch.bincount: it reads the largest label back to the host
+            # to size its output, even with minlength given.
+            local_normalizer = class_weights.to(dtype=local_ce_sum.dtype)[
+                local_labels
+            ].sum()
 
     # Reduce the CE numerator and its denominator across the spatial shards in
     # one collective (they share the same mesh) rather than two, halving the
