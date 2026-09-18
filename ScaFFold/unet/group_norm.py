@@ -543,20 +543,10 @@ def _match_memory_format(out, reference):
 def _match_input_dtype(out, reference):
     """Give ``out`` ``reference``'s dtype, casting only if it differs.
 
-    The compiled and eager rungs call ``F.group_norm``, which carries
-    autocast's fp32 cast policy and so returns fp32 for a bf16 input inside an
-    autocast region.  ``FastGroupNorm`` emits the input's dtype instead (see
-    its docstring's "Output dtype"); the Triton rung does that in its store, so
-    these two have to do it here.
-
-    A no-op outside autocast and for an fp32 input.  Inside autocast on a
-    narrower input it is the one cast the consumer was about to make anyway,
-    and it buys the guarantee that a rung change cannot change an activation's
-    dtype.
-
-    ``.to(dtype)`` preserves the memory format, so this composes with
-    :func:`_match_memory_format` in either order; it is applied last so that
-    the rounding follows the ReLU, as it does in the fused kernel's store.
+    ``F.group_norm`` returns fp32 inside an autocast region; ``FastGroupNorm``
+    emits the input's dtype instead (see its "Output dtype").  The Triton rung
+    narrows in its store, so the compiled and eager rungs narrow here.  Applied
+    after the ReLU, as in the kernel's store; ``.to`` keeps the memory format.
     """
     if out.dtype is reference.dtype:
         return out
@@ -570,9 +560,8 @@ class FastGroupNorm(nn.GroupNorm):
     ``(num_channels,)``, no buffers, so state dicts are interchangeable with
     plain ``nn.GroupNorm`` in both directions.  ``activation`` is a plain Python
     attribute, not a submodule or a buffer, so it adds no key either.  The one
-    deliberate departure from ``nn.GroupNorm`` is the output dtype under
-    autocast; read "Output dtype" below before consuming a GroupNorm output as
-    fp32.
+    departure from ``nn.GroupNorm`` is the output dtype under autocast ("Output
+    dtype" below).
 
     ``activation="relu"`` makes this module's forward always apply a ReLU --
     fused into the Triton kernel's store where that path is taken, and as an
@@ -582,40 +571,32 @@ class FastGroupNorm(nn.GroupNorm):
 
     Output dtype
     ============
-    This module returns its *input's* dtype, where ``at::group_norm`` carries
-    autocast's fp32 cast policy and stock GroupNorm returns fp32 for any input
-    inside an enabled autocast region.  In the shipped bf16 autocast
-    configuration its outputs are bf16; with autocast off they are fp32 and
-    nothing differs from stock.  Only the store narrows -- the statistics and
-    the normalized value stay fp32 on every rung -- so the output is the fp32
-    answer rounded once, and the fp32 write every consumer immediately read
-    back and rewrote as bf16 is gone.
+    This module returns its *input's* dtype; stock GroupNorm carries autocast's
+    fp32 cast policy and returns fp32 inside an autocast region.  Only the
+    store narrows -- statistics and the normalized value stay fp32 on every
+    rung -- so the output is the fp32 answer rounded once, and the fp32 write
+    every consumer immediately re-read as bf16 is gone.  Outside autocast
+    nothing differs from stock.
 
-    It is safe in *this* model because every consumer narrows a GroupNorm
-    output to autocast's dtype before any arithmetic: the following convolution
-    (``aten::convolution`` carries the ``lower_precision_fp`` policy), the skip
-    concatenation (``_skip_concat`` casts to
-    :func:`~ScaFFold.unet.unet_parts._consumer_dtype`), and ``max_pool3d``,
-    whose forward is a selection and commutes with rounding.  A future consumer
-    that wants fp32 bits -- an fp32 residual add, a loss term, anything read
-    outside an autocast region -- gets bf16 silently and must upcast itself.
-    This is the one place ``FastGroupNorm`` is not a drop-in replacement.
+    Safe in *this* model because every consumer narrows a GroupNorm output to
+    autocast's dtype before any arithmetic: the next convolution (autocast's
+    ``lower_precision_fp`` policy), the skip concatenation (``_skip_concat``
+    casts to :func:`~ScaFFold.unet.unet_parts._consumer_dtype`) and
+    ``max_pool3d``, a selection that commutes with rounding.  A consumer that
+    wants fp32 bits -- a residual add, a loss term, anything read outside
+    autocast -- gets bf16 silently and must upcast itself.
 
-    The forward is unchanged; the backward is not bitwise comparable with an
-    fp32-output run, for two reasons downstream of this module.  Autograd sums
-    the two cotangents at each encoder block's fan-out (max-pool and skip
-    concatenation) in bf16 rather than fp32, and rounding creates ties in a
-    pooling window that fp32 broke strictly, so ``max_pool3d``'s backward
-    scatters through a different index.  Each configuration stays bitwise
-    reproducible with itself.
+    The backward is not bitwise comparable with an fp32-output run: autograd
+    sums the cotangents at each encoder block's fan-out in bf16, and rounding
+    creates pooling-window ties that fp32 broke, so ``max_pool3d``'s backward
+    scatters through a different index.  Each configuration is reproducible
+    with itself.
 
-    All three rungs narrow: the Triton one in its store
-    (:func:`_triton_forward` passes ``out_dtype``), the other two by casting
-    afterwards (:func:`_match_input_dtype`).  A rung is chosen per module and
-    per process and a latch can demote one mid-run, so a dtype that followed
-    the rung would change an activation's width mid-step, differ between DDP
-    ranks, and break ``torch.utils.checkpoint``, whose non-reentrant recompute
-    raises ``CheckpointError`` on a saved tensor whose dtype does not match.
+    All three rungs narrow (the Triton one in its store, the others via
+    :func:`_match_input_dtype`) because a latch can demote a rung mid-run: a
+    dtype that followed the rung would change an activation's width mid-step,
+    differ between DDP ranks, and make ``torch.utils.checkpoint``'s recompute
+    raise ``CheckpointError`` on a saved tensor whose dtype changed.
 
     DistConv's ``DCTensor`` gets the fast kernels by being unwrapped to its
     local shard in front of them, rather than by letting the op dispatch through
@@ -705,11 +686,8 @@ class FastGroupNorm(nn.GroupNorm):
     def _triton_forward(self, local):
         """The native channels-last kernel, with the activation fused in.
 
-        ``out_dtype=local.dtype`` is this module's departure from
-        ``F.group_norm``'s autocast contract, asked for here rather than made
-        the kernel module's default, which still reproduces stock's dtype.  The
-        kernel stores that dtype directly, with no fp32 intermediate to cast.
-        See the class docstring's "Output dtype".
+        ``out_dtype=local.dtype`` is the "Output dtype" departure, asked for
+        here so the kernel module's default still reproduces ``F.group_norm``.
         """
         return _get_triton_module().triton_group_norm(
             local,

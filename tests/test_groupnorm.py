@@ -1573,21 +1573,17 @@ def test_gpu_triton_dctensor_matches_eager_and_stays_wrapped(dc_cuda, activation
 
 
 # ---------------------------------------------------------------------------
-# Output dtype -- the deliberate departure from F.group_norm's autocast rule
+# Output dtype -- the departure from F.group_norm's autocast rule
 # ---------------------------------------------------------------------------
 #
-# `FastGroupNorm` returns its input's dtype where `F.group_norm` carries
-# autocast's fp32 cast policy and returns fp32.  Three separate claims are
-# pinned below: that the departure happens at all, in the model and not only at
-# a unit shape; that every rung does it, so a mid-run fallback cannot change an
-# activation's width; and that outside autocast nothing moves.  The standalone
-# `triton_group_norm()` keeps the stock rule (pinned in
-# tests/test_triton_group_norm.py) and must not move with these.
+# `FastGroupNorm` returns its input's dtype where `F.group_norm` returns fp32.
+# Pinned below: the departure itself, at a unit shape and in the model; that
+# every rung does it, so a fallback cannot change an activation's width; and
+# that outside autocast nothing moves.  The standalone `triton_group_norm()`
+# keeps the stock rule (tests/test_triton_group_norm.py).
 
-#: How far two GroupNorm results may differ once both have been rounded to a
-#: narrow dtype: just over one ulp at the output's magnitude (2^-8 for bf16,
-#: 2^-11 for fp16), since the rungs' fp32 answers differ in the last places and
-#: are then rounded independently.
+#: Tolerance between two rungs' results after independent rounding to a narrow
+#: dtype: just over one ulp at the output's magnitude (2^-8 bf16, 2^-11 fp16).
 _NARROW_TOL = {torch.bfloat16: 8e-3, torch.float16: 1e-3}
 
 
@@ -1603,9 +1599,8 @@ def _pin_rung(rung):
 def test_gpu_output_dtype_is_the_inputs_under_autocast(rung, autocast_dtype):
     """Under autocast the output is the input's dtype, on all three rungs.
 
-    Stock ``F.group_norm`` in the same region is the control: it returns fp32,
-    which is the contract being departed from.  The eager rung is held to the
-    sharp form -- bitwise the stock fp32 result rounded once -- so the
+    Stock ``F.group_norm`` in the same region returns fp32 and is the control.
+    The eager rung must be bitwise the stock result rounded once, so the
     narrowing is a store, not a narrower computation.
     """
     device = torch.device("cuda")
@@ -1648,12 +1643,11 @@ def test_gpu_output_dtype_is_the_inputs_under_autocast(rung, autocast_dtype):
 @pytest.mark.parametrize("rung", ["triton", "compiled", "eager"])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 def test_gpu_output_dtype_outside_autocast_is_unchanged(rung, dtype):
-    """``torch_amp: 0``, ``eval`` and ``inference_mode`` see no change.
+    """Outside autocast (``torch_amp: 0``) nothing changes.
 
-    Outside autocast ``F.group_norm`` already returns the input's dtype, so the
-    two rules coincide and the departure is invisible.  fp32 is the shipped
-    ``torch_amp: 0`` configuration; bf16 (a hand-cast module) checks that the
-    answer follows the input rather than being pinned to fp32 by accident.
+    There ``F.group_norm`` already returns the input's dtype, so the two rules
+    coincide.  bf16 (a hand-cast module) checks the answer follows the input
+    rather than being pinned to fp32.
     """
     device = torch.device("cuda")
     generator = torch.Generator(device=device).manual_seed(73)
@@ -1685,15 +1679,10 @@ def test_gpu_output_dtype_outside_autocast_is_unchanged(rung, dtype):
 
 @pytest.mark.gpu
 def test_gpu_a_rung_fallback_does_not_change_the_output_dtype(caplog):
-    """Why all three rungs narrow, not only the fast one.
-
-    A kernel failure demotes a module mid-run (see the module docstring's
-    "Latches").  If only the Triton rung emitted the input's dtype, that
-    demotion would change an activation's width between steps and between DDP
-    ranks, and would break ``torch.utils.checkpoint``, which compares the dtype
-    of every recomputed saved tensor.  So the same call is answered by the
-    kernel and by the fallback it lands on, and the two must agree on dtype.
-    """
+    """A mid-run demotion (the module's "Latches") must not change the output
+    dtype: the same call answered by the kernel and then by the fallback it
+    lands on must agree, or an activation's width would change between steps
+    and DDP ranks and break ``torch.utils.checkpoint``'s recompute."""
     from ScaFFold.unet.triton_group_norm import TritonKernelError
 
     device = torch.device("cuda")
@@ -1734,13 +1723,9 @@ def test_gpu_a_rung_fallback_does_not_change_the_output_dtype(caplog):
 @pytest.mark.gpu
 @pytest.mark.parametrize("autocast", [True, False])
 def test_gpu_unet_group_norm_outputs_follow_the_activation_dtype(autocast):
-    """The claim at every GroupNorm site in the model, not one unit shape.
-
-    Under bf16 autocast every ``FastGroupNorm`` consumes bf16 (its producer is
-    a convolution, which autocast casts) and must hand back bf16 rather than
-    the fp32 stock GroupNorm returns.  With autocast off the same census must
-    read fp32 everywhere, which is the ``torch_amp: 0`` path.
-    """
+    """Every GroupNorm site in the model hands back the dtype it consumed:
+    bf16 under bf16 autocast (its producer is a convolution, which autocast
+    casts), fp32 with autocast off."""
     device = torch.device("cuda")
     model = _make_unet(seed=0).to(device, memory_format=torch.channels_last_3d)
     x = _make_input(seed=9).to(device).contiguous(memory_format=torch.channels_last_3d)

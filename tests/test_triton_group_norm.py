@@ -595,12 +595,9 @@ def test_output_dtype_matches_stock(dtype, autocast_dtype):
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("autocast_dtype", [None, torch.bfloat16])
 def test_out_dtype_opt_in_overrides_the_stock_rule(dtype, autocast_dtype):
-    """Pins the three ``out_dtype`` spellings against the rule above.
-
-    The default reproduces ``F.group_norm``; ``None`` asks for the input's
-    dtype, which differs from stock exactly inside an autocast region and is
-    the spelling ``FastGroupNorm`` uses; an explicit dtype asks for that one.
-    """
+    """The three ``out_dtype`` spellings: the default reproduces
+    ``F.group_norm``, ``None`` asks for the input's dtype (what ``FastGroupNorm``
+    uses) and an explicit dtype asks for that one."""
     device = torch.device("cuda")
     x, weight, bias, _ = _tensors((1, 64, 5, 5, 5), dtype, device, seed=61)
     if autocast_dtype is not None:
@@ -621,8 +618,7 @@ def test_out_dtype_opt_in_overrides_the_stock_rule(dtype, autocast_dtype):
     assert wide.dtype == torch.float32
     for got in (default, narrow, wide):
         assert got.is_contiguous(memory_format=CL)
-    # Only the store changes: the statistics are fp32 on every one of these
-    # calls and the tiling plan depends on the shape alone (`_plan` takes no
+    # Only the store changes (the statistics are fp32 and `_plan` takes no
     # dtype), so the narrow answer is bitwise the wide one rounded once.
     assert torch.equal(narrow, wide.to(dtype))
     assert torch.equal(
@@ -632,9 +628,8 @@ def test_out_dtype_opt_in_overrides_the_stock_rule(dtype, autocast_dtype):
 
 @pytest.mark.gpu
 def test_out_dtype_is_honoured_on_the_fallback_route_too():
-    """A contiguous input takes the ``F.group_norm`` fallback and still answers
-    in the requested dtype, so a result's dtype never depends on which kernel
-    served it."""
+    """The ``F.group_norm`` fallback (a contiguous input) honours ``out_dtype``
+    too, so a result's dtype never depends on which route served it."""
     device = torch.device("cuda")
     gen = torch.Generator(device=device).manual_seed(63)
     x = torch.randn(2, 64, 5, 6, 7, device=device, dtype=torch.bfloat16, generator=gen)
@@ -650,16 +645,14 @@ def test_out_dtype_is_honoured_on_the_fallback_route_too():
     assert stock.dtype is torch.float32, "assumption about stock GroupNorm broke"
     assert narrow.dtype is torch.bfloat16
     assert torch.equal(narrow, stock.to(torch.bfloat16))
-    # The activation is applied before the narrowing, as it is in the kernel's
-    # store, so a fused and an unfused ReLU still agree bitwise.
+    # The ReLU precedes the narrowing, as in the kernel's store.
     assert relu.dtype is torch.bfloat16
     assert torch.equal(relu, F.relu(stock).to(torch.bfloat16))
 
 
 @pytest.mark.parametrize("bad", [torch.float64, torch.int32, "bfloat16", 16])
 def test_out_dtype_rejects_what_the_kernel_cannot_store(bad):
-    """Validated as an argument, before anything looks at the input, so the
-    error names ``out_dtype`` rather than surfacing from inside a launch."""
+    """Rejected before the input is looked at, so the error names ``out_dtype``."""
     x = torch.randn(1, 64, 2, 2, 2).to(memory_format=CL)
     with pytest.raises(ValueError, match="out_dtype"):
         triton_group_norm(x, GROUPS, out_dtype=bad)
