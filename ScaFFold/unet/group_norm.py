@@ -15,8 +15,9 @@
 """GroupNorm with a Triton fast path and a ``torch.compile``d one behind it.
 
 Three kernels, tried in order.  They agree to fp32 rounding and all return the
-input's memory format (see :func:`_match_memory_format`), so a caller does not
-have to know which rung served it:
+input's memory format and the input's dtype (see :func:`_match_memory_format`
+and :func:`_match_input_dtype`), so a caller does not have to know which rung
+served it:
 
 1. Native channels-last Triton (:mod:`ScaFFold.unet.triton_group_norm`),
    whenever that module's ``is_supported`` accepts the input.  Production runs
@@ -539,19 +540,63 @@ def _match_memory_format(out, reference):
     return out.contiguous(memory_format=torch.channels_last_3d)
 
 
+def _match_input_dtype(out, reference):
+    """Give ``out`` ``reference``'s dtype, casting only if it differs.
+
+    ``F.group_norm`` returns fp32 inside an autocast region; ``FastGroupNorm``
+    emits the input's dtype instead (see its "Output dtype").  The Triton rung
+    narrows in its store, so the compiled and eager rungs narrow here.  Applied
+    after the ReLU, as in the kernel's store; ``.to`` keeps the memory format.
+    """
+    if out.dtype is reference.dtype:
+        return out
+    return out.to(reference.dtype)
+
+
 class FastGroupNorm(nn.GroupNorm):
     """``nn.GroupNorm`` with a Triton GPU kernel and an optional fused ReLU.
 
     A drop-in replacement with identical state: ``weight``/``bias`` of shape
     ``(num_channels,)``, no buffers, so state dicts are interchangeable with
     plain ``nn.GroupNorm`` in both directions.  ``activation`` is a plain Python
-    attribute, not a submodule or a buffer, so it adds no key either.
+    attribute, not a submodule or a buffer, so it adds no key either.  The one
+    departure from ``nn.GroupNorm`` is the output dtype under autocast ("Output
+    dtype" below).
 
     ``activation="relu"`` makes this module's forward always apply a ReLU --
     fused into the Triton kernel's store where that path is taken, and as an
     explicit in-place ``F.relu`` on the compiled and eager paths.  Which kernel
     runs therefore changes the number of memory passes, never the function the
     model computes.
+
+    Output dtype
+    ============
+    This module returns its *input's* dtype; stock GroupNorm carries autocast's
+    fp32 cast policy and returns fp32 inside an autocast region.  Only the
+    store narrows -- statistics and the normalized value stay fp32 on every
+    rung -- so the output is the fp32 answer rounded once, and the fp32 write
+    every consumer immediately re-read as bf16 is gone.  Outside autocast
+    nothing differs from stock.
+
+    Safe in *this* model because every consumer narrows a GroupNorm output to
+    autocast's dtype before any arithmetic: the next convolution (autocast's
+    ``lower_precision_fp`` policy), the skip concatenation (``_skip_concat``
+    casts to :func:`~ScaFFold.unet.unet_parts._consumer_dtype`) and
+    ``max_pool3d``, a selection that commutes with rounding.  A consumer that
+    wants fp32 bits -- a residual add, a loss term, anything read outside
+    autocast -- gets bf16 silently and must upcast itself.
+
+    The backward is not bitwise comparable with an fp32-output run: autograd
+    sums the cotangents at each encoder block's fan-out in bf16, and rounding
+    creates pooling-window ties that fp32 broke, so ``max_pool3d``'s backward
+    scatters through a different index.  Each configuration is reproducible
+    with itself.
+
+    All three rungs narrow (the Triton one in its store, the others via
+    :func:`_match_input_dtype`) because a latch can demote a rung mid-run: a
+    dtype that followed the rung would change an activation's width mid-step,
+    differ between DDP ranks, and make ``torch.utils.checkpoint``'s recompute
+    raise ``CheckpointError`` on a saved tensor whose dtype changed.
 
     DistConv's ``DCTensor`` gets the fast kernels by being unwrapped to its
     local shard in front of them, rather than by letting the op dispatch through
@@ -639,26 +684,41 @@ class FastGroupNorm(nn.GroupNorm):
         )
 
     def _triton_forward(self, local):
-        """The native channels-last kernel, with the activation fused in."""
+        """The native channels-last kernel, with the activation fused in.
+
+        ``out_dtype=local.dtype`` is the "Output dtype" departure, asked for
+        here so the kernel module's default still reproduces ``F.group_norm``.
+        """
         return _get_triton_module().triton_group_norm(
-            local, self.num_groups, self.weight, self.bias, self.eps, self.activation
+            local,
+            self.num_groups,
+            self.weight,
+            self.bias,
+            self.eps,
+            self.activation,
+            out_dtype=local.dtype,
         )
 
     def _compiled_forward(self, local):
-        return self._activate(
-            _match_memory_format(
-                _get_compiled_group_norm()(
-                    local, self.num_groups, self.weight, self.bias, self.eps
-                ),
-                local,
-            )
+        return _match_input_dtype(
+            self._activate(
+                _match_memory_format(
+                    _get_compiled_group_norm()(
+                        local, self.num_groups, self.weight, self.bias, self.eps
+                    ),
+                    local,
+                )
+            ),
+            local,
         )
 
     def _eager_forward(self, input):
         # super().forward() is the stock kernel; deferring to it keeps the eager
-        # path identical to nn.GroupNorm's (plus the ReLU and the relayout) by
-        # construction.
-        return self._activate(_match_memory_format(super().forward(input), input))
+        # path identical to nn.GroupNorm's (plus the ReLU, the relayout and the
+        # dtype narrowing) by construction.
+        return _match_input_dtype(
+            self._activate(_match_memory_format(super().forward(input), input)), input
+        )
 
     def forward(self, input):
         global _compile_failed, _triton_failed

@@ -510,10 +510,13 @@ def test_a_proven_rung_does_not_degrade_while_a_backward_replays_it(monkeypatch,
     proven_flag = "_triton_ok" if rung == "triton" else "_compiled_ok"
 
     def make_kernel(fail_always):
-        def _kernel(input, num_groups, weight, bias, eps, *activation):
+        # ``_triton_forward`` passes ``out_dtype``; the compiled rung's kernel
+        # takes no such argument, so it is optional here.
+        def _kernel(input, num_groups, weight, bias, eps, *activation, out_dtype=None):
             if fail_always or gn_mod._replaying_a_forward():
                 raise failure("simulated kernel failure")
-            return F.group_norm(input, num_groups, weight, bias, eps)
+            out = F.group_norm(input, num_groups, weight, bias, eps)
+            return out if out_dtype in (None, out.dtype) else out.to(out_dtype)
 
         return _kernel
 

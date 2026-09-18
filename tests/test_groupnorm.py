@@ -1572,6 +1572,191 @@ def test_gpu_triton_dctensor_matches_eager_and_stays_wrapped(dc_cuda, activation
         _assert_close(triton[index], eager[index], 1e-4, what)
 
 
+# ---------------------------------------------------------------------------
+# Output dtype -- the departure from F.group_norm's autocast rule
+# ---------------------------------------------------------------------------
+#
+# `FastGroupNorm` returns its input's dtype where `F.group_norm` returns fp32.
+# Pinned below: the departure itself, at a unit shape and in the model; that
+# every rung does it, so a fallback cannot change an activation's width; and
+# that outside autocast nothing moves.  The standalone `triton_group_norm()`
+# keeps the stock rule (tests/test_triton_group_norm.py).
+
+#: Tolerance between two rungs' results after independent rounding to a narrow
+#: dtype: just over one ulp at the output's magnitude (2^-8 bf16, 2^-11 fp16).
+_NARROW_TOL = {torch.bfloat16: 8e-3, torch.float16: 1e-3}
+
+
+def _pin_rung(rung):
+    """Route the next call to exactly one rung of the ladder."""
+    gn_mod.set_triton_enabled(rung == "triton")
+    gn_mod.set_compile_enabled(rung == "compiled")
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize("rung", ["triton", "compiled", "eager"])
+@pytest.mark.parametrize("autocast_dtype", [torch.bfloat16, torch.float16])
+def test_gpu_output_dtype_is_the_inputs_under_autocast(rung, autocast_dtype):
+    """Under autocast the output is the input's dtype, on all three rungs.
+
+    Stock ``F.group_norm`` in the same region returns fp32 and is the control.
+    The eager rung must be bitwise the stock result rounded once, so the
+    narrowing is a store, not a narrower computation.
+    """
+    device = torch.device("cuda")
+    generator = torch.Generator(device=device).manual_seed(71)
+    x = torch.randn(1, 64, 16, 16, 16, device=device, generator=generator).to(
+        dtype=autocast_dtype, memory_format=torch.channels_last_3d
+    )
+
+    fast = FastGroupNorm(_GROUPS, 64).to(device)
+    with torch.no_grad():
+        fast.weight.normal_(1.0, 0.1, generator=generator)
+        fast.bias.normal_(0.0, 0.1, generator=generator)
+
+    calls = []
+    original = FastGroupNorm._triton_forward
+
+    def spy(self, local):
+        calls.append(local.dtype)
+        return original(self, local)
+
+    _pin_rung(rung)
+    FastGroupNorm._triton_forward = spy
+    try:
+        with torch.autocast("cuda", dtype=autocast_dtype):
+            stock = nn.functional.group_norm(x, _GROUPS, fast.weight, fast.bias)
+            out = fast(x)
+    finally:
+        FastGroupNorm._triton_forward = original
+
+    assert len(calls) == (1 if rung == "triton" else 0), "wrong rung answered"
+    assert stock.dtype is torch.float32, "assumption about stock GroupNorm broke"
+    assert out.dtype is x.dtype, "FastGroupNorm did not emit its input's dtype"
+    assert _channels_last(out)
+    _assert_close(out.float(), stock.float(), _NARROW_TOL[autocast_dtype], "output")
+    if rung == "eager":
+        assert torch.equal(out, stock.to(x.dtype)), "not a plain rounding of stock"
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize("rung", ["triton", "compiled", "eager"])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_gpu_output_dtype_outside_autocast_is_unchanged(rung, dtype):
+    """Outside autocast (``torch_amp: 0``) nothing changes.
+
+    There ``F.group_norm`` already returns the input's dtype, so the two rules
+    coincide.  bf16 (a hand-cast module) checks the answer follows the input
+    rather than being pinned to fp32.
+    """
+    device = torch.device("cuda")
+    generator = torch.Generator(device=device).manual_seed(73)
+    x = torch.randn(1, 64, 16, 16, 16, device=device, generator=generator).to(
+        dtype=dtype, memory_format=torch.channels_last_3d
+    )
+    fast = FastGroupNorm(_GROUPS, 64).to(device=device, dtype=dtype)
+
+    calls = []
+    original = FastGroupNorm._triton_forward
+
+    def spy(self, local):
+        calls.append(local.dtype)
+        return original(self, local)
+
+    _pin_rung(rung)
+    FastGroupNorm._triton_forward = spy
+    try:
+        stock = nn.functional.group_norm(x, _GROUPS, fast.weight, fast.bias)
+        out = fast(x)
+    finally:
+        FastGroupNorm._triton_forward = original
+
+    assert len(calls) == (1 if rung == "triton" else 0), "wrong rung answered"
+    assert stock.dtype is dtype, "assumption about stock GroupNorm broke"
+    assert out.dtype is stock.dtype
+    _assert_close(out.float(), stock.float(), _NARROW_TOL.get(dtype, 1e-5), "output")
+
+
+@pytest.mark.gpu
+def test_gpu_a_rung_fallback_does_not_change_the_output_dtype(caplog):
+    """A mid-run demotion (the module's "Latches") must not change the output
+    dtype: the same call answered by the kernel and then by the fallback it
+    lands on must agree, or an activation's width would change between steps
+    and DDP ranks and break ``torch.utils.checkpoint``'s recompute."""
+    from ScaFFold.unet.triton_group_norm import TritonKernelError
+
+    device = torch.device("cuda")
+    generator = torch.Generator(device=device).manual_seed(77)
+    x = torch.randn(1, 64, 16, 16, 16, device=device, generator=generator).to(
+        dtype=torch.bfloat16, memory_format=torch.channels_last_3d
+    )
+    fast = FastGroupNorm(_GROUPS, 64).to(device)
+    gn_mod.set_triton_enabled(None)
+    gn_mod.set_compile_enabled(True)
+
+    with torch.autocast("cuda", dtype=torch.bfloat16):
+        served = fast(x)
+    assert fast._triton_ok, "the Triton rung did not serve the first call"
+
+    original = FastGroupNorm._triton_forward
+
+    def _raises(self, local):
+        raise TritonKernelError("simulated Triton failure")
+
+    FastGroupNorm._triton_forward = _raises
+    try:
+        with caplog.at_level(logging.WARNING, logger=gn_mod.__name__):
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                fell_back = fast(x)
+    finally:
+        FastGroupNorm._triton_forward = original
+
+    assert gn_mod._triton_failed is True, "the failure did not latch"
+    assert any("falling back" in r.message for r in caplog.records)
+    assert fell_back.dtype is served.dtype is x.dtype
+    assert _channels_last(fell_back)
+    _assert_close(
+        fell_back.float(), served.float(), _NARROW_TOL[torch.bfloat16], "output"
+    )
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize("autocast", [True, False])
+def test_gpu_unet_group_norm_outputs_follow_the_activation_dtype(autocast):
+    """Every GroupNorm site in the model hands back the dtype it consumed:
+    bf16 under bf16 autocast (its producer is a convolution, which autocast
+    casts), fp32 with autocast off."""
+    device = torch.device("cuda")
+    model = _make_unet(seed=0).to(device, memory_format=torch.channels_last_3d)
+    x = _make_input(seed=9).to(device).contiguous(memory_format=torch.channels_last_3d)
+
+    census = []
+
+    def hook(module, inputs, output):
+        census.append((inputs[0].dtype, output.dtype))
+
+    for module in model.modules():
+        if isinstance(module, FastGroupNorm):
+            module.register_forward_hook(hook)
+
+    gn_mod.set_triton_enabled(None)
+    with (
+        torch.autocast("cuda", dtype=torch.bfloat16, enabled=autocast),
+        torch.no_grad(),
+    ):
+        model(x)
+
+    assert census, "no GroupNorm ran"
+    expected = torch.bfloat16 if autocast else torch.float32
+    assert all(seen_in is expected for seen_in, _ in census), (
+        f"a GroupNorm did not see {expected}: {census}"
+    )
+    wrong = [
+        i for i, (seen_in, seen_out) in enumerate(census) if seen_in is not seen_out
+    ]
+    assert not wrong, f"GroupNorm changed the activation dtype at sites {wrong}"
+
+
 @pytest.mark.gpu
 def test_gpu_unet_keeps_the_channels_last_chain(monkeypatch):
     """The whole point: GroupNorm stops breaking the layout chain in the model.
