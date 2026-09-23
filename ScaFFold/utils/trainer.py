@@ -1256,9 +1256,7 @@ class PyTorchTrainer(BaseTrainer):
             epoch_time_s = statistics.median(epoch_times_s)
             adiak_value("epoch_time_s", epoch_time_s)
             if self.world_rank == 0:
-                self.log.info(
-                    f"Median of epoch times: {epoch_time_s:.6f} seconds."
-                )
+                self.log.info(f"Median of epoch times: {epoch_time_s:.6f} seconds.")
         if epoch_minibatch_times_s:
             minibatch_time_s = statistics.median(epoch_minibatch_times_s)
             adiak_value("minibatch_time_s", minibatch_time_s)
