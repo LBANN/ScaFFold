@@ -1,4 +1,4 @@
-hpc-launcher==1.0.5
+hpc-launcher==1.0.6
 matplotlib>=3.9.4
 numpy>=1.26.4
 numba>=0.60.0
