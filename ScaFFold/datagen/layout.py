@@ -14,7 +14,8 @@
 
 """On-disk layout of the fractal library.
 
-Every artifact in the library is a deterministic function of the seed: category
+Every artifact in the library is a deterministic function of the dataset seed
+(``config.dataset_seed``; the training seed plays no part): category
 IFS parameters come from a ``(seed, rank, attempt)`` candidate stream, and each
 instance point cloud is generated from ``(seed, category, instance)``. Resume,
 by contrast, is a pure file-existence test -- an instance is "already done" if
@@ -48,7 +49,7 @@ def library_root(config) -> str:
     return os.path.join(
         str(config.fract_base_dir),
         f"var{config.variance_threshold}",
-        f"seed{int(config.seed)}",
+        f"seed{int(config.dataset_seed)}",
     )
 
 
@@ -83,10 +84,10 @@ def warn_if_legacy_library(config, log) -> bool:
         "Found a fractal library in the old, seed-agnostic layout at %s. "
         "Libraries are now keyed by seed, so this one cannot be reused (a run "
         "under a different seed would silently adopt another seed's data) and "
-        "the categories for seed %s will be generated at %s. Delete the old "
-        "directory once you no longer need it.",
+        "the categories for dataset seed %s will be generated at %s. Delete "
+        "the old directory once you no longer need it.",
         legacy,
-        int(config.seed),
+        int(config.dataset_seed),
         category_param_dir(config),
     )
     return True

@@ -38,6 +38,19 @@ def require_flag(name: str, value) -> bool:
     raise ValueError(f"{name} must be 0, 1, or a boolean; got {value!r}")
 
 
+# np.random.seed, which seeds both datagen and training, accepts [0, 2**32 - 1].
+MAX_SEED = 2**32 - 1
+
+
+def require_seed(name: str, value) -> int:
+    """Validate a seed: an integer that ``np.random.seed`` accepts."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{name} must be an integer; got {value!r}")
+    if not 0 <= value <= MAX_SEED:
+        raise ValueError(f"{name} must be in [0, {MAX_SEED}]; got {value}")
+    return value
+
+
 def validate_unet_dims(problem_scale, unet_bottleneck_dim) -> int:
     """Check that ``problem_scale``/``unet_bottleneck_dim`` describe a real U-Net.
 
@@ -101,7 +114,8 @@ class Config:
             "datagen_from_scratch",
             "train_from_scratch",
             "val_split",
-            "seed",
+            "dataset_seed",
+            "training_seed",
             "dist",
             "framework",
             "starting_learning_rate",
@@ -165,7 +179,8 @@ class Config:
             "epochs",
             "optimizer",
             "val_split",
-            "seed",
+            "dataset_seed",
+            "training_seed",
             "starting_learning_rate",
             "min_learning_rate",
             "T_0",
@@ -244,7 +259,11 @@ class Config:
         self.train_from_scratch = bool(config_dict["train_from_scratch"])
         self.restart = bool(config_dict.get("restart", False))
         self.val_split = config_dict["val_split"]
-        self.seed = config_dict["seed"]
+        # dataset_seed defines the problem: fractal categories and instances,
+        # volume placement, and the train/val split. training_seed covers model
+        # initialization and data order, and never touches the dataset.
+        self.dataset_seed = require_seed("dataset_seed", config_dict["dataset_seed"])
+        self.training_seed = require_seed("training_seed", config_dict["training_seed"])
         if "dist" in config_dict and not bool(config_dict["dist"]):
             raise ValueError(
                 "The 'dist: 0' mode is no longer supported. ScaFFold benchmark "

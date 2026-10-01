@@ -187,10 +187,15 @@ class BaseTrainer:
 
     def create_sampler(self):
         """Create DistributedSamplers for train and validation datasets."""
+        # Data order is training randomness, so it follows the training seed.
+        # (Left at DistributedSampler's default seed of 0, every run shuffled
+        # identically whatever seed it was given.) The seed is the same on
+        # every rank, which DistributedSampler requires.
         self.train_sampler = torch.utils.data.distributed.DistributedSampler(
             self.train_set,
             num_replicas=self.data_num_replicas,
             rank=self.data_replica_rank,
+            seed=self.config.training_seed,
         )
         # Validation is sharded WITHOUT padding: the metric aggregation
         # sums each replica's dice and sample count across the data-parallel

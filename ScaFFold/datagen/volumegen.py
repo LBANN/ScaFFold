@@ -310,8 +310,8 @@ def main(config: Dict):
     n_fracts_per_vol = config.n_fracts_per_vol
     _, _, n_total_shards, grid_size = _validate_generation_config(config)
 
-    random.seed(config.seed)  # Python
-    np.random.seed(config.seed)  # NumPy
+    random.seed(config.dataset_seed)  # Python
+    np.random.seed(config.dataset_seed)  # NumPy
 
     # Set up directories and select instances from each category
     volumes_contents = None
@@ -387,7 +387,7 @@ def main(config: Dict):
 
     # Determine train/val split globally so all ranks know where to save
     num_volumes = len(volumes_contents)
-    random.seed(config.seed)  # Reset seed to ensure all ranks get same split
+    random.seed(config.dataset_seed)  # Reset seed to ensure all ranks get same split
     val_indices = set(
         random.sample(range(num_volumes), int(num_volumes * config.val_split / 100))
     )
@@ -417,7 +417,7 @@ def main(config: Dict):
                 end_idx - 1,
             )
 
-            np.random.seed(config.seed)
+            np.random.seed(config.dataset_seed)
             fractal_colors = np.random.rand(config.n_categories, 3)
 
             # The instance library is keyed by seed (see ScaFFold.datagen
@@ -451,7 +451,7 @@ def main(config: Dict):
                 if cached_volume_idx != volume_idx:
                     curr_vol = volumes_contents[volume_idx]
                     global_vol_idx = int(curr_vol[0])
-                    vol_seed = config.seed + global_vol_idx
+                    vol_seed = config.dataset_seed + global_vol_idx
                     random.seed(vol_seed)
                     np.random.seed(vol_seed)
 

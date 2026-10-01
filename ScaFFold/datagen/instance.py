@@ -233,7 +233,7 @@ def main(config: Config):
     log = setup_mpi_logger(__file__, getattr(config, "verbose", 0))
 
     # Each instance is seeded individually inside the generation loop from
-    # (config.seed, category, instance), so its content is reproducible and
+    # (config.dataset_seed, category, instance), so its content is reproducible and
     # independent of MPI world size, rank assignment, and resume state. A single
     # per-rank seed here would make an instance depend on how the work list was
     # partitioned, which shifts with world size and with pre-existing files.
@@ -378,7 +378,7 @@ def main(config: Config):
             weights,
             category,
             instance,
-            config.seed,
+            config.dataset_seed,
         )
 
         # Force point_data to be contiguous and store as float32 (see

@@ -297,6 +297,10 @@ def build_run_config(args, parsers, log, world_size):
                 value,
             )
             combined_config[key] = value
+    # Seeds given on the command line bypass the validation Config applied to
+    # the config files; check them before any work starts.
+    for name in ("dataset_seed", "training_seed"):
+        config_utils.require_seed(name, combined_config[name])
     # The subcommand is always owned by the command line.
     combined_config["command"] = cli_args["command"]
 
@@ -424,6 +428,11 @@ def main():
         type=str,
         help="Base directory for fractal IFS and instances.",
     )
+    generate_fractals_parser.add_argument(
+        "--dataset-seed",
+        type=int,
+        help=("Seed that defines the fractal categories and instances."),
+    )
 
     # --------------
     # Subcommand: benchmark
@@ -483,7 +492,19 @@ def main():
         type=int,
         help="Power of 2 of the UNet bottleneck layer dimension.",
     )
-    benchmark_parser.add_argument("--seed", type=int, help="Random seed.")
+    benchmark_parser.add_argument(
+        "--dataset-seed",
+        type=int,
+        help=(
+            "Seed that defines the dataset: fractal categories and instances, "
+            "volume placement, and the train/val split."
+        ),
+    )
+    benchmark_parser.add_argument(
+        "--training-seed",
+        type=int,
+        help="Seed for training randomness: model initialization and data order.",
+    )
     benchmark_parser.add_argument(
         "--local-batch-size",
         type=int,
