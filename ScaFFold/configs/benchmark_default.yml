@@ -20,7 +20,7 @@ local_batch_size: 1                # Batch size for each vol size per DDP rank.
 optimizer: "ADAM"                  # "ADAM" is preferred option, otherwise training defaults to RMSProp.
 starting_learning_rate: 0.001      # Initial learning rate for training.
 min_learning_rate: 0.0001          # Minimum learning rate for CosineAnnealingWarmRestarts.
-T_0: 100                           # Epochs in the first cosine restart cycle.
+T_0: 10                            # Epochs in the first cosine restart cycle.
 T_mult: 2                          # Restart cycle growth factor.
 disable_scheduler: 0               # If 1, disable scheduler during training to use constant LR.
 
