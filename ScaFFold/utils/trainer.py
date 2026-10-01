@@ -901,6 +901,7 @@ class PyTorchTrainer(BaseTrainer):
         # converged run exits the loop immediately instead of training an
         # extra epoch to rediscover that it converged.
         dice_score_train = self.start_val_dice
+        epoch_times_s = []
         epoch_minibatch_times_s = []
         # Track the last epoch checkpointed inside the loop so the final-save
         # decision below is identical on every rank. The in-loop checkpoint
@@ -1114,6 +1115,7 @@ class PyTorchTrainer(BaseTrainer):
 
                 epoch_end_time = time.time()
                 epoch_duration = epoch_end_time - epoch_start_time
+                epoch_times_s.append(epoch_duration)
 
                 # Sync for batch time happens once after epoch is already done (low overhead)
                 if len(minibatch_events) > 0:
@@ -1250,6 +1252,11 @@ class PyTorchTrainer(BaseTrainer):
         # its pre-check.
         self.checkpoint_manager.finalize_saves()
 
+        if epoch_times_s:
+            epoch_time_s = statistics.median(epoch_times_s)
+            adiak_value("epoch_time_s", epoch_time_s)
+            if self.world_rank == 0:
+                self.log.info(f"Median of epoch times: {epoch_time_s:.6f} seconds.")
         if epoch_minibatch_times_s:
             minibatch_time_s = statistics.median(epoch_minibatch_times_s)
             adiak_value("minibatch_time_s", minibatch_time_s)
