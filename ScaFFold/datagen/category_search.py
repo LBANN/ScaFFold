@@ -460,7 +460,7 @@ def main(config: Config) -> None:
             f"datagen_batch_size must be positive, got {datagen_batch_size}"
         )
 
-    base_seed = int(config.seed)
+    base_seed = int(config.dataset_seed)
 
     log.info("MPI size = %s", size)
 

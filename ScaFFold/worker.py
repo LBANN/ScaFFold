@@ -151,9 +151,17 @@ def main(kwargs_dict: dict = {}):
     # Set logging options
     log = setup_mpi_logger(__file__, config.verbose)
 
-    # Set random seeds for reproducibility
-    set_seeds(config.seed)
-    log.debug(f"random seeds set to {config.seed}")
+    # Two seeds, two phases. Data generation below draws only on the dataset
+    # seed, so anything it takes from the global RNGs is a function of the
+    # dataset -- whose cache key holds the dataset seed alone. Training is
+    # re-seeded from the training seed once the dataset is in place.
+    set_seeds(config.dataset_seed)
+    log.info(
+        "Seeds: dataset_seed=%d (fractals, volumes, train/val split), "
+        "training_seed=%d (model initialization, data order)",
+        config.dataset_seed,
+        config.training_seed,
+    )
 
     # Get MPI information
     rank = get_world_rank(required=True)
@@ -203,6 +211,12 @@ def main(kwargs_dict: dict = {}):
     )
     config.dataset_dir = dataset_dir
     end_code_region("get_dataset")
+
+    # Everything from here on is training. Seeding it from the training seed
+    # alone keeps model initialization and data order independent of the
+    # dataset seed and of whether this run generated the dataset or reused a
+    # cached one (datagen reseeds the Python and NumPy global RNGs).
+    set_seeds(config.training_seed)
 
     # Initialize model
     begin_code_region("init_model")
@@ -357,6 +371,7 @@ def main(kwargs_dict: dict = {}):
                 f"target_dice={config.target_dice}, "
                 f"n_categories={config.n_categories}, "
                 f"n_instances_used_per_fractal={config.n_instances_used_per_fractal}, "
+                f"dataset_seed={config.dataset_seed}, "
                 f"unet_bottleneck_dim={config.unet_bottleneck_dim}, "
                 f"optimizer={config.optimizer}, "
                 f"starting_learning_rate={config.starting_learning_rate}, "
