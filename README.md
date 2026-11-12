@@ -41,8 +41,8 @@ The model is trained from a random initialization until convergence, which is de
         1. `ml cce/21.0.2 cray-mpich/9.1.0 rocm/7.2.1 rccl/fast-env-slows-mpi`
 
 1. Install the benchmark in the python venv:
-    - CUDA: `bash scripts/install-cuda.sh`
-    - ROCm: `bash scripts/install-rocm.sh`
+    - CUDA: `bash scripts/install-matrix.sh`
+    - ROCm: `bash scripts/install-tuolumne.sh`
 
 
 ## Running the benchmark

@@ -3,8 +3,8 @@
 # flux: --exclusive
 # flux: -N 1
 # flux: -g=1
-# flux: -t 30m
-# flux: -q pbatch
+# flux: -t 60m
+# flux: -q pdebug
 # flux: -B lair
 
 ml cce/21.0.3 cray-mpich/9.1.0 rocm/7.14 rccl/fast-env-slows-mpi
@@ -21,7 +21,7 @@ export SCAFFOLD_CONV_TRITON=1
 
 CONFIG_PATH="$(pwd)/ScaFFold/configs/benchmark_default.yml"
 
-# torchrun-hpc -N 1 -n 1 $(which scaffold) generate_fractals -c "$CONFIG_PATH"
+torchrun-hpc -N 1 -n 1 $(which scaffold) generate_fractals -c "$CONFIG_PATH"
 
 # Uncomment if you want torch profiling
 #export PROFILE_TORCH=ON
