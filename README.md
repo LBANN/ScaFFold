@@ -41,8 +41,8 @@ The model is trained from a random initialization until convergence, which is de
         1. `ml cce/21.0.2 cray-mpich/9.1.0 rocm/7.2.1 rccl/fast-env-slows-mpi`
 
 1. Install the benchmark in the python venv:
-    - CUDA: `pip install --no-binary=mpi4py -e .[cuda] --prefix=.venvs/scaffoldvenv-matrix --extra-index-url https://download.pytorch.org/whl/cu132 2>&1 | tee install.log`
-    - ROCm: `pip install -e .[rocm] --find-links https://download.pytorch.org/whl/torch/ --find-links https://download.pytorch.org/whl/torchaudio/ --find-links https://download.pytorch.org/whl/torchvision/ --find-links https://download.pytorch.org/whl/triton-rocm/ 2>&1 | tee install.log`
+    - CUDA: `bash scripts/install-matrix.sh`
+    - ROCm: `bash scripts/install-tuolumne.sh`
 
 
 ## Running the benchmark
