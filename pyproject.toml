@@ -63,11 +63,20 @@ dependencies = [
   "wandb>=0.19.6",
   "PyYAML>=6.0.2",
   "psutil>=5.9.0",
-  "distconv @ git+https://github.com/LBANN/DistConv.git@084b20a",
 ]
 requires-python = ">=3.10"
 
 [project.optional-dependencies]
+# Python dependencies of PyTorch installed with --no-deps in the ROCm 7.14 script.
+torch = [
+  "filelock",
+  "typing-extensions",
+  "setuptools",
+  "sympy",
+  "networkx",
+  "jinja2",
+  "fsspec",
+]
 profiling = [
   "pybind11>=3.0.0"
 ]
@@ -75,16 +84,6 @@ test = [
   "pytest>=8",
   "pytest-timeout>=2.3",
   "psutil",
-]
-cuda = [
-    "torch==2.12.0+cu132",
-    "mpi4py==4.1.1",
-]
-rocm = [
-    "torch==2.12.0+rocm7.2",
-    "torchaudio==2.11.0+rocm7.2",
-    "torchvision==0.27.0+rocm7.2",
-    "mpi4py==4.1.1+mpich.9.1.0",
 ]
 
 [project.entry-points.console_scripts]
