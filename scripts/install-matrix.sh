@@ -7,8 +7,7 @@ export LD_LIBRARY_PATH=/usr/lib64:$LD_LIBRARY_PATH
 
 # Matrix-specific PyTorch and MPI builds
 python -m pip install --extra-index-url https://download.pytorch.org/whl/cu132 'torch==2.12.0+cu132'
-python -m pip install --no-binary=mpi4py 'mpi4py==4.1.2'
 
 # ScaFFold's shared dependencies come from pyproject.toml.
-python -m pip install -e .
+python -m pip instal --no-binary=mpi4py -e .
 python -m pip install --no-deps 'distconv @ git+https://github.com/LBANN/DistConv.git@084b20a'
