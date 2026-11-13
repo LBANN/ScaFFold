@@ -26,4 +26,4 @@ torchrun-hpc -N 1 -n 1 $(which scaffold) generate_fractals -c "$CONFIG_PATH"
 # Uncomment if you want torch profiling
 #export PROFILE_TORCH=ON
 
-torchrun-hpc -N 1 -n 4 --gpus-per-proc 1 $(which scaffold) benchmark -c "$CONFIG_PATH"
+torchrun-hpc -N 1 -n 4 --gpus-per-proc 1 --cpus-per-task 24 $(which scaffold) benchmark -c "$CONFIG_PATH"
