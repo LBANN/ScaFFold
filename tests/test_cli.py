@@ -656,3 +656,180 @@ def test_config_round_trips_through_a_restart(monkeypatch, tmp_path):
     assert config["restart"] is True
     assert config["train_from_scratch"] is False
     assert config["benchmark_run_dir"] == str(run_dir)
+
+
+@pytest.mark.parametrize("mode", ["native-compiled", "triton-compiled"])
+@pytest.mark.parametrize(
+    "file_shards,cli_shards,unsharded,spatial,total_shards",
+    [
+        ([1, 1, 1], [2, 1, 1], False, True, 2),
+        ([2, 1, 1], [1, 1, 1], True, False, 1),
+    ],
+    ids=["enable_spatial", "disable_spatial"],
+)
+def test_execution_preset_follows_cli_shard_count(
+    monkeypatch,
+    tmp_path,
+    mode,
+    file_shards,
+    cli_shards,
+    unsharded,
+    spatial,
+    total_shards,
+):
+    """The saved and dispatched routes must use the final CLI mesh."""
+    cfg = write_config(
+        tmp_path,
+        {
+            "execution_mode": mode,
+            "dc_num_shards": file_shards,
+            "verbose": 1,
+            "datagen_batch_size": 500,
+        },
+    )
+    _, calls = run_cli(
+        monkeypatch,
+        [
+            "scaffold",
+            "benchmark",
+            "-c",
+            str(cfg),
+            "--dc-num-shards",
+            *map(str, cli_shards),
+        ],
+        comm=_FakeComm(size=2),
+    )
+    (config,) = calls["benchmark"]
+    saved_path = Path(config["benchmark_run_dir"]) / "config.yaml"
+    saved = yaml.safe_load(saved_path.read_text())
+    reloaded = vars(cli.config_utils.load_config(str(saved_path), "benchmark"))
+    for effective in (config, saved, reloaded):
+        assert effective["execution_mode"] == mode
+        assert effective["dc_num_shards"] == cli_shards
+        assert effective["dc_total_shards"] == total_shards
+        assert effective["torch_compile"] and effective["torch_compile_fullgraph"]
+        assert effective["torch_compile_unsharded"] is unsharded
+        assert effective["torch_compile_spatial"] is spatial
+        assert effective["torch_compile_loss"] is False
+    assert config["verbose"] == saved["verbose"] == 1
+    assert config["datagen_batch_size"] == saved["datagen_batch_size"] == 500
+
+
+@pytest.mark.parametrize(
+    "source_mode,target_mode,compiled",
+    [
+        ("native-compiled", "triton-eager", False),
+        ("triton-eager", "native-compiled", True),
+    ],
+)
+def test_saved_execution_preset_can_change_mode_from_cli(
+    monkeypatch, tmp_path, source_mode, target_mode, compiled
+):
+    """Stored effective flags cannot override a newly selected preset."""
+    cfg = write_config(
+        tmp_path, {"execution_mode": source_mode, "dc_num_shards": [2, 1, 1]}
+    )
+    _, first = run_cli(
+        monkeypatch,
+        ["scaffold", "benchmark", "-c", str(cfg)],
+        comm=_FakeComm(size=2),
+    )
+    first_run = Path(first["benchmark"][0]["benchmark_run_dir"])
+    _, calls = run_cli(
+        monkeypatch,
+        [
+            "scaffold",
+            "benchmark",
+            "-c",
+            str(first_run / "config.yaml"),
+            "--execution-mode",
+            target_mode,
+        ],
+        comm=_FakeComm(size=2),
+    )
+    (config,) = calls["benchmark"]
+    saved = yaml.safe_load(
+        (Path(config["benchmark_run_dir"]) / "config.yaml").read_text()
+    )
+    for effective in (config, saved):
+        assert effective["execution_mode"] == target_mode
+        assert effective["torch_compile"] is compiled
+        assert effective["torch_compile_fullgraph"] is compiled
+        assert effective["torch_compile_spatial"] is compiled
+        assert effective["torch_compile_unsharded"] is False
+        assert effective["torch_compile_loss"] is False
+
+
+def test_cli_custom_execution_mode_preserves_authored_compile_flags(
+    monkeypatch, tmp_path
+):
+    """Selecting custom recovers flags ignored by the file's named preset."""
+    cfg = write_config(
+        tmp_path,
+        {
+            "execution_mode": "triton-eager",
+            "dc_num_shards": [1, 1, 1],
+            "torch_compile": 1,
+            "torch_compile_fullgraph": 1,
+            "torch_compile_unsharded": 1,
+            "torch_compile_loss": 1,
+        },
+    )
+    _, calls = run_cli(
+        monkeypatch,
+        ["scaffold", "benchmark", "-c", str(cfg), "--execution-mode", "custom"],
+    )
+    (config,) = calls["benchmark"]
+    assert config["execution_mode"] == "custom"
+    assert config["torch_compile"] is True
+    assert config["torch_compile_fullgraph"] is True
+    assert config["torch_compile_unsharded"] is True
+    assert config["torch_compile_loss"] is True
+
+
+def test_cli_custom_execution_mode_validated_after_shard_override(
+    monkeypatch, tmp_path
+):
+    """A valid custom file can become invalid after a CLI mesh override."""
+    cfg = write_config(
+        tmp_path,
+        {
+            "execution_mode": "custom",
+            "dc_num_shards": [1, 1, 1],
+            "torch_compile": 1,
+            "torch_compile_fullgraph": 1,
+            "torch_compile_unsharded": 1,
+        },
+    )
+    with pytest.raises(ValueError, match="dc_num_shards"):
+        run_cli(
+            monkeypatch,
+            [
+                "scaffold",
+                "benchmark",
+                "-c",
+                str(cfg),
+                "--dc-num-shards",
+                "2",
+                "1",
+                "1",
+            ],
+            comm=_FakeComm(size=2),
+        )
+    assert not (tmp_path / "runs").exists()
+
+
+def test_cli_custom_execution_mode_defaults_absent_flags_to_off(monkeypatch, tmp_path):
+    """A file's resolved preset must not become authored custom settings."""
+    cfg = write_config(tmp_path, {"execution_mode": "native-compiled"})
+    authored = yaml.safe_load(cfg.read_text())
+    for name in cli.config_utils.COMPILE_FLAGS:
+        authored.pop(name, None)
+    cfg.write_text(yaml.dump(authored))
+    _, calls = run_cli(
+        monkeypatch,
+        ["scaffold", "benchmark", "-c", str(cfg), "--execution-mode", "custom"],
+    )
+    (config,) = calls["benchmark"]
+    assert config["execution_mode"] == "custom"
+    assert all(config[name] is False for name in cli.config_utils.COMPILE_FLAGS)

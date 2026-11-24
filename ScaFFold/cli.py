@@ -297,38 +297,17 @@ def build_run_config(args, parsers, log, world_size):
                 value,
             )
             combined_config[key] = value
-    # Seeds given on the command line bypass the validation Config applied to
-    # the config files; check them before any work starts.
-    for name in ("dataset_seed", "training_seed"):
-        config_utils.require_seed(name, combined_config[name])
     # The subcommand is always owned by the command line.
     combined_config["command"] = cli_args["command"]
 
-    # Recalculate unet_layers to capture any CLI overrides. The overridden
-    # pair has to be re-validated: Config only saw the config-file values.
-    config_utils.validate_unet_dims(
-        combined_config["problem_scale"], combined_config["unet_bottleneck_dim"]
-    )
-    combined_config["unet_layers"] = (
-        combined_config["problem_scale"] - combined_config["unet_bottleneck_dim"]
-    )
-    config_utils.require_positive_int("n_categories", combined_config["n_categories"])
-
-    # Resolve paths to absolute, matching Config() behavior
-    if "base_run_dir" in combined_config and combined_config["base_run_dir"]:
-        combined_config["base_run_dir"] = str(
-            Path(combined_config["base_run_dir"]).resolve()
-        )
-
-    if "dataset_dir" in combined_config and combined_config["dataset_dir"]:
-        combined_config["dataset_dir"] = str(
-            Path(combined_config["dataset_dir"]).resolve()
-        )
-
-    if "fract_base_dir" in combined_config and combined_config["fract_base_dir"]:
-        combined_config["fract_base_dir"] = str(
-            Path(combined_config["fract_base_dir"]).resolve()
-        )
+    # The CLI can change the mode or shard count after the first Config pass.
+    # Restore authored toggles in case it selects custom mode: the file's
+    # preset may have replaced them above. Resolve the final preset and validate
+    # all core overrides before saving or broadcasting the run configuration.
+    for name in config_utils.COMPILE_FLAGS:
+        combined_config[name] = merged_dict.get(name, 0)
+    # Updating retains auxiliary values that Config accepts but does not store.
+    combined_config.update(vars(config_utils.Config(combined_config)))
 
     # Calculate these variables after override
     combined_config["vol_size"] = pow(2, combined_config["problem_scale"])
@@ -464,6 +443,15 @@ def main():
     )
 
     # Arguments from benchmark_default.yml
+    benchmark_parser.add_argument(
+        "--execution-mode",
+        choices=config_utils.EXECUTION_MODES,
+        help=(
+            "Select native/Triton eager or compiled execution. Named presets "
+            "choose compilation settings automatically; custom uses the "
+            "advanced torch_compile options from the config."
+        ),
+    )
     benchmark_parser.add_argument(
         "--base-run-dir", type=str, help="Subfolder of $(pwd) in which to run jobs."
     )

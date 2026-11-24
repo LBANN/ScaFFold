@@ -128,10 +128,12 @@ checkpoint -- unchanged; neither module has parameters or buffers.
 """
 
 import logging
+from math import prod
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch._prims_common import suggest_memory_format
 
 # Shared with ScaFFold.unet.conv3d so the corrections these helpers carry cannot
 # drift between the two ladders.  Imported by name so they stay module
@@ -260,6 +262,119 @@ def set_triton_enabled(enabled):
     if _triton_override is True:
         _triton_failed = False
     return previous
+
+
+@torch.library.custom_op(
+    "scaffold_group_norm::cpu_forward", mutates_args=(), device_types="cpu"
+)
+def _cpu_group_norm(
+    input: torch.Tensor,
+    weight: torch.Tensor | None,
+    bias: torch.Tensor | None,
+    groups: int,
+    eps: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Keep the native CPU normalization and its saved statistics in a graph.
+
+    PyTorch 2.15's GroupNorm decomposition narrows saved mean/rstd to the
+    activation dtype. Native CPU GroupNorm retains FP32 statistics when BF16
+    activations use FP32 affine parameters. Its reduction and backward kernels
+    also differ from the decomposition in FP32. Keeping both native kernels
+    preserves training numerics while activations retain their original dtype.
+    The opaque backward supports first-order training; higher-order gradients
+    through this compiled CPU route are not supported, including when using
+    the diagnostic ``torch.compile(backend="eager")`` backend.
+    """
+    local = input.contiguous(memory_format=suggest_memory_format(input))
+    n, c = local.shape[:2]
+    return torch.ops.aten.native_group_norm.default(
+        local,
+        weight.contiguous() if weight is not None else None,
+        bias.contiguous() if bias is not None else None,
+        n,
+        c,
+        prod(local.shape[2:]),
+        groups,
+        eps,
+    )
+
+
+@_cpu_group_norm.register_fake
+def _cpu_group_norm_fake(input, weight, bias, groups, eps):
+    affine = weight if weight is not None else bias
+    statistics_dtype = input.dtype if affine is None else affine.dtype
+    statistics_shape = (input.shape[0], groups)
+    return (
+        torch.empty_like(input, memory_format=suggest_memory_format(input)),
+        input.new_empty(statistics_shape, dtype=statistics_dtype),
+        input.new_empty(statistics_shape, dtype=statistics_dtype),
+    )
+
+
+@torch.library.custom_op(
+    "scaffold_group_norm::cpu_backward",
+    mutates_args=(),
+    device_types="cpu",
+    schema="(Tensor grad, Tensor input, Tensor mean, Tensor rstd, Tensor? weight, Tensor? bias, int groups) -> (Tensor, Tensor?, Tensor?)",
+)
+def _cpu_group_norm_backward(
+    grad: torch.Tensor,
+    input: torch.Tensor,
+    mean: torch.Tensor,
+    rstd: torch.Tensor,
+    weight: torch.Tensor | None,
+    bias: torch.Tensor | None,
+    groups: int,
+) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+    memory_format = suggest_memory_format(input)
+    local = input.contiguous(memory_format=memory_format)
+    n, c = local.shape[:2]
+    return torch.ops.aten.native_group_norm_backward.default(
+        grad.contiguous(memory_format=memory_format),
+        local,
+        mean,
+        rstd,
+        weight.contiguous() if weight is not None else None,
+        n,
+        c,
+        prod(local.shape[2:]),
+        groups,
+        [True, weight is not None, bias is not None],
+    )
+
+
+@_cpu_group_norm_backward.register_fake
+def _cpu_group_norm_backward_fake(grad, input, mean, rstd, weight, bias, groups):
+    return (
+        torch.empty_like(input, memory_format=suggest_memory_format(input)),
+        None
+        if weight is None
+        else torch.empty_like(weight, memory_format=torch.contiguous_format),
+        None
+        if bias is None
+        else torch.empty_like(bias, memory_format=torch.contiguous_format),
+    )
+
+
+def _cpu_group_norm_setup_context(ctx, inputs, output):
+    input, weight, bias, groups, _ = inputs
+    _, mean, rstd = output
+    ctx.save_for_backward(input, weight, bias, mean, rstd)
+    ctx.groups = groups
+    ctx.mark_non_differentiable(mean, rstd)
+
+
+def _cpu_group_norm_autograd_backward(ctx, grad, _grad_mean, _grad_rstd):
+    input, weight, bias, mean, rstd = ctx.saved_tensors
+    grad_input, grad_weight, grad_bias = _cpu_group_norm_backward(
+        grad, input, mean, rstd, weight, bias, ctx.groups
+    )
+    return grad_input, grad_weight, grad_bias, None, None
+
+
+_cpu_group_norm.register_autograd(
+    _cpu_group_norm_autograd_backward, setup_context=_cpu_group_norm_setup_context
+)
 
 
 def _group_norm(input, num_groups, weight, bias, eps):
@@ -543,7 +658,7 @@ def _match_memory_format(out, reference):
 def _match_input_dtype(out, reference):
     """Give ``out`` ``reference``'s dtype, casting only if it differs.
 
-    ``F.group_norm`` returns fp32 inside an autocast region; ``FastGroupNorm``
+    CUDA autocast makes ``F.group_norm`` return fp32; ``FastGroupNorm``
     emits the input's dtype instead (see its "Output dtype").  The Triton rung
     narrows in its store, so the compiled and eager rungs narrow here.  Applied
     after the ReLU, as in the kernel's store; ``.to`` keeps the memory format.
@@ -571,8 +686,8 @@ class FastGroupNorm(nn.GroupNorm):
 
     Output dtype
     ============
-    This module returns its *input's* dtype; stock GroupNorm carries autocast's
-    fp32 cast policy and returns fp32 inside an autocast region.  Only the
+    This module returns its *input's* dtype; stock CUDA GroupNorm carries
+    autocast's fp32 cast policy and returns fp32 inside an autocast region. Only the
     store narrows -- statistics and the normalized value stay fp32 on every
     rung -- so the output is the fp32 answer rounded once, and the fp32 write
     every consumer immediately re-read as bf16 is gone.  Outside autocast
@@ -713,6 +828,31 @@ class FastGroupNorm(nn.GroupNorm):
         )
 
     def _eager_forward(self, input):
+        if (
+            torch.compiler.is_compiling()
+            and input.device.type == "cpu"
+            and input.dtype in (torch.float32, torch.bfloat16)
+            and not _functorch_active()
+        ):
+            # These checks normally precede torch.group_norm in F.group_norm;
+            # the lower-level native operator does not enforce both of them.
+            if input.dim() < 2:
+                raise RuntimeError(
+                    "Expected at least 2 dimensions for input tensor "
+                    f"but received {input.dim()}"
+                )
+            F._verify_batch_size(
+                [input.size(0) * input.size(1) // self.num_groups, self.num_groups]
+                + list(input.size()[2:])
+            )
+
+            def native_cpu(local):
+                out, _, _ = _cpu_group_norm(
+                    local, self.weight, self.bias, self.num_groups, self.eps
+                )
+                return self._activate(_match_memory_format(out, local))
+
+            return _run_local(input, _dctensor_ops(input), native_cpu)
         # super().forward() is the stock kernel; deferring to it keeps the eager
         # path identical to nn.GroupNorm's (plus the ReLU, the relayout and the
         # dtype narrowing) by construction.

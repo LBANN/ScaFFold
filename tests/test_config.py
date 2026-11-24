@@ -33,7 +33,8 @@ BASE = {
     "n_instances_used_per_fractal": 145,
     "problem_scale": 7,
     "unet_bottleneck_dim": 3,
-    "seed": 42,
+    "dataset_seed": 523,
+    "training_seed": 42,
     "local_batch_size": 1,
     "dataloader_num_workers": 1,
     "optimizer": "ADAM",
@@ -131,6 +132,192 @@ def test_activation_checkpointing_documented_in_the_default_config():
     assert "activation_checkpointing:" in text
 
 
+def test_execution_mode_defaults_to_triton_eager():
+    for data in (
+        BASE,
+        yaml.safe_load((CONFIG_DIR / "benchmark_default.yml").read_text()),
+    ):
+        cfg = config_utils.Config(data)
+        assert cfg.execution_mode == "triton-eager"
+        assert not any(getattr(cfg, name) for name in config_utils.COMPILE_FLAGS)
+
+
+@pytest.mark.parametrize("mode", config_utils.EXECUTION_MODES)
+@pytest.mark.parametrize("shards", [[1, 1, 1], [2, 1, 1], [1, 1, 2], [2, 2, 1]])
+def test_execution_mode_selects_compilation_route(mode, shards):
+    cfg = config_utils.Config({**BASE, "execution_mode": mode, "dc_num_shards": shards})
+    compiled = mode in ("native-compiled", "triton-compiled")
+    spatial = compiled and any(n > 1 for n in shards)
+    assert cfg.execution_mode == mode
+    assert cfg.torch_compile is compiled
+    assert cfg.torch_compile_fullgraph is compiled
+    assert cfg.torch_compile_unsharded is (compiled and not spatial)
+    assert cfg.torch_compile_spatial is spatial
+    assert cfg.torch_compile_loss is False
+
+
+@pytest.mark.parametrize(
+    "mode", [None, True, 0, "native", "NATIVE-EAGER", ["native-eager"], {}]
+)
+def test_execution_mode_rejects_invalid_values(mode):
+    with pytest.raises(ValueError, match="execution_mode"):
+        config_utils.Config({**BASE, "execution_mode": mode})
+
+
+@pytest.mark.parametrize(
+    "mode", ["native-eager", "triton-eager", "native-compiled", "triton-compiled"]
+)
+def test_presets_own_advanced_compilation_flags(mode):
+    # Conflicting custom flags from an override or saved run cannot change a
+    # named preset's meaning; only their types are validated in preset modes.
+    cfg = config_utils.Config(
+        {**BASE, "execution_mode": mode, **dict.fromkeys(config_utils.COMPILE_FLAGS, 1)}
+    )
+    expected = config_utils.Config({**BASE, "execution_mode": mode})
+    assert vars(cfg) == vars(expected)
+
+
+@pytest.mark.parametrize("name", config_utils.COMPILE_FLAGS)
+@pytest.mark.parametrize("mode", ["triton-eager", "custom"])
+def test_inactive_compile_flag_types_are_still_validated(name, mode):
+    with pytest.raises(ValueError, match=name):
+        config_utils.Config({**BASE, "execution_mode": mode, name: "yes"})
+
+
+@pytest.mark.parametrize("mode", config_utils.EXECUTION_MODES)
+def test_execution_mode_saved_config_roundtrip(tmp_path, mode):
+    cfg = config_utils.Config(
+        {**BASE, "execution_mode": mode, "dc_num_shards": [2, 1, 1]}
+    )
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump(vars(cfg)))
+    reloaded = config_utils.load_config(str(path), "benchmark")
+    assert vars(reloaded) == vars(cfg)
+
+
+def test_saved_preset_recomputes_flags_after_mode_and_shard_changes(tmp_path):
+    cfg = config_utils.Config({**BASE, "execution_mode": "native-compiled"})
+    saved = tmp_path / "config.yaml"
+    saved.write_text(yaml.safe_dump(vars(cfg)))
+    override = tmp_path / "override.yml"
+    override.write_text(yaml.safe_dump({"dc_num_shards": [1, 2, 1]}))
+    spatial = config_utils.Config(config_utils.load_config_files([saved, override]))
+    assert spatial.torch_compile_spatial
+    assert not spatial.torch_compile_unsharded
+    eager = config_utils.Config({**vars(spatial), "execution_mode": "triton-eager"})
+    assert not any(getattr(eager, name) for name in config_utils.COMPILE_FLAGS)
+
+
+CUSTOM_BASE = {**BASE, "execution_mode": "custom"}
+
+
+def test_torch_compile_config_option():
+    base = yaml.safe_load((CONFIG_DIR / "benchmark_default.yml").read_text())
+    base["execution_mode"] = "custom"
+    assert config_utils.Config({**base, "torch_compile": 0}).torch_compile is False
+    assert (
+        config_utils.Config(
+            {**base, "torch_compile": 1, "torch_compile_unsharded": 1}
+        ).torch_compile
+        is True
+    )
+    with pytest.raises(ValueError, match="torch_compile"):
+        config_utils.Config({**base, "torch_compile": "yes"})
+    assert "torch_compile:" in (CONFIG_DIR / "benchmark_default.yml").read_text()
+
+
+def test_torch_compile_unsharded_requires_compile_and_one_spatial_shard():
+    assert config_utils.Config(dict(CUSTOM_BASE)).torch_compile_unsharded is False
+    enabled = {**CUSTOM_BASE, "torch_compile": 1, "torch_compile_unsharded": 1}
+    assert config_utils.Config(enabled).torch_compile_unsharded is True
+    with pytest.raises(ValueError, match="torch_compile_unsharded"):
+        config_utils.Config({**CUSTOM_BASE, "torch_compile_unsharded": 1})
+    with pytest.raises(ValueError, match="dc_num_shards"):
+        config_utils.Config({**enabled, "dc_num_shards": [2, 1, 1]})
+    with pytest.raises(ValueError, match="torch_compile_unsharded"):
+        config_utils.Config({**CUSTOM_BASE, "torch_compile_unsharded": "yes"})
+
+
+def test_torch_compile_spatial_requires_fullgraph_and_spatial_shards():
+    enabled = {
+        **CUSTOM_BASE,
+        "torch_compile": 1,
+        "torch_compile_fullgraph": 1,
+        "torch_compile_spatial": 1,
+        "dc_num_shards": [2, 1, 1],
+    }
+    assert config_utils.Config(enabled).torch_compile_spatial is True
+    for missing in ("torch_compile", "torch_compile_fullgraph"):
+        with pytest.raises(ValueError, match="torch_compile"):
+            config_utils.Config({**enabled, missing: 0})
+    with pytest.raises(ValueError, match="spatial shard count"):
+        config_utils.Config({**enabled, "dc_num_shards": [1, 1, 1]})
+    with pytest.raises(ValueError, match="exclusive"):
+        config_utils.Config({**enabled, "torch_compile_unsharded": 1})
+    checkpointed = config_utils.Config(
+        {**enabled, "activation_checkpointing": 1, "torch_compile_loss": 1}
+    )
+    assert checkpointed.activation_checkpointing and checkpointed.torch_compile_loss
+    with pytest.raises(ValueError, match="torch_compile_spatial"):
+        config_utils.Config({**enabled, "torch_compile_spatial": "yes"})
+
+
+def test_torch_compile_fullgraph_requires_compile():
+    assert config_utils.Config(dict(CUSTOM_BASE)).torch_compile_fullgraph is False
+    enabled = {
+        **CUSTOM_BASE,
+        "torch_compile": 1,
+        "torch_compile_fullgraph": 1,
+        "torch_compile_unsharded": 1,
+    }
+    assert config_utils.Config(enabled).torch_compile_fullgraph is True
+    with pytest.raises(ValueError, match="torch_compile_fullgraph"):
+        config_utils.Config({**CUSTOM_BASE, "torch_compile_fullgraph": 1})
+    with pytest.raises(ValueError, match="torch_compile_fullgraph"):
+        config_utils.Config({**CUSTOM_BASE, "torch_compile_fullgraph": "yes"})
+
+
+@pytest.mark.parametrize("fullgraph", [False, True])
+def test_torch_compile_requires_a_local_route(fullgraph):
+    with pytest.raises(ValueError, match="requires a local compilation route"):
+        config_utils.Config(
+            {
+                **CUSTOM_BASE,
+                "torch_compile": 1,
+                "torch_compile_fullgraph": fullgraph,
+            }
+        )
+
+
+def test_torch_compile_loss_requires_local_route():
+    assert config_utils.Config(dict(CUSTOM_BASE)).torch_compile_loss is False
+    enabled = {
+        **CUSTOM_BASE,
+        "torch_compile": 1,
+        "torch_compile_unsharded": 1,
+        "torch_compile_fullgraph": 1,
+        "torch_compile_loss": 1,
+    }
+    assert config_utils.Config(enabled).torch_compile_loss is True
+    assert config_utils.Config(
+        {**enabled, "torch_compile_fullgraph": 0}
+    ).torch_compile_loss
+    with pytest.raises(ValueError, match="torch_compile_loss"):
+        config_utils.Config({**enabled, "torch_compile_unsharded": 0})
+    spatial = {
+        **enabled,
+        "torch_compile_unsharded": 0,
+        "torch_compile_spatial": 1,
+        "dc_num_shards": [2, 1, 1],
+    }
+    assert config_utils.Config(spatial).torch_compile_loss
+    with pytest.raises(ValueError, match="torch_compile"):
+        config_utils.Config({**spatial, "torch_compile_fullgraph": 0})
+    with pytest.raises(ValueError, match="torch_compile_loss"):
+        config_utils.Config({**enabled, "torch_compile_loss": "yes"})
+    assert "torch_compile_loss:" in (CONFIG_DIR / "benchmark_default.yml").read_text()
+
+
 def test_async_save_is_real_option():
     """async_save is an accepted, defaulted option (consumed by the trainer)."""
     cfg = config_utils.Config(dict(BASE))
@@ -166,7 +353,7 @@ def test_second_config_merges(tmp_path):
 def test_partial_override_no_keyerror(tmp_path):
     """A two-key override file merges cleanly (no KeyError on missing keys)."""
     base = _write_yaml(tmp_path / "base.yml", BASE)
-    override = _write_yaml(tmp_path / "o.yml", {"seed": 7, "target_dice": 0.5})
+    override = _write_yaml(tmp_path / "o.yml", {"training_seed": 7, "target_dice": 0.5})
     merged = config_utils.load_config_files([base, override])
     config_utils.Config(merged)  # must construct
 
