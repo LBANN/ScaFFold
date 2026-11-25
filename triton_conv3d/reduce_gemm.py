@@ -335,8 +335,12 @@ def _conv3d_bwd_weight_kernel(
             # Unpadded, every tap of an in-range output voxel is in range and
             # all of this compiles out -- but the production case is padded, so
             # this is the body that runs.  See the module docstring.
-            in_d = src_d[:, None] + (kd * DD)[None, :]
-            in_h = src_h[:, None] + (kh * DH)[None, :]
+            if ROW_ALIGNED:
+                in_d = src_d + kd * DD
+                in_h = src_h + kh * DH
+            else:
+                in_d = src_d[:, None] + (kd * DD)[None, :]
+                in_h = src_h[:, None] + (kh * DH)[None, :]
             in_w = src_w[:, None] + (kw * DW)[None, :]
             mask_b = (
                 (in_d >= 0)
