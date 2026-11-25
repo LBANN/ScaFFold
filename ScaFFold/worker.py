@@ -12,12 +12,14 @@
 #
 # SPDX-License-Identifier: (Apache-2.0)
 
+import json
 import logging
 import math
 import os
 import socket
 import time
 from argparse import Namespace
+from functools import partial
 from pathlib import Path
 
 import numpy as np
@@ -135,25 +137,78 @@ def wrap_model_ddp(model, device, ps):
     )
 
 
+def _native_group_norm_decompositions():
+    """Keep native GroupNorm forward and backward without changing global tables."""
+    from torch._inductor.decomposition import select_decomp_table
+
+    decompositions = dict(select_decomp_table())
+    decompositions.pop(torch.ops.aten.native_group_norm.default, None)
+    decompositions.pop(torch.ops.aten.native_group_norm_backward.default, None)
+    return decompositions
+
+
+def _compile_native_group_norm_graph(graph, inputs, *, cache_tag, **kwargs):
+    """Retain the policy's cache identity when backward is compiled lazily."""
+    from torch._inductor.compile_fx import compile_fx_inner
+
+    # A module-level selector is serializable; the copied table's operator keys
+    # can otherwise prevent FX graph caching. It selects the same table as AOT.
+    kwargs["get_decomp_fn"] = _native_group_norm_decompositions
+    with torch.compiler.config.patch(cache_key_tag=cache_tag):
+        return compile_fx_inner(graph, inputs, **kwargs)
+
+
 def _compile_backend(
-    backend=None, *, device_type="cpu", preserve_eager_precision=False
+    backend=None,
+    *,
+    device_type="cpu",
+    preserve_eager_precision=False,
+    preserve_native_group_norm=False,
 ):
-    """Preserve eager rounding when required for compiled training parity."""
+    """Select compiler numerics while leaving caller-provided backends intact."""
     from torch._dynamo.backends.registry import lookup_backend
 
-    if (device_type == "cpu" or preserve_eager_precision) and (
-        backend is None or backend == "inductor"
-    ):
+    if (
+        device_type == "cpu" or preserve_eager_precision or preserve_native_group_norm
+    ) and (backend is None or backend == "inductor"):
         # Preserve low-precision rounding and disable floating-point fusion
         # where native training needs eager parity, including FP32 spatial
         # gradients. Compiler options also cover lazy backward compilation
         # without changing global settings.
-        def eager_precision_inductor(graph, inputs):
-            return torch._inductor.compile(
-                graph, inputs, options={"emulate_precision_casts": True}
+        def native_inductor(graph, inputs):
+            options = (
+                {"emulate_precision_casts": True}
+                if device_type == "cpu" or preserve_eager_precision
+                else {}
             )
+            if not preserve_native_group_norm:
+                return torch._inductor.compile(graph, inputs, options=options)
 
-        return eager_precision_inductor
+            from torch._inductor.codegen.common import init_backend_registration
+            from torch._inductor.compile_fx import compile_fx
+
+            # Match backend registration before copying its decomposition table.
+            # Native GPU GroupNorm kernels preserve eager reduction/backward
+            # numerics in deeper BF16 spatial models. Keep them inside the graph
+            # without changing other compilations or disabling compiler caches.
+            init_backend_registration()
+            # AOT cache lookup precedes decomposition. Separate this policy from
+            # ordinary Inductor entries while preserving the caller's cache tag.
+            cache_tag = json.dumps(
+                [torch.compiler.config.cache_key_tag, "scaffold-native-group-norm-v1"]
+            )
+            with torch.compiler.config.patch(cache_key_tag=cache_tag):
+                return compile_fx(
+                    graph,
+                    inputs,
+                    config_patches=options,
+                    decompositions=_native_group_norm_decompositions(),
+                    inner_compile=partial(
+                        _compile_native_group_norm_graph, cache_tag=cache_tag
+                    ),
+                )
+
+        return native_inductor
     return lookup_backend("inductor" if backend is None else backend)
 
 
@@ -273,11 +328,13 @@ def compile_spatial_forward(
     convolutions = [m for m in model.modules() if isinstance(m, FastConv3d)]
     compiled_forward = None
     compiled_train_forward = None
+    device_type = next(model.parameters()).device.type
     compile_kwargs = {"fullgraph": True, "dynamic": False, "recompile_limit": 64}
     compile_kwargs["backend"] = _compile_backend(
         backend,
-        device_type=next(model.parameters()).device.type,
+        device_type=device_type,
         preserve_eager_precision=True,
+        preserve_native_group_norm=device_type == "cuda",
     )
 
     def prepare_route(input):

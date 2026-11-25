@@ -30,7 +30,10 @@ def run(strategy, device):
     backend_name = os.environ["SCAFFOLD_TEST_COMPILE_BACKEND"]
     bf16 = os.environ["SCAFFOLD_TEST_BF16"] == "1"
     backend = _compile_backend(
-        backend_name, device_type=device.type, preserve_eager_precision=True
+        backend_name,
+        device_type=device.type,
+        preserve_eager_precision=True,
+        preserve_native_group_norm=device.type == "cuda",
     )
     captured = []
     metrics = {}

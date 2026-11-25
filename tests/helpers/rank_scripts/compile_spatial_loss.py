@@ -28,7 +28,10 @@ def run(device):
     strategy = ParallelStrategy(shards, (2, 3, 4), device_type=device.type)
     mesh = strategy.device_mesh[strategy.distconv_dim_names]
     backend = _compile_backend(
-        backend_name, device_type=device.type, preserve_eager_precision=True
+        backend_name,
+        device_type=device.type,
+        preserve_eager_precision=True,
+        preserve_native_group_norm=device.type == "cuda",
     )
     graphs = []
 

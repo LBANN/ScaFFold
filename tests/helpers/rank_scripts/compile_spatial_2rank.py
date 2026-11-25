@@ -51,7 +51,10 @@ def run(strategy, device):
     ):
         raise ValueError("Local shapes must be nonempty positive (batch,D,H,W) tuples")
     backend = _compile_backend(
-        backend_name, device_type=device.type, preserve_eager_precision=True
+        backend_name,
+        device_type=device.type,
+        preserve_eager_precision=True,
+        preserve_native_group_norm=device.type == "cuda",
     )
     captured = []
     captured_phases = []

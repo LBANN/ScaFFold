@@ -75,6 +75,7 @@ def test_native_spatial_train_eval_transitions(backend, bf16, eval_first, tmp_pa
     "backend,bf16",
     [
         pytest.param("aot_eager", False, id="aot_eager_fp32"),
+        pytest.param("aot_eager", True, id="aot_eager_bf16"),
         pytest.param("inductor", False, id="inductor_fp32"),
         pytest.param("inductor", True, id="inductor_bf16"),
     ],
