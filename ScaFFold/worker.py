@@ -144,9 +144,10 @@ def _compile_backend(
     if (device_type == "cpu" or preserve_eager_precision) and (
         backend is None or backend == "inductor"
     ):
-        # CPU halo gradients and fused AMP model/loss graphs need eager-style
-        # low-precision rounding. Pass the option to the compiler so lazy
-        # backward compilation retains it without changing global settings.
+        # Preserve low-precision rounding and disable floating-point fusion
+        # where native training needs eager parity, including FP32 spatial
+        # gradients. Compiler options also cover lazy backward compilation
+        # without changing global settings.
         def eager_precision_inductor(graph, inputs):
             return torch._inductor.compile(
                 graph, inputs, options={"emulate_precision_casts": True}
@@ -276,7 +277,7 @@ def compile_spatial_forward(
     compile_kwargs["backend"] = _compile_backend(
         backend,
         device_type=next(model.parameters()).device.type,
-        preserve_eager_precision=compile_loss and amp_enabled,
+        preserve_eager_precision=True,
     )
 
     def prepare_route(input):

@@ -93,7 +93,7 @@ def test_precision_policy_preserves_other_backends(
 @pytest.mark.parametrize("route", ["fullgraph", "blocks", "spatial"])
 @pytest.mark.parametrize("compile_loss", [False, True])
 @pytest.mark.parametrize("amp_enabled", [False, True])
-def test_native_adapters_request_gpu_precision_only_for_amp_compiled_loss(
+def test_native_adapters_request_gpu_precision_for_spatial_or_amp_compiled_loss(
     monkeypatch, route, compile_loss, amp_enabled
 ):
     model = SimpleNamespace(
@@ -136,7 +136,8 @@ def test_native_adapters_request_gpu_precision_only_for_amp_compiled_loss(
             "inductor",
             {
                 "device_type": "cuda",
-                "preserve_eager_precision": compile_loss and amp_enabled,
+                "preserve_eager_precision": route == "spatial"
+                or (compile_loss and amp_enabled),
             },
         )
     ]

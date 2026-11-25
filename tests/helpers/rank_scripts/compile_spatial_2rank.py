@@ -50,7 +50,9 @@ def run(strategy, device):
         len(shape) != 4 or any(size <= 0 for size in shape) for shape in local_shapes
     ):
         raise ValueError("Local shapes must be nonempty positive (batch,D,H,W) tuples")
-    backend = _compile_backend(backend_name, device_type=device.type)
+    backend = _compile_backend(
+        backend_name, device_type=device.type, preserve_eager_precision=True
+    )
     captured = []
     captured_phases = []
     captured_shapes = []
