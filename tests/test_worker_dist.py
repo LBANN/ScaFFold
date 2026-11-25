@@ -530,8 +530,14 @@ def test_native_compiled_preset_matches_eager_training_and_evaluation(
     captured = []
     original_backend = worker_mod._compile_backend
 
-    def observe_backend(backend=None, *, device_type="cpu"):
-        compile_backend = original_backend(backend, device_type=device_type)
+    def observe_backend(
+        backend=None, *, device_type="cpu", preserve_eager_precision=False
+    ):
+        compile_backend = original_backend(
+            backend,
+            device_type=device_type,
+            preserve_eager_precision=preserve_eager_precision,
+        )
 
         def compile_graph(graph, inputs):
             captured.append(graph)

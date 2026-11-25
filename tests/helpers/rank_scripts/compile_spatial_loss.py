@@ -27,7 +27,9 @@ def run(device):
     shards = tuple(map(int, os.environ.get("SCAFFOLD_TEST_SHARDS", "2,1,1").split(",")))
     strategy = ParallelStrategy(shards, (2, 3, 4), device_type=device.type)
     mesh = strategy.device_mesh[strategy.distconv_dim_names]
-    backend = _compile_backend(backend_name, device_type=device.type)
+    backend = _compile_backend(
+        backend_name, device_type=device.type, preserve_eager_precision=bf16
+    )
     graphs = []
 
     def capture(graph, inputs):

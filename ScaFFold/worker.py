@@ -135,20 +135,24 @@ def wrap_model_ddp(model, device, ps):
     )
 
 
-def _compile_backend(backend=None, *, device_type="cpu"):
-    """Preserve CPU low-precision rounding in Inductor forward and backward."""
+def _compile_backend(
+    backend=None, *, device_type="cpu", preserve_eager_precision=False
+):
+    """Preserve eager rounding when required for compiled training parity."""
     from torch._dynamo.backends.registry import lookup_backend
 
-    if device_type == "cpu" and (backend is None or backend == "inductor"):
-        # BF16 halo-gradient additions must round at the same points as eager
-        # operations. Pass this as a compiler option so lazy backward compilation
-        # retains it too, without changing process-wide Inductor configuration.
-        def cpu_inductor(graph, inputs):
+    if (device_type == "cpu" or preserve_eager_precision) and (
+        backend is None or backend == "inductor"
+    ):
+        # CPU halo gradients and fused AMP model/loss graphs need eager-style
+        # low-precision rounding. Pass the option to the compiler so lazy
+        # backward compilation retains it without changing global settings.
+        def eager_precision_inductor(graph, inputs):
             return torch._inductor.compile(
                 graph, inputs, options={"emulate_precision_casts": True}
             )
 
-        return cpu_inductor
+        return eager_precision_inductor
     return lookup_backend("inductor" if backend is None else backend)
 
 
@@ -201,7 +205,9 @@ def compile_unsharded_forward(
         raise ValueError("compile_loss requires parallel_strategy")
     compile_kwargs = {"fullgraph": True, "dynamic": False, "recompile_limit": 64}
     compile_kwargs["backend"] = _compile_backend(
-        backend, device_type=next(model.parameters()).device.type
+        backend,
+        device_type=next(model.parameters()).device.type,
+        preserve_eager_precision=compile_loss and amp_enabled,
     )
     if fullgraph:
         original_forward = model.forward
@@ -268,7 +274,9 @@ def compile_spatial_forward(
     compiled_train_forward = None
     compile_kwargs = {"fullgraph": True, "dynamic": False, "recompile_limit": 64}
     compile_kwargs["backend"] = _compile_backend(
-        backend, device_type=next(model.parameters()).device.type
+        backend,
+        device_type=next(model.parameters()).device.type,
+        preserve_eager_precision=compile_loss and amp_enabled,
     )
 
     def prepare_route(input):
