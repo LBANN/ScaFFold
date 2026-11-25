@@ -21,10 +21,8 @@ Two launchers are provided:
   the sandboxed review environment) it raises ``pytest.skip`` so ``mpi``-marked
   tests are skipped rather than failing spuriously.
 
-* :func:`torchrun_gloo` -- launch a rank script under ``torchrun`` with the
-  gloo backend.  This works anywhere PyTorch is installed (no MPI launcher and
-  no NCCL/RCCL needed) and is the workhorse for multi-process tests in this
-  environment.
+* :func:`torchrun_gloo` -- launch CPU tests under ``torchrun`` with Gloo.
+  :func:`torchrun_distributed` also accepts NCCL for GPU rank scripts.
 
 Both launchers wrap the user script so that every rank installs
 ``faulthandler.dump_traceback_later``.  When a collective deadlocks, each rank
@@ -36,6 +34,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -52,9 +51,6 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # Interpreter running the tests -- reused for the child ranks so they share the
 # same virtualenv (torch, distconv, mpi4py, ...).
 PYTHON = sys.executable
-
-# torchrun living next to the active interpreter.
-TORCHRUN = str(Path(PYTHON).with_name("torchrun"))
 
 # Launchers we know how to drive, most-preferred first.
 _MPI_LAUNCHERS = ("mpirun", "mpiexec", "srun", "flux")
@@ -99,7 +95,9 @@ def _child_env(env: Optional[Dict[str, str]]) -> Dict[str, str]:
     )
     # gloo cannot always resolve the hostname on HPC login nodes; loopback is
     # correct for single-node multi-process runs.
-    child_env.setdefault("GLOO_SOCKET_IFNAME", "lo")
+    child_env.setdefault(
+        "GLOO_SOCKET_IFNAME", "lo0" if sys.platform == "darwin" else "lo"
+    )
     if env:
         child_env.update(env)
     return child_env
@@ -198,8 +196,8 @@ def torchrun_gloo(
     """Run ``script`` under ``torchrun`` with ``n`` ranks and the gloo backend.
 
     This works in the sandbox (no MPI launcher, no NCCL/RCCL required). The
-    script is expected to call ``torch.distributed.init_process_group`` with no
-    explicit backend (or ``backend="gloo"``); ``torchrun`` supplies ``RANK``,
+    script must call ``torch.distributed.init_process_group(backend="gloo")``;
+    ``torchrun`` supplies ``RANK``,
     ``WORLD_SIZE``, ``LOCAL_RANK``, ``MASTER_ADDR`` and ``MASTER_PORT`` via the
     environment.
 
@@ -209,15 +207,30 @@ def torchrun_gloo(
 
     Returns ``(returncode, stdout, stderr)``; on timeout returncode is ``-1``.
     """
-    if not os.path.exists(TORCHRUN):
-        pytest.skip(f"torchrun not found at {TORCHRUN}")
+    return torchrun_distributed(script, n=n, timeout=timeout, env=env, backend="gloo")
+
+
+def torchrun_distributed(
+    script: str,
+    n: int = 2,
+    timeout: int = 120,
+    env: Optional[Dict[str, str]] = None,
+    *,
+    backend: str = "gloo",
+) -> Tuple[int, str, str]:
+    """Launch a single-node rank script and kill all its ranks on timeout.
+
+    The script initializes its own process group. ``backend`` also sets the
+    launcher environment for code that reads PL_TORCH_DISTRIBUTED_BACKEND.
+    GPU scripts must select their LOCAL_RANK device before initializing NCCL.
+    """
+    if backend not in ("gloo", "nccl"):
+        raise ValueError(f"Unsupported test backend: {backend}")
 
     wrapped = _wrap_script(script, timeout)
     port = _free_port()
     child_env = _child_env(env)
-    # Force gloo everywhere the process group is created without an explicit
-    # backend -- the sandbox has no working NCCL/RCCL.
-    child_env.setdefault("PL_TORCH_DISTRIBUTED_BACKEND", "gloo")
+    child_env["PL_TORCH_DISTRIBUTED_BACKEND"] = backend
 
     # torchrun takes a script path (not ``-c``), so materialize the wrapped
     # source to a temp file for the duration of the run.
@@ -228,7 +241,9 @@ def torchrun_gloo(
             handle.write(wrapped)
 
         argv = [
-            TORCHRUN,
+            PYTHON,
+            "-m",
+            "torch.distributed.run",
             "--nnodes=1",
             f"--nproc_per_node={n}",
             f"--master_port={port}",
@@ -236,27 +251,44 @@ def torchrun_gloo(
             wrapper_path,
         ]
 
-        try:
-            proc = subprocess.run(
-                argv,
-                env=child_env,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                cwd=str(REPO_ROOT),
-            )
-        except subprocess.TimeoutExpired as exc:
-            stdout = exc.stdout or ""
-            stderr = exc.stderr or ""
-            if isinstance(stdout, bytes):
-                stdout = stdout.decode(errors="replace")
-            if isinstance(stderr, bytes):
-                stderr = stderr.decode(errors="replace")
-            return -1, stdout, stderr
+        with subprocess.Popen(
+            argv,
+            env=child_env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            cwd=str(REPO_ROOT),
+            start_new_session=os.name == "posix",
+        ) as proc:
+            try:
+                stdout, stderr = proc.communicate(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                # Killing just torchrun can leave ranks holding GPUs and ports.
+                # Each launch owns a process group, including its child ranks.
+                if os.name == "posix":
+                    try:
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                else:
+                    proc.kill()
+                stdout, stderr = proc.communicate()
+                return -1, stdout, stderr + f"\nRank job timed out after {timeout}s\n"
+            except BaseException:
+                # A parent pytest timeout or interruption must also release GPUs.
+                if os.name == "posix":
+                    try:
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                else:
+                    proc.kill()
+                proc.communicate()
+                raise
     finally:
         try:
             os.unlink(wrapper_path)
         except OSError:
             pass
 
-    return proc.returncode, proc.stdout, proc.stderr
+    return proc.returncode, stdout, stderr

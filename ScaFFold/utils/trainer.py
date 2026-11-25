@@ -46,6 +46,35 @@ from ScaFFold.utils.perf_measure import adiak_value, begin_code_region, end_code
 from ScaFFold.utils.utils import gather_and_print_mem
 
 
+def compute_training_loss_and_dice(
+    local_preds,
+    local_labels,
+    class_weights,
+    spatial_mesh,
+    num_shards,
+    device_type,
+):
+    """Compute the training objective and its foreground Dice score."""
+    with torch.autocast(device_type=device_type, enabled=False):
+        # Reuse one full-precision log-softmax for weighted CE and soft Dice.
+        log_probs = F.log_softmax(local_preds.float(), dim=1)
+        loss_ce = compute_sharded_cross_entropy_loss(
+            local_preds,
+            local_labels,
+            spatial_mesh,
+            num_shards,
+            device_type,
+            class_weights,
+            log_probs=log_probs,
+        )
+        labels_one_hot = labels_to_onehot(local_labels, local_preds.shape[1])
+        dice_scores = compute_sharded_dice(
+            log_probs.exp(), labels_one_hot, spatial_mesh
+        )
+        batch_dice_score = dice_scores[:, 1:].mean()
+        return loss_ce + (1.0 - batch_dice_score), batch_dice_score
+
+
 class _UnpaddedDistributedSampler(torch.utils.data.Sampler):
     """Shard a dataset into contiguous, unpadded, per-rank index ranges.
 
@@ -327,11 +356,6 @@ class BaseTrainer:
             kwargs["dtype"] = self.amp_dtype
         return kwargs
 
-    @staticmethod
-    def _foreground_dice_mean(dice_scores):
-        """Match optimization to the reported validation metric by excluding background."""
-        return dice_scores[:, 1:].mean()
-
     def _current_learning_rate(self):
         if self.optimizer is None or not self.optimizer.param_groups:
             return self.config.starting_learning_rate
@@ -606,62 +630,46 @@ class PyTorchTrainer(BaseTrainer):
                 gather_and_print_mem(self.log, "pre_forward")
             begin_code_region("predict")
             self.log.debug(f"  {log_prefix}running forward pass")
-            masks_pred_dc = self.model(images_dc)
+            if self.config.torch_compile_loss:
+                # DDP still owns the forward and gradient synchronization.
+                # Its module unwraps DCTensors before the compiled local
+                # U-Net-plus-loss graph begins.
+                loss, batch_dice_score = self.model(
+                    images_dc, true_masks_dc, self.ce_class_weights
+                )
+            else:
+                masks_pred_dc = self.model(images_dc)
             end_code_region("predict")
             if gather_mem_stats:
                 gather_and_print_mem(self.log, "post_forward")
             self.log.debug(f"  {log_prefix}forward pass complete")
 
-            # Extract the underlying PyTorch local tensors
-            local_preds = masks_pred_dc
-            local_labels_5d = true_masks_dc
-
-            # Remove the dummy channel dimension so CE Loss is happy [B, D, H, W]
-            local_labels = local_labels_5d.squeeze(1)
-            if self.world_rank == 0:
-                self.log.debug(f"  {log_prefix}Local Preds Shape: {local_preds.shape}")
-                self.log.debug(
-                    f"  {log_prefix}Local Labels Shape: {local_labels.shape}"
-                )
-
-            begin_code_region("calculate_loss")
-            if self.device.type == "cuda":
-                current_mem = torch.cuda.memory_allocated() / (1024**3)
-                self.log.debug(
-                    f"  {log_prefix}Calculating sharded loss. Mem: {current_mem:.2f} GB."
-                )
-
-            # Calculate CE and Dice loss in single precision for numerical stability.
-            with torch.autocast(**self._autocast_kwargs(enabled=False)):
-                # Upcast and log-softmax the logits once, then share the result:
-                # CE reuses it via NLL and the dice term recovers probabilities
-                # with exp(), avoiding a second full-volume upcast and a
-                # duplicate softmax over the same logits every step.
-                log_probs = F.log_softmax(local_preds.float(), dim=1)
-                loss_ce = compute_sharded_cross_entropy_loss(
+            if not self.config.torch_compile_loss:
+                local_preds = masks_pred_dc
+                local_labels = true_masks_dc.squeeze(1)
+                if self.world_rank == 0:
+                    self.log.debug(
+                        f"  {log_prefix}Local Preds Shape: {local_preds.shape}"
+                    )
+                    self.log.debug(
+                        f"  {log_prefix}Local Labels Shape: {local_labels.shape}"
+                    )
+                begin_code_region("calculate_loss")
+                if self.device.type == "cuda":
+                    current_mem = torch.cuda.memory_allocated() / (1024**3)
+                    self.log.debug(
+                        f"  {log_prefix}Calculating sharded loss. "
+                        f"Mem: {current_mem:.2f} GB."
+                    )
+                loss, batch_dice_score = compute_training_loss_and_dice(
                     local_preds,
                     local_labels,
+                    self.ce_class_weights,
                     self.spatial_mesh,
                     self.config.dc_num_shards,
                     self.amp_device_type,
-                    self.ce_class_weights,
-                    log_probs=log_probs,
                 )
-
-                local_preds_softmax = log_probs.exp()
-                local_labels_one_hot = labels_to_onehot(
-                    local_labels, self.config.n_categories + 1
-                )
-                dice_scores = compute_sharded_dice(
-                    local_preds_softmax,
-                    local_labels_one_hot,
-                    self.spatial_mesh,
-                )
-                batch_dice_score = self._foreground_dice_mean(dice_scores)
-
-                # Sum global CE Loss and Dice loss
-                loss = loss_ce + (1.0 - batch_dice_score)
-            end_code_region("calculate_loss")
+                end_code_region("calculate_loss")
 
         self.log.debug(
             f"  {log_prefix}loss calculation complete. Proceeding to backward pass"
@@ -698,9 +706,9 @@ class PyTorchTrainer(BaseTrainer):
         detached_loss = loss.detach()
 
         # Free memory aggressively
-        del images_dc, true_masks_dc, masks_pred_dc
-        del local_preds, local_labels, log_probs, local_preds_softmax
-        del local_labels_one_hot, loss_ce, loss
+        del images_dc, true_masks_dc, loss
+        if not self.config.torch_compile_loss:
+            del masks_pred_dc, local_preds, local_labels
 
         if log_peak_mem and self.world_rank == 0 and self.device.type == "cuda":
             peak_alloc = torch.cuda.max_memory_allocated() / (1024**3)

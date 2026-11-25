@@ -7,4 +7,4 @@ wandb>=0.19.6
 PyYAML>=6.0.2
 psutil>=5.9.0
 mpi4py==4.1.1 --no-binary mpi4py
-distconv @ git+https://github.com/LBANN/DistConv.git@084b20a
+distconv @ git+https://github.com/LBANN/DistConv.git@671e6b302209724fe203227b1e3a644214d5a343

@@ -61,6 +61,67 @@ The model is trained from a random initialization until convergence, which is de
 
 ScaFFold benchmark training always uses PyTorch distributed execution with DistConv spatial parallelism. For a singleton run, launch one distributed rank rather than disabling distributed execution.
 
+### Select model execution
+
+Set `execution_mode` in the benchmark config to choose the U-Net's kernels
+and whether to compile the model:
+
+```yaml
+execution_mode: native-compiled
+```
+
+You can also pass `--execution-mode native-compiled` to `scaffold benchmark`.
+An explicit command-line choice overrides the config file.
+
+| `execution_mode` | Kernel selection | U-Net execution |
+| --- | --- | --- |
+| `triton-eager` (default) | Prefer ScaFFold's custom Triton kernels | Eager |
+| `native-eager` | Native PyTorch operators | Eager |
+| `native-compiled` | Native PyTorch operators | Compiled |
+| `triton-compiled` | Prefer ScaFFold's custom Triton kernels | Compiled; **experimental** |
+| `custom` | Environment-controlled | Individual `torch_compile*` settings |
+
+Triton modes select custom kernels where supported and fall back to PyTorch
+otherwise. The `triton-eager` default retains a separately compiled GroupNorm
+fallback. Native modes disable ScaFFold's custom Triton kernels and separate
+GroupNorm compilation; PyTorch may still generate its own Triton kernels for
+compiled GPU execution.
+
+The four presets determine all `torch_compile*` settings. Compiled presets
+compile the U-Net, keep the loss eager, and automatically select unsharded or
+spatially sharded execution from `dc_num_shards`.
+
+Spatial compilation currently requires native convolutions. Use
+`native-compiled` for spatially sharded models; spatial compilation with
+ScaFFold's custom Triton convolutions remains unsupported.
+
+### Customize execution
+
+Use `execution_mode: custom` to control compilation options individually.
+For example, this configuration compiles an unsharded U-Net and its loss,
+with activation checkpointing enabled:
+
+```yaml
+execution_mode: custom
+dc_num_shards: [1, 1, 1]
+torch_compile: 1
+torch_compile_unsharded: 1
+torch_compile_fullgraph: 1
+torch_compile_loss: 1
+activation_checkpointing: 1
+```
+
+Triton modes and `custom` honor `SCAFFOLD_CONV_TRITON`,
+`SCAFFOLD_GROUPNORM_TRITON`, and `SCAFFOLD_GROUPNORM_COMPILE`. Set all three
+to `0` for native kernels in `custom` mode. Leaving the Triton switches
+unset preserves automatic hardware selection; setting them to `1` explicitly
+opts in on otherwise untuned hardware. Native presets disable these paths
+regardless of the environment settings.
+
+See the [default configuration](ScaFFold/configs/benchmark_default.yml) for
+individual options and the [compilation validation guide](tests/COMPILE_VALIDATION.md)
+for validation instructions.
+
 ### Dataset cache and sharded datagen
 
 `benchmark` creates or reuses datasets under `dataset_dir`. New datasets use the current physical-shard dataset format, which stores one volume and mask file per logical sample per DistConv shard. The physical layout is controlled by `dc_num_shards` and `dc_shard_dims`; for example, `dc_num_shards: [1, 1, 2]` writes two physical shards per logical volume, with filenames such as `120_shard000000.npy` and `120_shard000001.npy`. Datasets are generated with the same sharding configuration used for model training.

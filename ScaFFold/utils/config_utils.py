@@ -18,6 +18,21 @@ from pathlib import Path
 
 import yaml
 
+EXECUTION_MODES = (
+    "native-eager",
+    "triton-eager",
+    "native-compiled",
+    "triton-compiled",
+    "custom",
+)
+COMPILE_FLAGS = (
+    "torch_compile",
+    "torch_compile_fullgraph",
+    "torch_compile_unsharded",
+    "torch_compile_spatial",
+    "torch_compile_loss",
+)
+
 
 def require_positive_int(name: str, value: int) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or value < 1:
@@ -124,6 +139,12 @@ class Config:
             "T_mult",
             "variance_threshold",
             "torch_amp",
+            "execution_mode",
+            "torch_compile",
+            "torch_compile_fullgraph",
+            "torch_compile_unsharded",
+            "torch_compile_spatial",
+            "torch_compile_loss",
             "loss_freq",
             "checkpoint_dir",
             "normalize",
@@ -190,6 +211,12 @@ class Config:
             "group_norm_groups",
             "warmup_batches",
             "activation_checkpointing",
+            "execution_mode",
+            "torch_compile",
+            "torch_compile_fullgraph",
+            "torch_compile_unsharded",
+            "torch_compile_spatial",
+            "torch_compile_loss",
             "ce_weight_sample_fraction",
             "target_dice",
             "checkpoint_interval",
@@ -277,6 +304,16 @@ class Config:
         self.T_mult = config_dict["T_mult"]
         self.variance_threshold = config_dict["variance_threshold"]
         self.torch_amp = bool(config_dict["torch_amp"])
+        self.execution_mode = config_dict.get("execution_mode", "triton-eager")
+        if self.execution_mode not in EXECUTION_MODES:
+            raise ValueError(
+                f"execution_mode must be one of {', '.join(EXECUTION_MODES)}; "
+                f"got {self.execution_mode!r}"
+            )
+        # Validate even inactive options so a typo cannot remain hidden until
+        # the user switches to custom mode. Presets resolve their values below.
+        for name in COMPILE_FLAGS:
+            setattr(self, name, require_flag(name, config_dict.get(name, 0)))
         self.loss_freq = config_dict["loss_freq"]
         self.checkpoint_dir = config_dict["checkpoint_dir"]
         self.normalize = config_dict["normalize"]
@@ -304,6 +341,63 @@ class Config:
                 f"Configuration Mismatch: num_shards {self.dc_num_shards} "
                 f"must have same length as shard_dim {self.dc_shard_dims}"
             )
+        self._resolve_execution_mode()
+        if self.torch_compile_fullgraph and not self.torch_compile:
+            raise ValueError("torch_compile_fullgraph requires torch_compile: 1")
+        if self.torch_compile_spatial:
+            if not self.torch_compile or not self.torch_compile_fullgraph:
+                raise ValueError(
+                    "torch_compile_spatial requires torch_compile: 1 and "
+                    "torch_compile_fullgraph: 1"
+                )
+            if self.torch_compile_unsharded:
+                raise ValueError(
+                    "torch_compile_spatial and torch_compile_unsharded are exclusive"
+                )
+            if not any(shards > 1 for shards in self.dc_num_shards):
+                raise ValueError(
+                    "torch_compile_spatial requires a spatial shard count above one"
+                )
+        if self.torch_compile_loss and not (
+            self.torch_compile
+            and (self.torch_compile_unsharded or self.torch_compile_spatial)
+        ):
+            raise ValueError(
+                "torch_compile_loss requires torch_compile: 1 and "
+                "torch_compile_unsharded: 1 or torch_compile_spatial: 1"
+            )
+        if self.torch_compile and not (
+            self.torch_compile_unsharded or self.torch_compile_spatial
+        ):
+            raise ValueError(
+                "torch_compile requires a local compilation route: "
+                "torch_compile_unsharded: 1 or torch_compile_spatial: 1"
+            )
+        if self.torch_compile_unsharded:
+            if not self.torch_compile:
+                raise ValueError("torch_compile_unsharded requires torch_compile: 1")
+            if any(shards != 1 for shards in self.dc_num_shards):
+                raise ValueError(
+                    "torch_compile_unsharded requires dc_num_shards to be all ones"
+                )
+
+    def _resolve_execution_mode(self):
+        """Select a complete model compilation policy from the shard layout.
+
+        Presets own all compilation flags; only custom mode uses the supplied
+        values. Recompute derived flags when reloading a saved config so mode
+        or shard overrides cannot leave a stale compilation route behind.
+        Kernel selection is applied by the worker before constructing the model.
+        """
+        if self.execution_mode == "custom":
+            return
+        for name in COMPILE_FLAGS:
+            setattr(self, name, False)
+        if self.execution_mode in ("native-compiled", "triton-compiled"):
+            self.torch_compile = True
+            self.torch_compile_fullgraph = True
+            self.torch_compile_spatial = any(n > 1 for n in self.dc_num_shards)
+            self.torch_compile_unsharded = not self.torch_compile_spatial
 
 
 class RunConfig(Config):

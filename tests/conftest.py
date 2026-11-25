@@ -99,7 +99,8 @@ _BASE_CONFIG = {
     "n_instances_used_per_fractal": 6,
     "problem_scale": 4,
     "unet_bottleneck_dim": 3,
-    "seed": 42,
+    "dataset_seed": 523,
+    "training_seed": 42,
     "local_batch_size": 1,
     "dataloader_num_workers": 0,
     "optimizer": "ADAM",
@@ -425,6 +426,89 @@ def gloo_group_1rank():
     yield
     if created and dist.is_initialized():
         dist.destroy_process_group()
+
+
+# ---------------------------------------------------------------------------
+# compilation validation devices and process groups
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def compile_device(request, monkeypatch):
+    """Select the compilation-test device without changing the rest of the suite."""
+    import torch
+
+    from tests.helpers.compile_runtime import (
+        configure_compile_device,
+        report_compile_runtime,
+        require_compile_device,
+    )
+
+    # Pytest is the single driver, not one of a set of externally launched ranks.
+    if int(os.environ.get("WORLD_SIZE", "1")) != 1:
+        raise RuntimeError(
+            "Run one pytest process; spatial tests launch their own ranks"
+        )
+    parameters = getattr(getattr(request.node, "callspec", None), "params", {})
+    require_compile_device(
+        bf16=parameters.get("precision") == "bf16" or parameters.get("bf16", False)
+    )
+    monkeypatch.setenv("SCAFFOLD_CONV_TRITON", "0")
+    monkeypatch.setenv("SCAFFOLD_GROUPNORM_TRITON", "0")
+    monkeypatch.setenv("SCAFFOLD_GROUPNORM_COMPILE", "0")
+    saved_precision = torch.backends.cuda.matmul.fp32_precision
+    saved_conv_precision = torch.backends.cudnn.conv.fp32_precision
+    saved_benchmark = torch.backends.cudnn.benchmark
+    saved_deterministic = torch.backends.cudnn.deterministic
+    original_device = torch.cuda.current_device() if torch.cuda.is_available() else None
+    device = configure_compile_device()
+    try:
+        with torch.random.fork_rng(
+            devices=[device.index] if device.type == "cuda" else []
+        ):
+            torch.random.default_generator.manual_seed(1234)
+            if device.type == "cuda":
+                torch.cuda.manual_seed(1234)
+            report_compile_runtime(device)
+            yield device
+    finally:
+        if device.type == "cuda":
+            torch.backends.cuda.matmul.fp32_precision = saved_precision
+            torch.backends.cudnn.conv.fp32_precision = saved_conv_precision
+            torch.backends.cudnn.benchmark = saved_benchmark
+            torch.backends.cudnn.deterministic = saved_deterministic
+            torch.cuda.set_device(original_device)
+
+
+@pytest.fixture
+def compile_group_1rank(compile_device, tmp_path):
+    """Use Gloo on CPU and NCCL/RCCL on GPU for singleton compilation tests."""
+    from datetime import timedelta
+
+    import torch.distributed as dist
+
+    from tests.helpers.compile_runtime import compile_timeout
+
+    backend = "nccl" if compile_device.type == "cuda" else "gloo"
+    if dist.is_initialized():
+        if dist.get_world_size() != 1 or dist.get_backend() != backend:
+            raise RuntimeError(f"Compilation tests require a singleton {backend} group")
+        yield
+        return
+    kwargs = {"device_id": compile_device} if compile_device.type == "cuda" else {}
+    dist.init_process_group(
+        backend,
+        init_method=(tmp_path / "compile-rendezvous").as_uri(),
+        rank=0,
+        world_size=1,
+        timeout=timedelta(seconds=compile_timeout(180)),
+        **kwargs,
+    )
+    try:
+        yield
+    finally:
+        if dist.is_initialized():
+            dist.destroy_process_group()
 
 
 # ---------------------------------------------------------------------------
